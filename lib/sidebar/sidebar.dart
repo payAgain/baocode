@@ -310,7 +310,7 @@ class Sidebar extends StatefulWidget {
 class _SidebarState extends State<Sidebar>
     with IdeKeyboardList<Sidebar>
     implements ChatDragList {
-  static const _rowHeight = IdeListColors.rowHeight;
+  static const _rowHeight = 32.0;
 
   /// The agents a project shows until asked for more (pinned ones apart).
   static const _recent = 5;
@@ -1139,7 +1139,13 @@ class _SidebarState extends State<Sidebar>
           if (widget.onSearch != null ||
               widget.onCustomize != null ||
               widget.onStash != null)
-            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              child: SizedBox(
+                height: 1,
+                child: ColoredBox(color: Islands.border),
+              ),
+            ),
           _buildGroupingBar(),
           Expanded(child: _buildList()),
           _buildFooter(),
@@ -1664,7 +1670,14 @@ class _SidebarState extends State<Sidebar>
             ];
       final rows = <_ListRow>[];
       for (final group in groups) {
-        rows.add(_ListRow(_ListRowKind.header, group, ValueKey(group.id), 32));
+        rows.add(
+          _ListRow(
+            _ListRowKind.header,
+            group,
+            ValueKey(group.id),
+            _GroupHeader.extent,
+          ),
+        );
         if (group.pinned && group.threads.isEmpty) {
           rows.add(
             _ListRow(_ListRowKind.pinZone, group, const ValueKey(#pinZone), 30),
@@ -2642,7 +2655,7 @@ class _NewAgentButton extends StatelessWidget {
           onTap: onTap,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 120),
-            height: 30,
+            height: 36,
             padding: const EdgeInsets.symmetric(horizontal: 8),
             decoration: BoxDecoration(
               color: hovered ? hover : card,
@@ -2707,7 +2720,7 @@ class _NavRow extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 6),
           child: IdeListRow(
-            height: IdeListColors.rowHeight,
+            height: 34,
             selected: selected,
             keepSelectionActive: true,
             onTap: onTap,
@@ -2765,6 +2778,9 @@ class _NavRow extends StatelessWidget {
 }
 
 class _GroupHeader extends StatelessWidget {
+  static const double extent = 40;
+  static const double topGap = 8;
+
   const _GroupHeader({
     required this.group,
     required this.collapsed,
@@ -2875,8 +2891,8 @@ class _GroupHeader extends StatelessWidget {
               ? null
               : (details) => menu.open(details.globalPosition),
           child: Container(
-            height: 26,
-            margin: const EdgeInsets.only(top: 6),
+            height: extent - topGap,
+            margin: const EdgeInsets.only(top: topGap),
             padding: EdgeInsets.only(left: light ? 6 : 4, right: 2),
             decoration: BoxDecoration(
               color: (active || dragged || located) && project != null
@@ -3033,8 +3049,8 @@ class _GroupHeader extends StatelessWidget {
       overflow: TextOverflow.ellipsis,
       style: TextStyle(
         color: project != null ? AppColors.text : AppColors.textMuted,
-        fontSize: project != null ? 12.5 : 11.5,
-        fontWeight: FontWeight.w500,
+        fontSize: project != null ? 13 : 11.5,
+        fontWeight: project != null ? FontWeight.w600 : FontWeight.w500,
       ),
     );
     if (project == null) return label;
@@ -3690,7 +3706,7 @@ class _ThreadRow extends StatelessWidget {
               Padding(
                 // An aside under the one it was asked beside.
                 padding: EdgeInsets.only(
-                  left: onDetach == null ? 8 : 8 + _asideIndent,
+                  left: onDetach == null ? 16 : 16 + _asideIndent,
                   right: 4,
                 ),
                 // Too narrow, what is beside the title gives way (its hover
