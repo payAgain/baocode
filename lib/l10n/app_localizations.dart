@@ -4124,6 +4124,12 @@ abstract class AppLocalizations {
   /// **'Conversation'**
   String get chatConversation;
 
+  /// Subtitle for the primary bot's desktop direct conversation.
+  ///
+  /// In en, this message translates to:
+  /// **'Private chat'**
+  String get desktopBotPrivateChat;
+
   /// No description provided for @chatBackEsc.
   ///
   /// In en, this message translates to:

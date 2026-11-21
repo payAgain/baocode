@@ -201,6 +201,8 @@ class Sidebar extends StatefulWidget {
     this.editSshHost,
     this.onOpenSettings,
     this.onSearch,
+    this.onBot,
+    this.showingBot = false,
     this.onCustomize,
     this.customizing = false,
     this.onStash,
@@ -284,6 +286,9 @@ class Sidebar extends StatefulWidget {
   /// Opens the search palette (agents, what was said in them, files,
   /// actions); no Search row without it.
   final VoidCallback? onSearch;
+
+  final VoidCallback? onBot;
+  final bool showingBot;
 
   /// Shows Claude Code's customizations in place of the chat; no
   /// Customize row without it.
@@ -462,13 +467,17 @@ class _SidebarState extends State<Sidebar>
     }
     // Customize or the Stash shown: its row is the one picked, not the
     // conversation picked before it.
-    if (_onPage && !(oldWidget.customizing || oldWidget.stashing)) {
+    if (_onPage &&
+        !(oldWidget.customizing ||
+            oldWidget.stashing ||
+            oldWidget.showingBot)) {
       _listSelection.select(null);
     }
   }
 
   /// Customize or the Stash is shown in place of the chat.
-  bool get _onPage => widget.customizing || widget.stashing;
+  bool get _onPage =>
+      widget.customizing || widget.stashing || widget.showingBot;
 
   @override
   void dispose() {
@@ -1116,6 +1125,13 @@ class _SidebarState extends State<Sidebar>
                 ChatKeys.chatLayout,
               ),
               onTap: search,
+            ),
+          if (widget.onBot case final openBot?)
+            _NavRow(
+              icon: Codicons.hubot,
+              label: 'Bot',
+              selected: widget.showingBot,
+              onTap: openBot,
             ),
           if (widget.onCustomize case final customize?)
             _NavRow(

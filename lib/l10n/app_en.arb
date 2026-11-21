@@ -1279,6 +1279,8 @@
   "workspaceUnpinWindow": "Unpin window",
   "workspacePinWindow": "Pin window on top",
   "chatConversation": "Conversation",
+  "desktopBotPrivateChat": "Private chat",
+  "@desktopBotPrivateChat": {"description": "Subtitle for the primary bot's desktop direct conversation."},
   "@chatConversation": {
     "description": "Breadcrumb: the main conversation, above a subagent's."
   },
