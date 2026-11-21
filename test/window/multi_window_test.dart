@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:baocode/chat/chat_screen.dart';
+import 'package:baocode/chat/composer/file_drop.dart';
 import 'package:baocode/ide/ide_chat_title.dart';
 import 'package:baocode/ide/ide_welcome.dart';
 import 'package:baocode/ide/ide_workbench.dart';
@@ -14,6 +15,7 @@ import 'package:baocode/window/app_windows.dart';
 import 'package:baocode/window/window_settings.dart';
 import 'package:baocode/workbench.dart';
 import 'package:baocode/workspace/open_in_editor_button.dart';
+import 'package:baocode/workspace/preference_store.dart';
 import 'package:baocode/workspace/workspace.dart';
 
 import 'fake_window_host.dart';
@@ -23,6 +25,7 @@ import 'fake_window_host.dart';
 Future<(AppWindows, FakeWindowHost, Workspace)> _pumpApp(
   WidgetTester tester, {
   WindowSettings Function()? settings,
+  Workspace? withWorkspace,
 }) async {
   tester.view.physicalSize = const Size(1400, 900);
   tester.view.devicePixelRatio = 1;
@@ -41,7 +44,7 @@ Future<(AppWindows, FakeWindowHost, Workspace)> _pumpApp(
     );
   }
   final host = FakeWindowHost(tester.view);
-  final workspace = Workspace.mock();
+  final workspace = withWorkspace ?? Workspace.mock();
   final windows = AppWindows(
     host: host,
     workspace: workspace,
@@ -83,10 +86,151 @@ Finder _inView(int viewId, Finder finder) => find.descendant(
 
 /// The desktop semantics check (test/semantics_tree.dart) keeps one tree
 /// for all views; the windows' own (their accessibility) are left out.
-void _testWindows(String description, WidgetTesterCallback callback) =>
-    testWidgets(description, callback, semanticsEnabled: false);
+void _testWindows(
+  String description,
+  WidgetTesterCallback callback, {
+  TestVariant<Object?> variant = const DefaultTestVariant(),
+}) => testWidgets(
+  description,
+  callback,
+  semanticsEnabled: false,
+  variant: variant,
+);
+
+final _desktop = TargetPlatformVariant({
+  TargetPlatform.macOS,
+  TargetPlatform.windows,
+});
+
+Future<Object?> _dropAt(
+  Offset at,
+  List<Map<String, Object>> files, {
+  String method = 'drop',
+}) => FileDrops.handle(
+  MethodCall(method, {'x': at.dx, 'y': at.dy, 'files': files}),
+);
+
+Finder _sidebarLabel(String label) =>
+    find.descendant(of: find.byType(Sidebar), matching: find.text(label));
 
 void main() {
+  _testWindows('a folder dropped in the empty sidebar project list is imported '
+      'at its original path', (tester) async {
+    final preferences = MemoryPreferenceStore();
+    final (windows, host, workspace) = await _pumpApp(
+      tester,
+      withWorkspace: Workspace(preferences: preferences),
+    );
+    const folder = '/work/sidebar-drop';
+    final emptyList = _sidebarLabel('No agents yet');
+    expect(
+      await _dropAt(tester.getCenter(emptyList), [
+        {'path': folder, 'directory': true},
+      ]),
+      isTrue,
+    );
+    await tester.pumpAndSettle();
+    expect(workspace.sidebarProjectsHere.map((project) => project.path), [
+      folder,
+    ]);
+    final stored = await preferences.read();
+    expect(stored['sidebar'], containsPair('folders', [folder]));
+    expect(workspace.threads, isEmpty);
+    expect(host.created, isEmpty);
+    expect(windows.ideWindows, isEmpty);
+  }, variant: _desktop);
+
+  _testWindows('a mixed project-list drop routes ordinary files to the IDE', (
+    tester,
+  ) async {
+    final (windows, _, workspace) = await _pumpApp(tester);
+    final window = await _open(tester, windows, '/work');
+    final delegate = FakeDelegate();
+    window.attach(delegate);
+    const folder = '/work/sidebar-drop';
+    const file = '/work/readme.txt';
+    await _dropAt(tester.getCenter(_sidebarLabel('baocode')), [
+      {'path': folder, 'directory': true},
+      {'path': file, 'directory': false},
+    ]);
+    await tester.pumpAndSettle();
+    expect(
+      workspace.sidebarProjectsHere.map((project) => project.path),
+      contains(folder),
+    );
+    expect(delegate.opened.single.map((target) => target.path), [file]);
+    expect(windows.ideWindows, [window]);
+  }, variant: _desktop);
+
+  _testWindows('a file-only drop on Open Project goes to the IDE', (
+    tester,
+  ) async {
+    final (windows, _, workspace) = await _pumpApp(tester);
+    final window = await _open(tester, windows, '/work');
+    final delegate = FakeDelegate();
+    window.attach(delegate);
+    const file = '/work/readme.txt';
+    await _dropAt(tester.getCenter(_sidebarLabel('Open Project')), [
+      {'path': file, 'directory': false},
+    ]);
+    await tester.pumpAndSettle();
+    expect(delegate.opened.single.map((target) => target.path), [file]);
+    expect(
+      workspace.projects.map((project) => project.path),
+      isNot(contains(file)),
+    );
+  }, variant: _desktop);
+
+  _testWindows('the Open Project row imports multiple distinct folders once', (
+    tester,
+  ) async {
+    final (windows, host, workspace) = await _pumpApp(tester);
+    final current = workspace.current;
+    final threads = workspace.threads.toList();
+    final existing = workspace.sidebarProjectsHere
+        .map((project) => project.path)
+        .toList();
+    final at = tester.getCenter(_sidebarLabel('Open Project'));
+    const first = '/work/sidebar-first';
+    const second = '/work/sidebar-second';
+    await _dropAt(at, [
+      {'path': first, 'directory': true},
+      {'path': second, 'directory': true},
+      {'path': first, 'directory': true},
+    ]);
+    await tester.pump();
+    await _dropAt(at, [
+      {'path': '$first/', 'directory': true},
+    ]);
+    await tester.pumpAndSettle();
+    expect(
+      workspace.sidebarProjectsHere.map((project) => project.path),
+      unorderedEquals([...existing, first, second]),
+    );
+    expect(workspace.current, same(current));
+    expect(workspace.threads, threads);
+    expect(host.created, isEmpty);
+    expect(windows.ideWindows, isEmpty);
+  }, variant: _desktop);
+
+  _testWindows('a folder released over Search follows the window drop after '
+      'hovering over a project', (tester) async {
+    final (windows, _, workspace) = await _pumpApp(tester);
+    const folder = '/work/outside-project-list';
+    const files = [
+      {'path': folder, 'directory': true},
+    ];
+    final atProject = tester.getCenter(_sidebarLabel('baocode'));
+    expect(await _dropAt(atProject, files, method: 'dragUpdate'), isTrue);
+    await _dropAt(tester.getCenter(_sidebarLabel('Search')), files);
+    await tester.pumpAndSettle();
+    expect(windows.ideWindows.single.folder, folder);
+    expect(
+      workspace.sidebarProjectsHere.map((project) => project.path),
+      isNot(contains(folder)),
+    );
+  }, variant: _desktop);
+
   _testWindows('an IDE window is a view of its own: its workbench the IDE, '
       'the chat\'s window without it', (tester) async {
     final (windows, host, workspace) = await _pumpApp(tester);

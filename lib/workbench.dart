@@ -3348,6 +3348,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
         onOpened?.call();
       },
       onOpenFolder: WindowControls.canPickDirectory ? _openFolder : null,
+      onDropFolders: WindowControls.isDesktop ? _workspace.importFolders : null,
       onAddSshHost: WindowControls.canPickDirectory
           ? () => _openRemoteProject(switchTo: true)
           : null,
