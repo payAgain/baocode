@@ -12,6 +12,8 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import 'base/mouse_navigation.dart';
+import 'bots/desktop_bot_page.dart';
+import 'workspace/session_tools.dart';
 import 'browser/browser_bridge.dart';
 import 'browser/browser_tools.dart';
 import 'browser/browser_welcome.dart';
@@ -1385,6 +1387,16 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   /// Claude Code's customizations show in place of the chat.
   bool _customizing = false;
+  bool _showingBot = false;
+
+  void _openBotPage() {
+    _closeDrawer();
+    setState(() {
+      _showingBot = true;
+      _customizing = _stashing = false;
+    });
+  }
+
   CustomizationKind _customizeKind = CustomizationKind.skills;
   final GlobalKey<CustomizeViewState> _customizeKey = GlobalKey();
 
@@ -1396,6 +1408,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     if (kind != null) _customizeKey.currentState?.show(kind);
     setState(() {
       _customizing = true;
+      _showingBot = false;
       _stashing = false;
       if (kind != null) _customizeKind = kind;
     });
@@ -1403,8 +1416,8 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   /// The conversations show again, in place of Customize or the stashes.
   void _closeCustomize() {
-    if (_customizing || _stashing) {
-      setState(() => _customizing = _stashing = false);
+    if (_replacingChat) {
+      setState(() => _customizing = _stashing = _showingBot = false);
     }
   }
 
@@ -1419,7 +1432,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   final GlobalKey<StashViewState> _stashKey = GlobalKey();
 
   /// Something shows in place of the conversations.
-  bool get _replacingChat => _customizing || _stashing;
+  bool get _replacingChat => _customizing || _stashing || _showingBot;
 
   /// Shows the stashes, [id]'s if given.
   void _showStash([int? id]) {
@@ -1428,6 +1441,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     if (id != null) _stashKey.currentState?.show(id);
     setState(() {
       _stashing = true;
+      _showingBot = false;
       _customizing = false;
       _stashShown = id;
     });
@@ -3361,6 +3375,10 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
       updates: widget.settings?.updates?.service,
       onUpdate: _restartToUpdate,
       onSearch: () => unawaited(_openPalette()),
+      onBot: _main && widget.settings?.link?.bots != null
+          ? (_showingBot ? _closeCustomize : _openBotPage)
+          : null,
+      showingBot: _showingBot,
       setup: switch (_tips) {
         final tips? when _main => FeatureTipsEntry(controller: tips),
         _ => null,
@@ -4722,6 +4740,22 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
       };
 
   Widget _buildGrid({required bool showToggle}) {
+    if (widget.settings?.link?.bots case final bots? when _showingBot) {
+      return _footless(
+        DesktopBotPage(
+          bots: bots,
+          onBack: _closeCustomize,
+          onOpenChat: (id) {
+            final thread = SessionTools.threadOf(_workspace, id);
+            if (thread != null &&
+                !thread.archived &&
+                _workspace.listsInSidebar(thread)) {
+              _openAgent(thread);
+            }
+          },
+        ),
+      );
+    }
     if (_stashing) {
       if (StashController.current case final stash?) {
         return _footless(_buildStash(stash, showToggle: showToggle));

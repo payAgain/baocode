@@ -2242,6 +2242,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get chatConversation => '对话';
 
   @override
+  String get desktopBotPrivateChat => '私聊';
+
+  @override
   String get chatBackEsc => '返回 (Esc)';
 
   @override

@@ -2326,6 +2326,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get chatConversation => 'Conversation';
 
   @override
+  String get desktopBotPrivateChat => 'Private chat';
+
+  @override
   String get chatBackEsc => 'Back (Esc)';
 
   @override

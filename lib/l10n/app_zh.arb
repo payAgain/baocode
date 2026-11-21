@@ -671,6 +671,7 @@
   "workspaceUnpinWindow": "取消窗口置顶",
   "workspacePinWindow": "将窗口置顶",
   "chatConversation": "对话",
+  "desktopBotPrivateChat": "私聊",
   "chatBackEsc": "返回 (Esc)",
   "chatBack": "返回",
   "statusRunningInBackground": "在后台运行",
