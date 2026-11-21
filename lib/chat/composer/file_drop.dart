@@ -23,28 +23,40 @@ abstract interface class FileDropDelegate {
 /// goes to the topmost region under the pointer (see [FileDrops]). What
 /// covers it (a menu, a dialog) takes the drag from it.
 class FileDropRegion extends SingleChildRenderObjectWidget {
-  const FileDropRegion({super.key, required this.delegate, super.child});
+  const FileDropRegion({
+    super.key,
+    required this.delegate,
+    this.acceptsFile,
+    super.child,
+  });
 
   final FileDropDelegate delegate;
 
+  /// A filter for a target that requires a hit at release and leaves
+  /// unmatched files to the window's unhandled drop.
+  final bool Function(ComposerFile file)? acceptsFile;
+
   @override
   RenderFileDropRegion createRenderObject(BuildContext context) =>
-      RenderFileDropRegion(delegate);
+      RenderFileDropRegion(delegate, acceptsFile: acceptsFile);
 
   @override
   void updateRenderObject(
     BuildContext context,
     RenderFileDropRegion renderObject,
   ) {
-    renderObject.delegate = delegate;
+    renderObject
+      ..delegate = delegate
+      ..acceptsFile = acceptsFile;
   }
 }
 
 class RenderFileDropRegion extends RenderProxyBoxWithHitTestBehavior {
-  RenderFileDropRegion(this.delegate)
+  RenderFileDropRegion(this.delegate, {this.acceptsFile})
     : super(behavior: HitTestBehavior.translucent);
 
   FileDropDelegate delegate;
+  bool Function(ComposerFile file)? acceptsFile;
 
   // Gone, it has nothing left to show (its delegate is going too).
   @override
@@ -144,19 +156,34 @@ abstract final class FileDrops {
         if (arguments['files'] case final List<Object?> files) {
           _files = decode(files);
         }
-        final region = _regionAt(position, viewId);
+        var region = _regionAt(position, viewId);
+        final filter = region?.acceptsFile;
+        final files = filter == null ? _files : _files.where(filter).toList();
+        if (filter != null && files.isEmpty) region = null;
         _moveTo(region);
-        region?.delegate.fileDragOver(position, _files);
+        region?.delegate.fileDragOver(position, files);
         return region != null || unhandled != null;
       case 'dragExit':
         _moveTo(null);
         _files = const [];
         return null;
       case 'drop':
-        final region = _regionAt(position, viewId) ?? _over;
         final files = arguments['files'] is List
             ? decode(arguments['files'] as List<Object?>)
             : _files;
+        var region = _regionAt(position, viewId);
+        // A filtered target needs a hit at the actual release point. Keep
+        // the last hovered target as a fallback for existing regions only.
+        if (region == null && _over?.acceptsFile == null) region = _over;
+        final filter = region?.acceptsFile;
+        final accepted = filter == null ? files : <ComposerFile>[];
+        final remaining = <ComposerFile>[];
+        if (filter != null) {
+          for (final file in files) {
+            (filter(file) ? accepted : remaining).add(file);
+          }
+          if (accepted.isEmpty) region = null;
+        }
         // Another one shown last takes its placeholder away.
         _moveTo(region);
         _over = null;
@@ -164,11 +191,12 @@ abstract final class FileDrops {
         if (region == null && unhandled != null && files.isNotEmpty) {
           return unhandled(files);
         }
-        if (region == null || files.isEmpty) {
+        if (region == null || accepted.isEmpty) {
           region?.delegate.fileDragLeave();
           return false;
         }
-        region.delegate.fileDrop(position, files);
+        region.delegate.fileDrop(position, accepted);
+        if (remaining.isNotEmpty) unhandled?.call(remaining);
         return true;
     }
     return null;

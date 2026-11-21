@@ -8,7 +8,9 @@ import 'package:flutter/services.dart';
 import '../base/give_way_row.dart';
 import '../base/smooth_scroll.dart';
 import '../chat/chat_keys.dart';
+import '../chat/composer/composer_files.dart';
 import '../chat/composer/composer_mock_data.dart' show fuzzyMatch;
+import '../chat/composer/file_drop.dart';
 import '../chat/floating/floating_placement.dart';
 import '../chat/widgets/hover_builder.dart';
 import '../chat/widgets/inline_rename_field.dart';
@@ -193,6 +195,7 @@ class Sidebar extends StatefulWidget {
     required this.onCollapse,
     this.onOpened,
     this.onOpenFolder,
+    this.onDropFolders,
     this.onAddSshHost,
     this.onOpenFolderOn,
     this.editSshHost,
@@ -259,6 +262,9 @@ class Sidebar extends StatefulWidget {
   /// Asks for a folder to open as a project; null where there is none to
   /// ask (the web).
   final VoidCallback? onOpenFolder;
+
+  /// Imports local folders dropped in the project list or on Open Project.
+  final ValueChanged<Iterable<String>>? onDropFolders;
 
   /// Adds an SSH host (connected to, then a folder there to open, or not),
   /// listed once connected: the heading switches between this machine and
@@ -1093,10 +1099,12 @@ class _SidebarState extends State<Sidebar>
                 _ => null,
               }
               case final open?)
-            _NavRow(
-              icon: Codicons.folderOpened,
-              label: context.l10n.sidebarOpenProject,
-              onTap: open,
+            _projectDropRegion(
+              _NavRow(
+                icon: Codicons.folderOpened,
+                label: context.l10n.sidebarOpenProject,
+                onTap: open,
+              ),
             ),
           if (widget.onSearch case final search?)
             _NavRow(
@@ -1141,10 +1149,20 @@ class _SidebarState extends State<Sidebar>
               widget.onStash != null)
             const SizedBox(height: 4),
           _buildGroupingBar(),
-          Expanded(child: _buildList()),
+          Expanded(child: _projectDropRegion(_buildList())),
           _buildFooter(),
         ],
       ),
+    );
+  }
+
+  Widget _projectDropRegion(Widget child) {
+    final onDropFolders = widget.onDropFolders;
+    if (onDropFolders == null) return child;
+    return FileDropRegion(
+      delegate: _ProjectFolderDrop(onDropFolders),
+      acceptsFile: (file) => file.directory,
+      child: child,
     );
   }
 
@@ -3997,6 +4015,22 @@ class _ThreadRow extends StatelessWidget {
       const GiveWay(SizedBox(width: 2)),
     ];
   }
+}
+
+class _ProjectFolderDrop implements FileDropDelegate {
+  const _ProjectFolderDrop(this.onDropFolders);
+
+  final ValueChanged<Iterable<String>> onDropFolders;
+
+  @override
+  void fileDragOver(Offset position, List<ComposerFile> files) {}
+
+  @override
+  void fileDragLeave() {}
+
+  @override
+  void fileDrop(Offset position, List<ComposerFile> files) =>
+      onDropFolders(files.map((file) => file.path));
 }
 
 /// A stash a conversation carries out, as its row shows it.

@@ -557,6 +557,22 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
   Future<AgentThread> openFolder(String path) async =>
       create(project: _openProject(path));
 
+  /// Lists [paths] as projects, leaving the chat panes as they are.
+  void importFolders(Iterable<String> paths) {
+    final known = <String, String>{};
+    for (final project in _projects) {
+      if (project.host == null) {
+        known.putIfAbsent(p.canonicalize(project.path), () => project.path);
+      }
+    }
+    final seen = <String>{};
+    for (final path in paths) {
+      final key = p.canonicalize(path);
+      if (seen.add(key)) _openProject(known[key] ?? path);
+    }
+    if (seen.isNotEmpty) notifyListeners();
+  }
+
   /// Has [thread], a new agent nothing was sent to yet, work in [path]
   /// instead: a new agent there (an untouched one reused) takes its pane,
   /// and it goes. [path] is opened as a project if it was not one.
