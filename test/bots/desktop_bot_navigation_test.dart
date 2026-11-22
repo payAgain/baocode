@@ -68,6 +68,14 @@ void main() {
       final panelBounds = tester.getRect(
         find.byKey(const ValueKey('bot-settings-drawer')),
       );
+      final chat = find.byType(DesktopBotPage);
+      expect(tester.getRect(chat).right, lessThanOrEqualTo(panelBounds.left));
+      expect(
+        find
+            .descendant(of: chat, matching: find.text('Bot settings'))
+            .hitTestable(),
+        findsOneWidget,
+      );
       expect(panelBounds.right, closeTo(hubBounds.right, 1));
       expect(panelBounds.left, greaterThan(hubBounds.left + 50));
       expect(find.text('Speaking style'), findsOneWidget);

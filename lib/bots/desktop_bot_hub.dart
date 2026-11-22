@@ -42,10 +42,11 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
   _Panel _panel = _Panel.list;
   String? _selectedId;
   final _searchedHistory = <ChatSession>{};
-  final _chatFrame = GlobalKey<ScaffoldState>();
+  bool _settingsOpen = false;
 
   void _show(_Panel panel, [String? id]) => setState(() {
     _panel = panel;
+    _settingsOpen = false;
     _selectedId = id;
   });
 
@@ -56,6 +57,7 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
     _searchedHistory.clear();
     _panel = _Panel.list;
     _selectedId = null;
+    _settingsOpen = false;
   }
 
   @override
@@ -71,31 +73,40 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
       switch (_panel) {
         case _Panel.chat when selected != null:
           return LayoutBuilder(
-            builder: (context, bounds) => Scaffold(
-              key: _chatFrame,
-              endDrawerEnableOpenDragGesture: false,
-              endDrawer: Drawer(
-                key: const ValueKey('bot-settings-drawer'),
-                width: (bounds.maxWidth * .84).clamp(0.0, 416.0),
-                child: DesktopBotSettings(
-                  key: ValueKey(selected.id),
-                  bots: widget.bots,
-                  bot: selected,
-                  drawer: true,
-                  onBack: () {
-                    _chatFrame.currentState?.closeEndDrawer();
-                    if (widget.bots.byId(selected.id) == null) back();
-                  },
+            builder: (context, bounds) => Row(
+              children: [
+                Expanded(
+                  child: DesktopBotPage(
+                    key: ValueKey(selected.id),
+                    bots: widget.bots,
+                    botId: selected.id,
+                    onBack: back,
+                    onSettings: () =>
+                        setState(() => _settingsOpen = !_settingsOpen),
+                    onOpenChat: widget.onOpenChat,
+                  ),
                 ),
-              ),
-              body: DesktopBotPage(
-                key: ValueKey(selected.id),
-                bots: widget.bots,
-                botId: selected.id,
-                onBack: back,
-                onSettings: () => _chatFrame.currentState?.openEndDrawer(),
-                onOpenChat: widget.onOpenChat,
-              ),
+                if (_settingsOpen)
+                  const VerticalDivider(width: 1, thickness: 1),
+                if (_settingsOpen)
+                  SizedBox(
+                    key: const ValueKey('bot-settings-drawer'),
+                    width: (bounds.maxWidth * .45).clamp(0.0, 416.0),
+                    child: DesktopBotSettings(
+                      key: ValueKey(selected.id),
+                      bots: widget.bots,
+                      bot: selected,
+                      drawer: true,
+                      onBack: () {
+                        if (widget.bots.byId(selected.id) == null) {
+                          back();
+                        } else {
+                          setState(() => _settingsOpen = false);
+                        }
+                      },
+                    ),
+                  ),
+              ],
             ),
           );
         case _Panel.settings when id == null:
