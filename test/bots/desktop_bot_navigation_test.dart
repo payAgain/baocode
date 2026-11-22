@@ -60,6 +60,15 @@ void main() {
         tester.widget<DesktopBotPage>(find.byType(DesktopBotPage)).botId,
         second.id,
       );
+      await tester.tap(find.text('Bot settings'));
+      await tester.pump();
+      expect(find.text('Speaking style'), findsOneWidget);
+      await tester.tap(find.text('Save'));
+      await tester.pump();
+      expect(
+        tester.widget<DesktopBotPage>(find.byType(DesktopBotPage)).botId,
+        second.id,
+      );
       expect(workspace.current, same(projectChat));
       expect(workspace.listsInSidebar(bots.threadFor(assistant)), isFalse);
       tester.widget<DesktopBotPage>(find.byType(DesktopBotPage)).onBack();

@@ -20,6 +20,7 @@ class DesktopBotPage extends StatefulWidget {
     super.key,
     required this.bots,
     this.botId,
+    this.onSettings,
     required this.onBack,
     required this.onOpenChat,
   });
@@ -28,6 +29,7 @@ class DesktopBotPage extends StatefulWidget {
 
   /// The ID of the selected bot, or null for the assistant.
   final String? botId;
+  final VoidCallback? onSettings;
   final VoidCallback onBack;
   final ValueChanged<String> onOpenChat;
 
@@ -228,6 +230,12 @@ class _DesktopBotPageState extends State<DesktopBotPage> {
                     ],
                   ),
                 ),
+                if (widget.onSettings != null && bot != null)
+                  TextButton.icon(
+                    onPressed: widget.onSettings,
+                    icon: const Icon(Icons.tune, size: 18),
+                    label: Text(Localizations.localeOf(context).languageCode == 'zh' ? 'Bot 设置' : 'Bot settings'),
+                  ),
               ],
             ),
           ),
