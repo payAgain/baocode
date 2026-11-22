@@ -60,8 +60,16 @@ void main() {
         tester.widget<DesktopBotPage>(find.byType(DesktopBotPage)).botId,
         second.id,
       );
+      final chatState = tester.state(find.byType(DesktopBotPage));
       await tester.tap(find.text('Bot settings'));
-      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(tester.state(find.byType(DesktopBotPage)), same(chatState));
+      final hubBounds = tester.getRect(find.byType(DesktopBotHub));
+      final panelBounds = tester.getRect(
+        find.byKey(const ValueKey('bot-settings-drawer')),
+      );
+      expect(panelBounds.right, closeTo(hubBounds.right, 1));
+      expect(panelBounds.left, greaterThan(hubBounds.left + 50));
       expect(find.text('Speaking style'), findsOneWidget);
       await tester.tap(find.text('Save'));
       await tester.pump();

@@ -11,11 +11,13 @@ class DesktopBotSettings extends StatefulWidget {
     super.key,
     required this.bots,
     this.bot,
+    this.drawer = false,
     required this.onBack,
   });
 
   final Bots bots;
   final Bot? bot;
+  final bool drawer;
   final VoidCallback onBack;
 
   @override
@@ -220,9 +222,13 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
             child: Row(
               children: [
                 IconButton(
-                  tooltip: l10n.chatBack,
+                  tooltip: widget.drawer
+                      ? MaterialLocalizations.of(context).closeButtonTooltip
+                      : l10n.chatBack,
                   onPressed: widget.onBack,
-                  icon: const BackButtonIcon(),
+                  icon: widget.drawer
+                      ? const Icon(Icons.close)
+                      : const BackButtonIcon(),
                 ),
                 const SizedBox(width: 6),
                 Expanded(
