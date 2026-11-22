@@ -94,6 +94,9 @@ import 'keybindings/keybinding_service.dart';
 import 'keybindings/window_keybindings.dart';
 import 'l10n/command_titles.dart';
 import 'l10n/l10n.dart';
+import 'link/desktop_host_connection.dart';
+import 'link/desktop_host_chats.dart';
+import 'link/desktop_host_page.dart';
 import 'notifications/attention_host.dart';
 import 'notifications/attention_service.dart';
 import 'notifications/attention_settings.dart';
@@ -922,6 +925,9 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   @override
   void dispose() {
+    _desktopConnection?.removeListener(_remoteChanged);
+    _desktopChats?.dispose();
+    _desktopConnection?.dispose();
     _sessionLinks.dispose();
     ChannelGate.current?.removeListener(_channelGateChanged);
     for (final edits in _ideAgentEdits.values) {
@@ -1385,6 +1391,40 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   /// Claude Code's customizations show in place of the chat.
   bool _customizing = false;
+  bool _showingComputer = false;
+  DesktopHostConnection? _desktopConnection;
+  DesktopHostChats? _desktopChats;
+  String? _lastHostKey;
+
+  void _remoteChanged() {
+    if (!mounted) return;
+    final connection = _desktopConnection!;
+    final peer = connection.peer;
+    if ((peer != null && _lastHostKey != null && peer.remote != _lastHostKey) ||
+        (connection.hostName == null && peer == null && _lastHostKey != null)) {
+      _desktopChats!.reset();
+      _lastHostKey = null;
+    }
+    if (peer != null) _lastHostKey = peer.remote;
+    _desktopChats!.bind(peer);
+    setState(() {});
+  }
+
+  void _openComputer() {
+    _closeDrawer();
+    if (_showingComputer) {
+      _closeCustomize();
+      return;
+    }
+    _closeCustomize();
+    if (_desktopConnection == null) {
+      _desktopChats = DesktopHostChats();
+      _desktopConnection = DesktopHostConnection()..addListener(_remoteChanged);
+      unawaited(_desktopConnection!.load());
+    }
+    setState(() => _showingComputer = true);
+  }
+
   CustomizationKind _customizeKind = CustomizationKind.skills;
   final GlobalKey<CustomizeViewState> _customizeKey = GlobalKey();
 
@@ -1396,6 +1436,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     if (kind != null) _customizeKey.currentState?.show(kind);
     setState(() {
       _customizing = true;
+      _showingComputer = false;
       _stashing = false;
       if (kind != null) _customizeKind = kind;
     });
@@ -1403,6 +1444,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   /// The conversations show again, in place of Customize or the stashes.
   void _closeCustomize() {
+    if (_showingComputer) setState(() => _showingComputer = false);
     if (_customizing || _stashing) {
       setState(() => _customizing = _stashing = false);
     }
@@ -1419,7 +1461,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   final GlobalKey<StashViewState> _stashKey = GlobalKey();
 
   /// Something shows in place of the conversations.
-  bool get _replacingChat => _customizing || _stashing;
+  bool get _replacingChat => _customizing || _stashing || _showingComputer;
 
   /// Shows the stashes, [id]'s if given.
   void _showStash([int? id]) {
@@ -1428,6 +1470,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     if (id != null) _stashKey.currentState?.show(id);
     setState(() {
       _stashing = true;
+      _showingComputer = false;
       _customizing = false;
       _stashShown = id;
     });
@@ -3342,6 +3385,9 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
               _workspace.newWindowAgent((project ?? agent.project).path),
             ),
       link: _sidebarLink,
+      onConnectComputer: _main && !kIsWeb ? _openComputer : null,
+      showingComputer: _showingComputer,
+      connectedComputerName: _desktopConnection?.hostName,
       onCollapse: _toggle,
       onOpened: () {
         _closeCustomize();
@@ -4722,6 +4768,15 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
       };
 
   Widget _buildGrid({required bool showToggle}) {
+    if (_showingComputer) {
+      return _footless(
+        DesktopHostPage(
+          connection: _desktopConnection!,
+          chats: _desktopChats!,
+          onBack: _closeCustomize,
+        ),
+      );
+    }
     if (_stashing) {
       if (StashController.current case final stash?) {
         return _footless(_buildStash(stash, showToggle: showToggle));
