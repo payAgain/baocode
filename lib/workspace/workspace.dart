@@ -411,8 +411,17 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
     }
     _restoreChatView();
     if (!_disposed) resumes.resume = _resumeAfterReset;
-    if (_selected == null && _projects.isNotEmpty) {
-      create();
+    final project = _selected == null
+        ? sidebarProjectsHere.firstOrNull ??
+              sidebarProjects.firstOrNull ??
+              _projects
+                  .where((project) => !isAppFolder(project.path))
+                  .firstOrNull
+        : null;
+    // A bot's folder can be the only project on disk. Opening an ordinary
+    // chat there would shadow the bot's kept conversation with a newer one.
+    if (project != null) {
+      create(project: project);
     } else {
       notifyListeners();
     }

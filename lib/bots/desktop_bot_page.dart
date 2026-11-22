@@ -14,16 +14,20 @@ import 'bot.dart';
 import 'bots.dart';
 import 'desktop_bot_messages.dart';
 
-/// The main bot's private chat. It uses the same conversation the phone opens.
+/// A bot's private chat. It uses the same conversation the phone opens.
 class DesktopBotPage extends StatefulWidget {
   const DesktopBotPage({
     super.key,
     required this.bots,
+    this.botId,
     required this.onBack,
     required this.onOpenChat,
   });
 
   final Bots bots;
+
+  /// The ID of the selected bot, or null for the assistant.
+  final String? botId;
   final VoidCallback onBack;
   final ValueChanged<String> onOpenChat;
 
@@ -38,7 +42,11 @@ class _DesktopBotPageState extends State<DesktopBotPage> {
   bool _workspaceReady = false;
   bool _syncScheduled = false;
   bool _restoringDraft = false;
-  Bot? get _bot => widget.bots.bots.where((bot) => bot.assistant).firstOrNull;
+  bool _triedEarlier = false;
+  Bot? get _bot => switch (widget.botId) {
+    final id? => widget.bots.byId(id),
+    null => widget.bots.bots.where((bot) => bot.assistant).firstOrNull,
+  };
 
   @override
   void initState() {
@@ -50,11 +58,15 @@ class _DesktopBotPageState extends State<DesktopBotPage> {
   @override
   void didUpdateWidget(DesktopBotPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (identical(oldWidget.bots, widget.bots)) return;
-    _unwatch(oldWidget.bots);
-    _workspaceReady = false;
-    _bind(null);
-    _watch(widget.bots);
+    if (!identical(oldWidget.bots, widget.bots)) {
+      _unwatch(oldWidget.bots);
+      _workspaceReady = false;
+      _bind(null);
+      _watch(widget.bots);
+    } else if (oldWidget.botId != widget.botId) {
+      _bind(null);
+      _scheduleSync();
+    }
   }
 
   void _watch(Bots bots) {
@@ -95,6 +107,7 @@ class _DesktopBotPageState extends State<DesktopBotPage> {
     _session?.removeListener(_sessionChanged);
     _session?.detach();
     _session = session;
+    _triedEarlier = false;
     _restoringDraft = true;
     final text = session?.draft.content ?? '';
     final selection = session?.draft.selection;
@@ -157,7 +170,10 @@ class _DesktopBotPageState extends State<DesktopBotPage> {
     final l10n = context.l10n;
     final bot = _bot;
     final session = _session;
-    final loading = !_workspaceReady || session?.loadingHistory == true;
+    final loading =
+        !_workspaceReady ||
+        (bot != null && session == null) ||
+        session?.loadingHistory == true;
     return Material(
       color: AppColors.conversationSurface,
       child: Column(
@@ -284,6 +300,18 @@ class _DesktopBotPageState extends State<DesktopBotPage> {
       hasEarlier: session.hasEarlierHistory,
     );
     final earlier = session.hasEarlierHistory;
+    if (messages.isEmpty &&
+        earlier &&
+        !session.loadingEarlier &&
+        !_triedEarlier) {
+      // A page can contain only group turns. Read one more automatically
+      // to find private messages, with the usual control for older pages.
+      _triedEarlier = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !identical(session, _session)) return;
+        unawaited(session.loadEarlier());
+      });
+    }
     if (messages.isEmpty && !earlier) {
       return Center(
         child: Icon(Icons.chat_bubble_outline, color: AppColors.textFaint),

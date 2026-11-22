@@ -12,7 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import 'base/mouse_navigation.dart';
-import 'bots/desktop_bot_page.dart';
+import 'bots/desktop_bot_hub.dart';
 import 'workspace/session_tools.dart';
 import 'browser/browser_bridge.dart';
 import 'browser/browser_tools.dart';
@@ -4743,7 +4743,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   Widget _buildGrid({required bool showToggle}) {
     if (widget.settings?.link?.bots case final bots? when _showingBot) {
       return _footless(
-        DesktopBotPage(
+        DesktopBotHub(
           bots: bots,
           onBack: _closeCustomize,
           onOpenChat: (id) {
