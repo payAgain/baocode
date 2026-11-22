@@ -42,6 +42,7 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
   _Panel _panel = _Panel.list;
   String? _selectedId;
   final _searchedHistory = <ChatSession>{};
+  final _chatFrame = GlobalKey<ScaffoldState>();
 
   void _show(_Panel panel, [String? id]) => setState(() {
     _panel = panel;
@@ -69,26 +70,36 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
       void back() => _show(_Panel.list);
       switch (_panel) {
         case _Panel.chat when selected != null:
-          return DesktopBotPage(
-            key: ValueKey(selected.id),
-            bots: widget.bots,
-            botId: selected.id,
-            onBack: back,
-            onSettings: () => _show(_Panel.settings, selected.id),
-            onOpenChat: widget.onOpenChat,
+          return LayoutBuilder(
+            builder: (context, bounds) => Scaffold(
+              key: _chatFrame,
+              endDrawerEnableOpenDragGesture: false,
+              endDrawer: Drawer(
+                key: const ValueKey('bot-settings-drawer'),
+                width: (bounds.maxWidth * .84).clamp(0.0, 416.0),
+                child: DesktopBotSettings(
+                  key: ValueKey(selected.id),
+                  bots: widget.bots,
+                  bot: selected,
+                  drawer: true,
+                  onBack: () {
+                    _chatFrame.currentState?.closeEndDrawer();
+                    if (widget.bots.byId(selected.id) == null) back();
+                  },
+                ),
+              ),
+              body: DesktopBotPage(
+                key: ValueKey(selected.id),
+                bots: widget.bots,
+                botId: selected.id,
+                onBack: back,
+                onSettings: () => _chatFrame.currentState?.openEndDrawer(),
+                onOpenChat: widget.onOpenChat,
+              ),
+            ),
           );
-        case _Panel.settings when id == null || selected != null:
-          return DesktopBotSettings(
-            bots: widget.bots,
-            bot: selected,
-            onBack: () {
-              if (id != null && widget.bots.byId(id) != null) {
-                _show(_Panel.chat, id);
-              } else {
-                back();
-              }
-            },
-          );
+        case _Panel.settings when id == null:
+          return DesktopBotSettings(bots: widget.bots, onBack: back);
         case _Panel.groups:
           return DesktopBotGroups(
             bots: widget.bots,
