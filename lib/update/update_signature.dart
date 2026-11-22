@@ -4,10 +4,13 @@ import 'dart:convert';
 
 import 'package:pinenacl/ed25519.dart';
 
-/// The Ed25519 key releases are signed with: the public half, base64. The
+/// The Ed25519 key official releases are signed with: the public half, base64. The
 /// private half is kept off the repository (docs/auto-update.md);
 /// tool/release_manifest.dart signs with it.
 const updatePublicKey = 'iBSgPUxNeT4jvgaua22aN/jCDwG+ry8rGc17kMcU4II=';
+
+/// The public half of payAgain/baocode's separate release signing key.
+const personalUpdatePublicKey = '6UKs1Y1mJVUwhiqKFdoMAPCKSxhpfesAGe0PZU12B2M=';
 
 /// What a release's signature covers, and checking it. Not the file
 /// itself (a few hundred megabytes, read whole): its SHA-256, which the

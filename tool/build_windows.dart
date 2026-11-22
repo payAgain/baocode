@@ -174,6 +174,7 @@ Future<void> main(List<String> arguments) async {
       'build',
       'windows',
       '--release',
+      '--dart-define=BAOCODE_UPDATE_CHANNEL=${arguments.contains('--official-updates') ? 'official' : 'personal'}',
       if (channel) '--dart-define=BAOCODE_CHANNEL=true',
       // Not --split-debug-info, which would also leave the app's stack
       // traces (errors.log) unnamed, as offsets.

@@ -221,6 +221,7 @@ class _UpdatesSettingsPageState extends State<UpdatesSettingsPage> {
       UpdateStatus.idle => null,
       UpdateStatus.checking => l10n.updateChecking,
       UpdateStatus.upToDate => l10n.updateUpToDate,
+      UpdateStatus.notPublished => l10n.updateNotPublished,
       UpdateStatus.available => l10n.updateAvailable(version),
       UpdateStatus.downloading => switch (service.progress) {
         final progress? => l10n.updateDownloadingProgress(
@@ -259,11 +260,8 @@ class _UpdatesSettingsPageState extends State<UpdatesSettingsPage> {
                   IdeButton(
                     label: l10n.updateOpenDownloadPage,
                     secondary: true,
-                    onPressed: () => unawaited(
-                      widget.updates!.openUrl(
-                        ManualUpdateRequired.downloadPage,
-                      ),
-                    ),
+                    onPressed: () =>
+                        unawaited(widget.updates!.openDownloadPage()),
                   ),
                 IdeButton(
                   label: l10n.updateRestartNow,

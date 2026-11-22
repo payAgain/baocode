@@ -9,6 +9,7 @@ import '../../link/link_host.dart';
 import '../../theme/app_theme.dart';
 import '../../theme/codicons.dart';
 import '../../tips/star_prompt.dart' show StarPrompt;
+import '../../update/update_channel.dart';
 import '../../update/version.dart';
 import '../../workspace/editor_launcher.dart' show openExternal;
 import '../../workspace/window_header/about_dialog.dart' show aboutIconAsset;
@@ -34,10 +35,7 @@ class AboutSettingsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
-    final zh = Localizations.localeOf(context).languageCode == 'zh';
-    final changelog = website.replace(
-      path: zh ? '/zh/changelog' : '/changelog',
-    );
+    final changelog = UpdateChannel.build.releaseNotes(l10n.localeName);
     final repository = StarPrompt.repository;
     return SettingsPage(
       title: l10n.settingsSectionAbout,

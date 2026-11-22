@@ -680,7 +680,7 @@ void followSettingsFiles(SettingsFiles files) {
 }
 
 /// The app's updates (lib/update/): looked for as settings.json's
-/// `update.mode` says, from baocode.dev, installed as the app quits. None
+/// `update.mode` says, from the build’s channel, installed as the app quits. None
 /// where the build does not update itself.
 UpdateController? _startUpdates(SettingsFiles files) {
   final platform = platformUpdates(
@@ -691,11 +691,12 @@ UpdateController? _startUpdates(SettingsFiles files) {
     current: currentAppVersion,
     platform: platform.platform,
     manifestUrl: platform.manifestUrl,
+    channel: platform.channel,
     backend: platform.backend,
     installer: platform.installer,
     mode: () => UpdateMode.parse(files.settings[UpdateMode.settingKey]),
     settingsChanges: files.settings,
-    store: GlobalUpdateStore(files.storage),
+    store: GlobalUpdateStore(files.storage, channel: platform.channel),
   )..start();
   return UpdateController(
     service: service,

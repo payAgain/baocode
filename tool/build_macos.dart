@@ -153,6 +153,7 @@ Future<void> main(List<String> arguments) async {
       'build',
       'macos',
       '--release',
+      '--dart-define=BAOCODE_UPDATE_CHANNEL=${arguments.contains('--official-updates') ? 'official' : 'personal'}',
       if (channel) '--dart-define=BAOCODE_CHANNEL=true',
       // Its symbols kept, to be saved before it is stripped below.
       '--extra-gen-snapshot-options=--no-strip',

@@ -5367,6 +5367,7 @@
   },
   "updateChecking": "Checking for updates…",
   "updateUpToDate": "BaoCode is up to date.",
+  "updateNotPublished": "No personal release has been published yet.",
   "updateAvailable": "BaoCode {version} is available.",
   "@updateAvailable": {
     "placeholders": {

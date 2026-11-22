@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:baocode/ide/ide_notifications.dart';
 import 'package:baocode/l10n/l10n.dart';
+import 'package:baocode/update/update_channel.dart';
 import 'package:baocode/update/update_controller.dart';
 import 'package:baocode/update/update_service.dart';
 import 'package:baocode/update/update_settings.dart';
@@ -137,9 +138,9 @@ void main() {
       expect(quits, 0);
       expect(service.armed, isFalse);
       note.primary.single.run();
-      expect(opened, [ManualUpdateRequired.downloadPage]);
+      expect(opened, [UpdateChannel.official.downloadPage]);
       expect(
-        '${ManualUpdateRequired.downloadPage}',
+        '${UpdateChannel.official.downloadPage}',
         'https://baocode.dev/download',
       );
     });
@@ -203,7 +204,7 @@ void main() {
       expect(note.message, l10n.updateUnfinished('1.2.0', '1.0.0'));
       expect(labels(note), [l10n.updateOpenDownloadPage, l10n.updateShowLog]);
       note.primary.first.run();
-      expect(opened, [ManualUpdateRequired.downloadPage]);
+      expect(opened, [UpdateChannel.official.downloadPage]);
       note.primary.last.run();
       expect(files, ['/updates/install.log']);
 

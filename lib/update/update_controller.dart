@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../ide/ide_notifications.dart';
 import '../l10n/l10n.dart';
+import 'update_channel.dart';
 import 'update_service.dart';
 import 'version.dart';
 
@@ -34,10 +35,10 @@ class UpdateController {
 
   /// [version]'s notes on the site's changelog (tool/build_changelog.dart
   /// makes it), the Chinese page for [languageCode] `zh`.
-  static Uri changelogUrl(AppVersion version, String languageCode) => Uri.parse(
-    'https://baocode.dev/${languageCode.startsWith('zh') ? 'zh/' : ''}'
-    'changelog#v${version.marketing}',
-  );
+  static Uri changelogUrl(AppVersion version, String languageCode) =>
+      UpdateChannel.official.releaseNotes(languageCode, version: version);
+
+  Future<void> openDownloadPage() => openUrl(service.channel.downloadPage);
 
   bool _restarting = false;
 
@@ -90,7 +91,7 @@ class UpdateController {
           primary: [
             IdeNotificationAction(
               l10n.updateOpenDownloadPage,
-              () => unawaited(openUrl(ManualUpdateRequired.downloadPage)),
+              () => unawaited(openDownloadPage()),
             ),
           ],
         );
@@ -138,7 +139,12 @@ class UpdateController {
           IdeNotificationAction(
             l10n.updateReleaseNotes,
             () => unawaited(
-              openUrl(changelogUrl(release.version, l10n.localeName)),
+              openUrl(
+                service.channel.releaseNotes(
+                  l10n.localeName,
+                  version: release.version,
+                ),
+              ),
             ),
           ),
       ],
@@ -157,6 +163,8 @@ class UpdateController {
         showOffer(notifications, l10n, offer);
       case UpdateUpToDate():
         notifications.notify(IdeSeverity.info, l10n.updateUpToDate);
+      case UpdateNotPublished():
+        notifications.notify(IdeSeverity.info, l10n.updateNotPublished);
       case UpdatesDisabled():
         notifications.notify(IdeSeverity.info, l10n.updateDisabled);
       case UpdatesUnsupported():
@@ -185,7 +193,7 @@ class UpdateController {
       primary: [
         IdeNotificationAction(
           l10n.updateOpenDownloadPage,
-          () => unawaited(openUrl(ManualUpdateRequired.downloadPage)),
+          () => unawaited(openDownloadPage()),
         ),
         if (log != null && openFile != null)
           IdeNotificationAction(

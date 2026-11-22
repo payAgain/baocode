@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../channel/channel_setup.dart' show ChannelSetup;
+import 'update_channel.dart';
 import 'update_io.dart';
 import 'update_manifest.dart';
 import 'update_service.dart';
@@ -12,16 +13,31 @@ import 'version.dart';
 
 /// What updates the app where it runs: the platform's download, and what
 /// installs it. Null where there are none: not macOS, Windows or Linux, or a
-/// debug build (which would replace the build folder's app), unless
-/// [manifestUrlVariable] points at a manifest to try.
-PlatformUpdates? platformUpdates({required String updatesDirectory}) {
-  final environment = Platform.environment;
-  final override = environment[manifestUrlVariable]?.trim() ?? '';
-  if (!kReleaseMode && override.isEmpty) return null;
+/// debug build (which would replace the build folder's app). The official
+/// channel can opt into a test server using [manifestUrlVariable].
+PlatformUpdates? platformUpdates({
+  required String updatesDirectory,
+  UpdateChannel? channel,
+  bool releaseMode = kReleaseMode,
+  Map<String, String>? environment,
+}) {
+  final selected = channel ?? UpdateChannel.build;
+  final env = environment ?? Platform.environment;
+  final personal = selected == UpdateChannel.personal;
+  final override = personal ? '' : env[manifestUrlVariable]?.trim() ?? '';
+  if (!releaseMode && override.isEmpty) return null;
   final manifestUrl = Uri.tryParse(
-    override.isEmpty ? defaultManifestUrl : override,
+    override.isEmpty ? selected.manifest : override,
   );
-  if (manifestUrl == null) return null;
+  if (manifestUrl == null ||
+      (manifestUrl.scheme != 'http' && manifestUrl.scheme != 'https') ||
+      manifestUrl.host.isEmpty) {
+    return null;
+  }
+  // A sibling, so the official updater's cleanup never traverses it.
+  final cache = personal
+      ? '${p.normalize(updatesDirectory)}-personal'
+      : updatesDirectory;
   final executable = Platform.resolvedExecutable;
   final UpdateInstaller installer;
   final String platform;
@@ -33,22 +49,22 @@ PlatformUpdates? platformUpdates({required String updatesDirectory}) {
     installer = MacUpdateInstaller(
       executable: executable,
       pid: pid,
-      updatesDirectory: updatesDirectory,
+      updatesDirectory: cache,
     );
   } else if (Platform.isWindows) {
     platform = windowsUpdatePlatform(arm64: Abi.current() == Abi.windowsArm64);
     installer = WindowsUpdateInstaller(
       executable: executable,
       pid: pid,
-      environment: environment,
-      updatesDirectory: updatesDirectory,
+      environment: env,
+      updatesDirectory: cache,
     );
   } else if (Platform.isLinux) {
     platform = linuxUpdatePlatform(arm64: Abi.current() == Abi.linuxArm64);
     installer = LinuxUpdateInstaller(
       executable: executable,
       pid: pid,
-      updatesDirectory: updatesDirectory,
+      updatesDirectory: cache,
     );
   } else {
     return null;
@@ -59,9 +75,11 @@ PlatformUpdates? platformUpdates({required String updatesDirectory}) {
   );
   return PlatformUpdates(
     platform: edition,
+    channel: selected,
     manifestUrl: manifestUrl,
     backend: IoUpdateBackend(
-      directory: updatesDirectory,
+      directory: cache,
+      channel: selected,
       userAgent: 'BaoCode/$currentAppVersion ($edition)',
     ),
     installer: installer,
@@ -109,12 +127,14 @@ class PlatformUpdates {
   const PlatformUpdates({
     required this.platform,
     required this.manifestUrl,
+    required this.channel,
     required this.backend,
     required this.installer,
   });
 
   final String platform;
   final Uri manifestUrl;
+  final UpdateChannel channel;
   final UpdateBackend backend;
   final UpdateInstaller installer;
 }

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'update_channel.dart';
 import 'update_manifest.dart';
 import 'update_settings.dart';
 import 'version.dart';
@@ -72,11 +73,9 @@ abstract interface class PreparedUpdate {
 
 /// The app cannot update itself where it is (macOS: a folder it cannot
 /// write, a translocated app; Windows: not installed by its installer):
-/// the user downloads the new version from [downloadPage].
+/// the user downloads the new version from their channel’s release page.
 class ManualUpdateRequired implements Exception {
   const ManualUpdateRequired(this.reason);
-
-  static final downloadPage = Uri.parse('https://baocode.dev/download');
 
   final String reason;
 
@@ -124,6 +123,7 @@ enum UpdateStatus {
 
   /// Nothing newer for this platform.
   upToDate,
+  notPublished,
 
   /// A newer version, not downloaded.
   available,
@@ -143,6 +143,19 @@ sealed class UpdateCheckResult {
 
 final class UpdateUpToDate extends UpdateCheckResult {
   const UpdateUpToDate();
+}
+
+/// This channel has not published a manifest yet.
+final class UpdateNotPublished extends UpdateCheckResult {
+  const UpdateNotPublished();
+}
+
+/// The channel's manifest endpoint returned HTTP 404.
+class UpdateManifestNotFound implements Exception {
+  const UpdateManifestNotFound();
+
+  @override
+  String toString() => 'Update manifest not found (HTTP 404)';
 }
 
 final class UpdateFound extends UpdateCheckResult {
@@ -201,13 +214,16 @@ class UpdateService extends ChangeNotifier {
     required this.backend,
     required this.installer,
     Uri? manifestUrl,
+    this.channel = UpdateChannel.official,
     UpdateMode Function()? mode,
     this.settingsChanges,
     UpdateStore? store,
     DateTime Function()? now,
     this.firstCheckDelay = const Duration(seconds: 10),
     this.checkInterval = const Duration(minutes: 5),
-  }) : manifestUrl = manifestUrl ?? Uri.parse(defaultManifestUrl),
+  }) : manifestUrl = channel == UpdateChannel.personal
+           ? Uri.parse(UpdateChannel.personalManifest)
+           : manifestUrl ?? Uri.parse(channel.manifest),
        _mode = mode ?? (() => UpdateMode.defaultMode),
        store = store ?? MemoryUpdateStore(),
        _now = now ?? DateTime.now;
@@ -220,6 +236,7 @@ class UpdateService extends ChangeNotifier {
   final String? platform;
 
   final Uri manifestUrl;
+  final UpdateChannel channel;
   final UpdateBackend backend;
   final UpdateInstaller installer;
   final UpdateStore store;
@@ -397,13 +414,28 @@ class UpdateService extends ChangeNotifier {
         text,
         policy: UpdateUrlPolicy.forManifest(manifestUrl),
       );
-      store.lastChecked = _now();
-      _installed = manifest.version.marketing == current.marketing
-          ? manifest
-          : null;
-      final asset = manifest.version > current
+      final personal = channel == UpdateChannel.personal;
+      final newer = manifest.version > current;
+      final same = personal
+          ? manifest.version == current
+          : manifest.version.marketing == current.marketing;
+      final candidate = newer || (personal && same)
           ? manifest.assetFor(platform!)
           : null;
+      if (personal &&
+          candidate != null &&
+          !candidate.isSignedFor(
+            manifest.version,
+            platform!,
+            channel.publicKey,
+          )) {
+        throw const UpdateVerificationException(
+          'The update is not signed by payAgain/baocode',
+        );
+      }
+      store.lastChecked = _now();
+      _installed = same && (!personal || candidate != null) ? manifest : null;
+      final asset = newer ? candidate : null;
       if (asset == null) {
         _release = null;
         _file = null;
@@ -421,14 +453,25 @@ class UpdateService extends ChangeNotifier {
       _release = release;
       _setStatus(_foundStatus);
       return UpdateFound(offer!);
+    } on UpdateManifestNotFound catch (error) {
+      if (channel != UpdateChannel.personal) return _checkFailed(error);
+      store.lastChecked = _now();
+      _release = null;
+      _file = null;
+      _installed = null;
+      _setStatus(UpdateStatus.notPublished);
+      return const UpdateNotPublished();
     } on Object catch (error) {
-      // Quietly: the next check may get through.
-      debugPrint('update: check failed: $error');
-      _error = error;
-      // What was found before still stands.
-      _setStatus(_release == null ? UpdateStatus.failed : _foundStatus);
-      return UpdateCheckFailed(error);
+      return _checkFailed(error);
     }
+  }
+
+  UpdateCheckFailed _checkFailed(Object error) {
+    debugPrint('update: check failed: $error');
+    _error = error;
+    // What was found before still stands.
+    _setStatus(_release == null ? UpdateStatus.failed : _foundStatus);
+    return UpdateCheckFailed(error);
   }
 
   /// Whether [a] and [b] are the same download.
@@ -485,19 +528,24 @@ class UpdateService extends ChangeNotifier {
             if (!_disposed) notifyListeners();
           },
         );
+        _progress = null;
         if (_release case final found? when _same(found, release)) {
           _file = file;
+          _setStatus(UpdateStatus.ready);
         }
-        _progress = null;
-        _setStatus(UpdateStatus.ready);
         return file;
       } on Object catch (error) {
-        _error = error;
         _progress = null;
-        _setStatus(UpdateStatus.failed);
+        if (_release case final found? when _same(found, release)) {
+          _error = error;
+          _setStatus(UpdateStatus.failed);
+        }
         rethrow;
       } finally {
         _downloading = null;
+        if (_status == UpdateStatus.downloading && _release != null) {
+          _setStatus(_foundStatus);
+        }
       }
     }();
   }
@@ -522,6 +570,10 @@ class UpdateService extends ChangeNotifier {
     final release = _release;
     if (release == null) throw StateError('No update to install');
     final file = await download();
+    final found = _release;
+    if (found == null || !_same(found, release) || _file != file) {
+      throw StateError('The update changed while it was downloading');
+    }
     return installer.prepare(file, release);
   }
 
