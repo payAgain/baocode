@@ -2,11 +2,13 @@
 
 import 'dart:convert';
 
+import 'update_channel.dart';
+import 'update_signature.dart';
 import 'version.dart';
 
 /// Where the app looks for its next version: the release manifest
 /// dl.baocode.dev serves (docs/auto-update.md has its format).
-const defaultManifestUrl = 'https://dl.baocode.dev/releases/latest.json';
+const defaultManifestUrl = UpdateChannel.officialManifest;
 
 /// The environment variable that points the app at another manifest, to
 /// try a release before it is published (a local server's, say).
@@ -28,21 +30,74 @@ class UpdateManifestException implements Exception {
 /// [manifestUrlVariable] points at, so a release can be tried from where it
 /// is served before it is published.
 class UpdateUrlPolicy {
-  const UpdateUrlPolicy({this.extraOrigins = const {}});
+  const UpdateUrlPolicy({this.extraOrigins = const {}}) : personal = false;
 
-  /// For the manifest at [manifest]: its origin allowed too when it is not
-  /// the default one.
-  factory UpdateUrlPolicy.forManifest(Uri manifest) =>
-      manifest.toString() == defaultManifestUrl ||
-          !(manifest.scheme == 'http' || manifest.scheme == 'https')
-      ? const UpdateUrlPolicy()
-      : UpdateUrlPolicy(extraOrigins: {manifest.origin});
+  const UpdateUrlPolicy.personal() : personal = true, extraOrigins = const {};
+
+  factory UpdateUrlPolicy.forManifest(Uri manifest) {
+    if (manifest.toString() == UpdateChannel.personalManifest) {
+      return const UpdateUrlPolicy.personal();
+    }
+    if (manifest.toString() == defaultManifestUrl ||
+        !(manifest.scheme == 'http' || manifest.scheme == 'https') ||
+        manifest.host.isEmpty) {
+      return const UpdateUrlPolicy();
+    }
+    return UpdateUrlPolicy(extraOrigins: {manifest.origin});
+  }
 
   static const domain = 'baocode.dev';
-
   final Set<String> extraOrigins;
+  final bool personal;
 
-  bool allows(Uri url) {
+  static final _assetName = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._+-]*$');
+  static final _versionTag = RegExp(
+    r'^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9]+)?$',
+  );
+
+  static bool _secure(Uri url) =>
+      url.scheme == 'https' &&
+      !url.hasPort &&
+      url.userInfo.isEmpty &&
+      !url.hasFragment;
+
+  /// GitHub's release CDN is allowed only as a redirect from this fork.
+  static bool allowsPersonalRedirect(Uri from, Uri to) {
+    const policy = UpdateUrlPolicy.personal();
+    final initial = from.toString() == UpdateChannel.personalManifest;
+    if (!initial && !policy.allows(from)) return false;
+    if (initial && policy.allows(to) && to.pathSegments.last == 'latest.json') {
+      return true;
+    }
+    return _secure(to) &&
+        const {
+          'release-assets.githubusercontent.com',
+          'objects.githubusercontent.com',
+        }.contains(to.host) &&
+        to.pathSegments.length > 1 &&
+        to.pathSegments.first.startsWith('github-production-release-asset');
+  }
+
+  bool allows(Uri url, {AppVersion? version}) {
+    if (personal) {
+      if (!_secure(url) || url.host != 'github.com' || url.hasQuery) {
+        return false;
+      }
+      if (url.pathSegments case [
+        'payAgain',
+        'baocode',
+        'releases',
+        'download',
+        final tag,
+        final name,
+      ]) {
+        return _versionTag.hasMatch(tag) &&
+            (version == null || tag == UpdateChannel.personalTag(version)) &&
+            _assetName.hasMatch(name) &&
+            !name.endsWith('.');
+      }
+      return false;
+    }
     if (url.hasScheme &&
         (url.scheme == 'http' || url.scheme == 'https') &&
         url.host.isNotEmpty &&
@@ -80,6 +135,18 @@ class UpdateAsset {
   /// The file's name, from [url].
   String get fileName =>
       url.pathSegments.lastWhere((s) => s.isNotEmpty, orElse: () => 'update');
+
+  bool isSignedFor(AppVersion version, String platform, String publicKey) =>
+      UpdateSignature.verify(
+        payload: UpdateSignature.payload(
+          version: '$version',
+          platform: platform,
+          size: size,
+          sha256: sha256,
+        ),
+        signature: signature,
+        publicKey: publicKey,
+      );
 
   Map<String, Object?> toJson() => {
     'url': '$url',
@@ -192,7 +259,7 @@ class UpdateManifest {
     final invalid = <String, String>{};
     for (final MapEntry(:key, :value) in entries.entries) {
       try {
-        platforms[key] = _asset(value, policy);
+        platforms[key] = _asset(value, policy, version);
       } on UpdateManifestException catch (error) {
         invalid[key] = error.message;
       }
@@ -209,7 +276,11 @@ class UpdateManifest {
 
   static final _hex64 = RegExp(r'^[0-9a-fA-F]{64}$');
 
-  static UpdateAsset _asset(Object? json, UpdateUrlPolicy policy) {
+  static UpdateAsset _asset(
+    Object? json,
+    UpdateUrlPolicy policy,
+    AppVersion version,
+  ) {
     if (json is! Map<String, Object?>) {
       throw const UpdateManifestException('not an object');
     }
@@ -218,9 +289,10 @@ class UpdateManifest {
       _ => null,
     };
     if (url == null) throw const UpdateManifestException('"url" is missing');
-    if (!policy.allows(url)) {
+    if (!policy.allows(url, version: version)) {
       throw UpdateManifestException(
-        '"$url" is not an https link on ${UpdateUrlPolicy.domain}',
+        '"$url" is not an allowed https download from '
+        '${policy.personal ? 'payAgain/baocode releases' : UpdateUrlPolicy.domain}',
       );
     }
     final size = json['size'];

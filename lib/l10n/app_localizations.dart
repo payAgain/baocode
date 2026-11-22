@@ -12243,6 +12243,12 @@ abstract class AppLocalizations {
   /// **'BaoCode is up to date.'**
   String get updateUpToDate;
 
+  /// No description provided for @updateNotPublished.
+  ///
+  /// In en, this message translates to:
+  /// **'No personal release has been published yet.'**
+  String get updateNotPublished;
+
   /// No description provided for @updateAvailable.
   ///
   /// In en, this message translates to:

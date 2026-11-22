@@ -1,5 +1,7 @@
 # 版本与发布
 
+个人构建与 fork 发布见 [个人更新渠道](personal-updates.md)。本文描述官方渠道。
+
 BaoCode 的版本号怎么定、一个版本怎么发出去、发到哪里、已安装的应用怎么拿到它，以及第一次发布前要准备什么。应用这一侧怎么检查、下载、校验、安装，见 [auto-update.md](auto-update.md)。
 
 - 下载与更新：`https://dl.baocode.dev`（Cloudflare R2）
@@ -151,9 +153,9 @@ git tag server-1.0.7-ssh-fix && git push origin server-1.0.7-ssh-fix
 `.github/workflows/remote.yml` 编译四个平台的服务端、在 macOS 和 Docker 里的 Linux 上各跑一遍，然后把 `.gz` 和 `servers.json` 传到 `releases/remote/<VERSION>/`，最后更新 `releases/remote/latest.json`（指向这份）。不构建应用、不动应用的 `latest.json`，已安装的应用不受影响。用途是**本机打的包**：本机编出来的服务端 `VERSION` 和 CI 的对不上，线上没有，连主机会报 404；打包时改用已发布的那份：
 
 ```sh
-dart run tool/build_windows.dart --remote-release            # 最新发布的服务端
-dart run tool/build_windows.dart --remote-release <VERSION>  # 指定的那份
-dart run tool/build_macos.dart --remote-release              # macOS 同理
+dart run tool/build_windows.dart --official-updates --remote-release            # 最新发布的服务端
+dart run tool/build_windows.dart --official-updates --remote-release <VERSION>  # 指定的那份
+dart run tool/build_macos.dart --official-updates --remote-release              # macOS 同理
 ```
 
 脚本用 `tool/fetch_remote_server.dart` 取 `servers.json`、确认每个 `.gz` 都能下载，放进 `build/remote-release/` 再打包。应用和服务端是严格一一对应的内部协议（docs/ssh-remote.md），**服务端要从和应用相同（至少 `packages/bao_remote` 相同）的提交发布**，否则连上后可能出错。正式发版（`v*`）也会传 `servers.json`、更新 `releases/remote/latest.json`。
@@ -173,8 +175,8 @@ dart run tool/build_macos.dart --remote-release              # macOS 同理
 | `remote` | | 调用 `remote.yml`（推 `server-*` 标签时它也单独运行并发布，见第 3 节），下面两步 |
 | `remote` › `build` | macOS 15 | 下载和 Flutter 同版本的 x64 Dart SDK → 编译远程服务端（`--all`：Linux x64/arm64 交叉编译；macOS arm64 用本机的 dart，macOS x64 用 x64 的 dart 经 Rosetta，`dart compile exe` 只能在 Mac 上、按 dart 自己的架构编 macOS 版）→ `tool/test_remote_server_macos.sh`：在这台 Mac 上把两份 macOS 版各跑一遍 → 上传 `remote`（`VERSION`、`servers.json`、`.gz`）和 `remote-linux`（Linux 的两个二进制）两个产物 |
 | `remote` › `linux` | Ubuntu | `tool/test_remote_server.sh`：在 Docker 里的 Ubuntu 20.04 / 24.04、Debian 12、Rocky Linux 8 上，两种架构各跑一遍（arm64 用 QEMU 模拟），要能启动、回答 `initialize`、列出目录 |
-| `macos` | macOS 15 | 有证书就导入临时钥匙串 → `tool/build_macos.dart --build-only`：构建 universal 的 .app → 等 `remote` 产物传上来 → `tool/build_macos.dart --skip-build`：**检查是 universal**（每个可执行文件都有 arm64 和 x86_64）→ 放进 `remote` 任务的 `servers.json` → 用 `ditto --arch` 拆成 Apple silicon（arm64）和 Intel（x64）两个应用，各自检查只剩一种架构，下面每个各做一遍：→ 签名（有证书用 Developer ID，带 hardened runtime；没有就 ad hoc，**不带** hardened runtime，否则系统拒绝加载应用自己的框架、一启动就崩；总要重签，因为放进去的文件要包进签名）→ 做 dmg → 有证书时签 dmg、公证、钉票据 → 打更新用的 zip → **把两个 zip 解开各真正启动一次**（Intel 版经 Rosetta），15 秒内退出就不发 |
-| `windows` | Windows（x64 在 `windows-latest`，arm64 在 `windows-11-arm`） | 装 Inno Setup → `tool/build_windows.dart --build-only --arch <x64\|arm64>` 构建 → 等 `remote` 产物传上来 → `--skip-build --remote-built` 放进 `servers.json`、打安装包。Flutter 只能给本机架构构建，所以 arm64 在 Arm 机器上编；Flutter 的 Windows 压缩包里是 x64 的 Dart，arm64 改为按标签 clone Flutter。arm64 没有打过补丁的引擎（`tool/engine/`），用 Flutter 自带的；OpenSSH 用 `OpenSSH-ARM64.zip`。安装包 `BaoCode-<版本>-setup-arm64.exe`，和 x64 同一个 AppId，互相覆盖安装 |
+| `macos` | macOS 15 | 有证书就导入临时钥匙串 → `tool/build_macos.dart --build-only --official-updates`：构建 universal 的 .app → 等 `remote` 产物传上来 → `tool/build_macos.dart --skip-build`：**检查是 universal**（每个可执行文件都有 arm64 和 x86_64）→ 放进 `remote` 任务的 `servers.json` → 用 `ditto --arch` 拆成 Apple silicon（arm64）和 Intel（x64）两个应用，各自检查只剩一种架构，下面每个各做一遍：→ 签名（有证书用 Developer ID，带 hardened runtime；没有就 ad hoc，**不带** hardened runtime，否则系统拒绝加载应用自己的框架、一启动就崩；总要重签，因为放进去的文件要包进签名）→ 做 dmg → 有证书时签 dmg、公证、钉票据 → 打更新用的 zip → **把两个 zip 解开各真正启动一次**（Intel 版经 Rosetta），15 秒内退出就不发 |
+| `windows` | Windows（x64 在 `windows-latest`，arm64 在 `windows-11-arm`） | 装 Inno Setup → `tool/build_windows.dart --build-only --official-updates --arch <x64\|arm64>` 构建 → 等 `remote` 产物传上来 → `--skip-build --remote-built` 放进 `servers.json`、打安装包。Flutter 只能给本机架构构建，所以 arm64 在 Arm 机器上编；Flutter 的 Windows 压缩包里是 x64 的 Dart，arm64 改为按标签 clone Flutter。arm64 没有打过补丁的引擎（`tool/engine/`），用 Flutter 自带的；OpenSSH 用 `OpenSSH-ARM64.zip`。安装包 `BaoCode-<版本>-setup-arm64.exe`，和 x64 同一个 AppId，互相覆盖安装 |
 | `publish` | Ubuntu | 汇总产物 → 用更新私钥签 `latest.json`（`tool/release_manifest.dart`，带上 dmg 给网站用）→ 上传远程服务端 → 上传安装包 → 按清单里的链接确认 CDN 给出的文件大小对 → **最后**上传 `latest.json` → 建 GitHub Release（附两个 dmg 和 exe；重新发布时先删掉旧的） |
 
 几个设计上的考虑：
@@ -345,9 +347,9 @@ CI 不可用时的备用办法，步骤和 CI 一样：
 # macOS 上：先把四份远程服务端都编好（x64 的 Dart SDK 见 docs/ssh-remote.md 9.1）
 dart run tool/build_remote_server.dart --all --macos-x64-dart <x64 sdk>/bin/dart
 # 然后打包（有证书的话先设好第 7.3 节对应的环境变量，见 tool/build_macos.dart 开头）
-dart run tool/build_macos.dart --remote-built
+dart run tool/build_macos.dart --official-updates --remote-built
 # Windows 上：把 Mac 上的 build/remote/ 拷过来，用同一份（自己编的没有 macOS 版）
-dart run tool/build_windows.dart --remote-built
+dart run tool/build_windows.dart --official-updates --remote-built
 
 # 有私钥的机器上，两个平台的包都拷过来之后
 BAOCODE_UPDATE_SIGNING_KEY=~/.baocode-release/update-signing.key \

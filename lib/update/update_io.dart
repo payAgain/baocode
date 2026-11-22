@@ -7,8 +7,9 @@ import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
+import 'update_channel.dart';
+import 'update_manifest.dart';
 import 'update_service.dart';
-import 'update_signature.dart';
 import 'version.dart';
 
 /// The manifest over HTTPS, and the downloads in the data folder's
@@ -21,14 +22,17 @@ class IoUpdateBackend implements UpdateBackend {
     required this.directory,
     HttpClient Function()? client,
     this.userAgent = 'BaoCode',
-    this.publicKey = updatePublicKey,
+    String? publicKey,
+    this.channel = UpdateChannel.official,
     this.timeout = const Duration(seconds: 30),
-  }) : _client = client ?? HttpClient.new;
+  }) : publicKey = publicKey ?? channel.publicKey,
+       _client = client ?? HttpClient.new;
 
   /// `updates/` in the data folder.
   final String directory;
 
   final String userAgent;
+  final UpdateChannel channel;
 
   /// What releases are signed with (base64), as [UpdateSignature] checks.
   final String publicKey;
@@ -47,13 +51,19 @@ class IoUpdateBackend implements UpdateBackend {
 
   @override
   Future<String> fetchManifest(Uri url) async {
+    if (channel == UpdateChannel.personal &&
+        url.toString() != UpdateChannel.personalManifest) {
+      throw HttpException('Unexpected personal update manifest URL', uri: url);
+    }
     final client = _newClient();
     try {
-      final request = await client.getUrl(url).timeout(timeout);
-      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
-      final response = await request.close().timeout(timeout);
+      final (response, endpoint) = await _get(client, url, manifest: true);
       if (response.statusCode != HttpStatus.ok) {
-        await response.drain<void>();
+        if (response.statusCode == HttpStatus.notFound &&
+            channel == UpdateChannel.personal &&
+            endpoint.host == 'github.com') {
+          throw const UpdateManifestNotFound();
+        }
         throw HttpException('HTTP ${response.statusCode}', uri: url);
       }
       final bytes = BytesBuilder(copy: false);
@@ -86,6 +96,15 @@ class IoUpdateBackend implements UpdateBackend {
     UpdateRelease release, {
     void Function(int received, int total)? onProgress,
   }) async {
+    if (channel == UpdateChannel.personal &&
+        !const UpdateUrlPolicy.personal().allows(
+          release.asset.url,
+          version: release.version,
+        )) {
+      throw const UpdateVerificationException(
+        'Unexpected personal update download URL',
+      );
+    }
     final target = File(fileOf(release));
     // Only the newest is kept.
     await _removeVersions(
@@ -119,17 +138,11 @@ class IoUpdateBackend implements UpdateBackend {
     if ('$digest' != asset.sha256) {
       return 'The download does not match its SHA-256';
     }
-    final signed = UpdateSignature.verify(
-      payload: UpdateSignature.payload(
-        version: '${release.version}',
-        platform: release.platform,
-        size: asset.size,
-        sha256: asset.sha256,
-      ),
-      signature: asset.signature,
-      publicKey: publicKey,
-    );
-    if (!signed) return 'The download is not signed by BaoCode';
+    if (!asset.isSignedFor(release.version, release.platform, publicKey)) {
+      return channel == UpdateChannel.personal
+          ? 'The download is not signed by payAgain/baocode'
+          : 'The download is not signed by BaoCode';
+    }
     return null;
   }
 
@@ -149,12 +162,12 @@ class IoUpdateBackend implements UpdateBackend {
     if (offset == total) return;
     final client = _newClient();
     try {
-      var response = await _get(client, url, from: offset);
+      var (response, _) = await _get(client, url, from: offset);
       if (response.statusCode == HttpStatus.requestedRangeNotSatisfiable) {
         // What was kept is not a start of this file: from the start.
         await response.drain<void>();
         offset = 0;
-        response = await _get(client, url, from: 0);
+        (response, _) = await _get(client, url);
       }
       final resumed =
           offset > 0 && response.statusCode == HttpStatus.partialContent;
@@ -189,14 +202,37 @@ class IoUpdateBackend implements UpdateBackend {
     }
   }
 
-  Future<HttpClientResponse> _get(
+  Future<(HttpClientResponse, Uri)> _get(
     HttpClient client,
     Uri url, {
-    required int from,
+    int from = 0,
+    bool manifest = false,
   }) async {
-    final request = await client.getUrl(url).timeout(timeout);
-    if (from > 0) request.headers.set(HttpHeaders.rangeHeader, 'bytes=$from-');
-    return request.close().timeout(timeout);
+    final personal = channel == UpdateChannel.personal;
+    var endpoint = url;
+    for (var redirects = 0; ; redirects++) {
+      final request = await client.getUrl(endpoint).timeout(timeout);
+      request.followRedirects = !personal;
+      if (manifest) {
+        request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      }
+      if (from > 0) {
+        request.headers.set(HttpHeaders.rangeHeader, 'bytes=$from-');
+      }
+      final response = await request.close().timeout(timeout);
+      if (!personal || !response.isRedirect) return (response, endpoint);
+
+      final location = response.headers.value(HttpHeaders.locationHeader);
+      final target = location == null ? null : Uri.tryParse(location);
+      final next = target == null ? null : endpoint.resolveUri(target);
+      if (redirects >= 3 ||
+          next == null ||
+          !UpdateUrlPolicy.allowsPersonalRedirect(endpoint, next)) {
+        throw HttpException('Unexpected personal update redirect', uri: url);
+      }
+      await response.timeout(timeout).drain<void>();
+      endpoint = next;
+    }
   }
 
   @override

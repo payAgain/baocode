@@ -1,5 +1,7 @@
 # 自动更新
 
+个人构建与 fork 发布见 [个人更新渠道](personal-updates.md)。本文描述官方渠道。
+
 BaoCode 的自动检查与升级：怎么工作、服务端约定、签名、出问题怎么查，以及以后改代码时要注意什么。版本号怎么定、怎么发版、CI 和 Cloudflare 怎么配，见 [release.md](release.md)。
 
 - 更新服务器：`https://dl.baocode.dev`（Cloudflare R2；`baocode.dev/releases/*` 302 到这里）
@@ -528,7 +530,7 @@ flutter test test/update
 
 **改检查的时间**：改 `UpdateService` 的 `firstCheckDelay`（30 秒）和 `checkInterval`（6 小时）这两个默认值，然后同步改 `update_service_test.dart` 里对应的时间。
 
-**改域名或下载页**：域名在 `UpdateUrlPolicy.domain`；清单地址在 `defaultManifestUrl`；下载页在 `ManualUpdateRequired.downloadPage`；发布工具里的链接前缀在 `tool/release_manifest.dart` 的 `_releasesBase`，远程服务端的在 `tool/build_remote_server.dart` 的 `_downloadsBase`；CI 的上传地址在 `.github/workflows/release.yml`；`updates_page` 和文案里也提到了 baocode.dev。改完后跑 `flutter test test/update`。
+**改域名或下载页**：域名在 `UpdateUrlPolicy.domain`；清单地址在 `defaultManifestUrl`；下载页在 `UpdateChannel.downloadPage`；发布工具里的链接前缀在 `tool/release_manifest.dart` 的 `_releasesBase`，远程服务端的在 `tool/build_remote_server.dart` 的 `_downloadsBase`；CI 的上传地址在 `.github/workflows/release.yml`；`updates_page` 和文案里也提到了 baocode.dev。改完后跑 `flutter test test/update`。
 
 **加一个平台**（比如 `windows-arm64`、Linux）：
 

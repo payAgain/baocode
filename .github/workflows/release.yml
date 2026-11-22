@@ -220,7 +220,7 @@ jobs:
       - if: steps.iroh.outputs.hit != 'true'
         uses: ./.github/actions/setup-rust
       - name: Build
-        run: dart run tool/build_macos.dart --build-only ${{ matrix.edition == 'channel' && '--channel' || '' }}
+        run: dart run tool/build_macos.dart --build-only --official-updates ${{ matrix.edition == 'channel' && '--channel' || '' }}
       - uses: ./.github/actions/wait-for-artifact
         with:
           name: remote
@@ -336,7 +336,7 @@ jobs:
       - if: steps.iroh.outputs.hit != 'true'
         uses: ./.github/actions/setup-rust
       - name: Build
-        run: dart run tool/build_windows.dart --build-only --arch ${{ matrix.arch }} ${{ matrix.edition == 'channel' && '--channel' || '' }}
+        run: dart run tool/build_windows.dart --build-only --official-updates --arch ${{ matrix.arch }} ${{ matrix.edition == 'channel' && '--channel' || '' }}
       - uses: ./.github/actions/wait-for-artifact
         with:
           name: remote
@@ -445,6 +445,7 @@ jobs:
         run: |
           mkdir -p build/symbols
           flutter build linux --release \
+            --dart-define=BAOCODE_UPDATE_CHANNEL=official \
             "--extra-gen-snapshot-options=--save-debugging-info=$PWD/build/symbols/app.linux-${{ matrix.arch }}.symbols" \
             ${{ matrix.edition == 'channel' && '--dart-define=BAOCODE_CHANNEL=true' || '' }}
       - uses: ./.github/actions/wait-for-artifact

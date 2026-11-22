@@ -7576,6 +7576,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String get updateUpToDate => 'BaoCode is up to date.';
 
   @override
+  String get updateNotPublished =>
+      'No personal release has been published yet.';
+
+  @override
   String updateAvailable(String version) {
     return 'BaoCode $version is available.';
   }

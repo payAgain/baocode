@@ -7132,6 +7132,9 @@ class AppLocalizationsZh extends AppLocalizations {
   String get updateUpToDate => 'BaoCode 已是最新版本。';
 
   @override
+  String get updateNotPublished => '个人渠道尚未发布版本。';
+
+  @override
   String updateAvailable(String version) {
     return 'BaoCode $version 已发布。';
   }

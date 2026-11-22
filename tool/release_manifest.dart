@@ -14,6 +14,7 @@
 //     [--notes-en <text or file>] [--notes-zh <text or file>] \
 //     [--minimum-version 1.0.0] [--version 1.2.0+12] \
 //     [--manifest build/installers/latest.json]
+//     [--personal]  sign for payAgain/baocode (docs/personal-updates.md)
 //
 // The channel build's (lib/channel/) beside them, each option with
 // -channel after it (--windows-channel, --macos-arm64-channel,
@@ -46,6 +47,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:baocode/update/update_channel.dart';
 import 'package:baocode/update/update_manifest.dart';
 import 'package:baocode/update/update_signature.dart';
 import 'package:baocode/update/version.dart';
@@ -90,7 +92,7 @@ Usage:
       [each of those with -channel after it: the channel build's]
       [--notes-en <text|file>] [--notes-zh <text|file>]
       [--minimum-version <version>] [--version <version>]
-      [--manifest <latest.json>]
+      [--personal] [--manifest <latest.json>]
   dart run tool/release_manifest.dart --generate-key <file>
   dart run tool/release_manifest.dart --public-key
 
@@ -109,11 +111,14 @@ Future<void> main(List<String> arguments) async {
     stdout.writeln(publicKey);
     return;
   }
-  if (publicKey != updatePublicKey) {
+  final channel = options.containsKey('personal')
+      ? UpdateChannel.personal
+      : UpdateChannel.official;
+  if (publicKey != channel.publicKey) {
     _fail(
       'The key in \$$_keyVariable is not the one the app checks against.\n'
       '  its public key:   $publicKey\n'
-      '  the app expects:  $updatePublicKey (lib/update/update_signature.dart)\n'
+      '  ${channel.name} builds expect: ${channel.publicKey} (lib/update/update_signature.dart)\n'
       'Releases signed with it would be refused by every installed BaoCode.',
     );
   }
@@ -144,8 +149,23 @@ Future<void> main(List<String> arguments) async {
     );
   }
   final manifestFile = File(
-    options['manifest'] ?? '${root.path}/build/installers/latest.json',
+    options['manifest'] ??
+        '${root.path}/build/'
+            '${channel == UpdateChannel.personal ? 'personal-release' : 'installers'}/latest.json',
   );
+
+  final personal = channel == UpdateChannel.personal;
+  final policy = personal
+      ? const UpdateUrlPolicy.personal()
+      : const UpdateUrlPolicy();
+  Uri link(String name, String sha) {
+    if (!personal) return _link(version, name, sha);
+    final url = UpdateChannel.personalAsset(version, name);
+    if (!policy.allows(url, version: version)) {
+      _fail('Invalid GitHub Release asset name: $name');
+    }
+    return url;
+  }
 
   // The other platform's entry, signed before for the same version.
   var previous = <String, UpdateAsset>{};
@@ -154,15 +174,20 @@ Future<void> main(List<String> arguments) async {
   AppVersion? minimum;
   if (manifestFile.existsSync()) {
     final text = manifestFile.readAsStringSync();
-    final old = UpdateManifest.parse(text);
+    final old = UpdateManifest.parse(text, policy: policy);
     if (old.version == version) {
       previous = {
-        for (final platform in old.platforms) platform: old.assetFor(platform)!,
+        for (final platform in old.platforms)
+          if (!personal ||
+              old
+                  .assetFor(platform)!
+                  .isSignedFor(version, platform, channel.publicKey))
+            platform: old.assetFor(platform)!,
       };
       notes = {...old.notes};
       minimum = old.minimumVersion;
       if (jsonDecode(text) case {'downloads': final Map<String, Object?> d}) {
-        downloads = {...d};
+        downloads = personal ? _personalDownloads(d, policy, version) : {...d};
       }
     }
   }
@@ -188,12 +213,16 @@ Future<void> main(List<String> arguments) async {
       sha256: sha256,
     );
     final signature = UpdateSignature.sign(payload: payload, seed: seed);
-    if (!UpdateSignature.verify(payload: payload, signature: signature)) {
+    if (!UpdateSignature.verify(
+      payload: payload,
+      signature: signature,
+      publicKey: channel.publicKey,
+    )) {
       _fail('The signature does not check out against the app\'s key.');
     }
     final name = file.uri.pathSegments.last;
     assets[platform] = UpdateAsset(
-      url: _link(version, name, sha256),
+      url: link(name, sha256),
       size: size,
       sha256: sha256,
       signature: signature,
@@ -244,7 +273,7 @@ Future<void> main(List<String> arguments) async {
     if (!dmg.existsSync()) _fail('No such file: ${dmg.path}');
     final sha256 = '${await crypto.sha256.bind(dmg.openRead()).first}';
     offer(os, edition, {
-      'url': '${_link(version, dmg.uri.pathSegments.last, sha256)}',
+      'url': '${link(dmg.uri.pathSegments.last, sha256)}',
       'size': dmg.lengthSync(),
       'sha256': sha256,
     });
@@ -263,7 +292,10 @@ Future<void> main(List<String> arguments) async {
   };
   final text = '${const JsonEncoder.withIndent('  ').convert(json)}\n';
   // What the app will read: it has to read it back the same.
-  UpdateManifest.parse(text);
+  final parsed = UpdateManifest.parse(text, policy: policy);
+  for (final platform in assets.keys) {
+    parsed.assetFor(platform);
+  }
   manifestFile.parent.createSync(recursive: true);
   manifestFile.writeAsStringSync(text);
 
@@ -280,7 +312,12 @@ Future<void> main(List<String> arguments) async {
     final file = edition == _channel ? entry['channel'] as Map : entry;
     stdout.writeln('  ${dmg.path}\n    -> ${file['url']}');
   }
-  stdout.writeln('  ${manifestFile.path}\n    -> $defaultManifestUrl');
+  stdout.writeln('  ${manifestFile.path}\n    -> ${channel.manifest}');
+  if (personal) {
+    stdout.writeln(
+      'GitHub Release: ${channel.releaseNotes('en', version: version)}',
+    );
+  }
   // The channel build's too, once there is one.
   final missing = {
     for (final edition in _editions)
@@ -299,15 +336,47 @@ Future<void> main(List<String> arguments) async {
   }
 }
 
+/// Preserves manual download links only from the same personal release.
+Map<String, Object?> _personalDownloads(
+  Map<String, Object?> downloads,
+  UpdateUrlPolicy policy,
+  AppVersion version,
+) {
+  bool allowed(Object? entry) {
+    if (entry case {'url': final String link}) {
+      final uri = Uri.tryParse(link);
+      return uri != null && policy.allows(uri, version: version);
+    }
+    return false;
+  }
+
+  return {
+    for (final MapEntry(:key, :value) in downloads.entries)
+      if (value case final Map<String, Object?> entry)
+        if (allowed(entry) || allowed(entry['channel']))
+          key: {
+            if (allowed(entry)) ...{
+              for (final field in ['url', 'size', 'sha256'])
+                field: entry[field],
+            },
+            if (allowed(entry['channel'])) 'channel': entry['channel'],
+          },
+  };
+}
+
 /// Writes a new private key to [path] (never over one) and prints its
 /// public half, for lib/update/update_signature.dart.
 void _generateKey(String path) {
   final file = File(path);
   if (file.existsSync()) _fail('$path exists: not overwritten.');
-  file.parent.createSync(recursive: true);
+  // Exclusive creation also rejects an existing symlink and concurrent creation.
+  file.createSync(recursive: true, exclusive: true);
+  if (!Platform.isWindows &&
+      Process.runSync('chmod', ['600', path]).exitCode != 0) {
+    _fail('Could not restrict key file permissions: $path');
+  }
   final seed = UpdateSignature.generateSeed();
   file.writeAsStringSync('$seed\n');
-  if (!Platform.isWindows) Process.runSync('chmod', ['600', path]);
   stdout
     ..writeln('Wrote the private key to $path. Keep it safe, and out of the')
     ..writeln('repository; point \$$_keyVariable at it to sign releases.')
@@ -351,7 +420,7 @@ String _textOrFile(String value) {
 
 /// `--name value` pairs; `--flag` alone for those without one.
 Map<String, String?> _parse(List<String> arguments) {
-  const flags = {'public-key', 'help'};
+  const flags = {'public-key', 'help', 'personal'};
   const files = {
     'windows',
     'windows-arm64',
