@@ -46,6 +46,35 @@ void main() {
     ]);
   });
 
+  test('preview text requires a private turn and excludes tool deliveries', () {
+    final at = DateTime(2026, 2, 3, 14, 15);
+    final messages = desktopBotMessages(
+      [
+        const AssistantTextItem('<bot_say>unrouted reply</bot_say>'),
+        UserMessageItem(text: 'private question', sentAt: at),
+        const AssistantTextItem('<bot_say>private answer</bot_say>'),
+        const UserMessageItem(text: '<bao-event>internal app note</bao-event>'),
+        const AssistantTextItem('<bot_say>system turn reply</bot_say>'),
+        const UserMessageItem(
+          text: '<bao-event>[group g] group input</bao-event>',
+        ),
+        const AssistantTextItem('<bot_say>group answer</bot_say>'),
+        const ToolCallItem(
+          kind: ToolKind.other,
+          target: 'send',
+          tool: 'bot_send',
+          input: {'to': 'private', 'text': 'tool delivery'},
+        ),
+      ],
+      hasEarlier: false,
+      previewOnly: true,
+    );
+    expect(messages.map((message) => (message.text, message.sentAt)), [
+      ('private question', at),
+      ('private answer', at),
+    ]);
+  });
+
   test('private projection shows only explicit replies and private sends', () {
     final picture = ImageAttachment(
       bytes: Uint8List(0),

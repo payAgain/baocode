@@ -9,8 +9,11 @@ import 'package:bao_remote/local.dart' show ClaudeSessions;
 import 'package:baocode/bots/bot.dart';
 import 'package:baocode/bots/bot_files.dart';
 import 'package:baocode/bots/bot_folders.dart';
+import 'package:baocode/bots/bot_group_prompt.dart';
 import 'package:baocode/bots/bots.dart';
+import 'package:baocode/bots/desktop_bot_hub.dart';
 import 'package:baocode/bots/desktop_bot_page.dart';
+import 'package:baocode/bots/desktop_bot_settings.dart';
 import 'package:baocode/chat/chat_models.dart';
 import 'package:baocode/kernel/agent_kernel.dart';
 import 'package:baocode/kernel/claude_code/claude_code_kernel.dart';
@@ -35,6 +38,200 @@ const _other = Bot(id: 'other', name: 'Tao', folder: '/bots/other');
 const _otherThreadId = 'kept-other-bot';
 
 void main() {
+  testWidgets('hub restores and opens the exact recent conversations', (
+    tester,
+  ) async {
+    const group = BotGroup(
+      id: 'g',
+      name: 'Release room',
+      members: ['assistant'],
+    );
+    const otherGroup = BotGroup(id: 'g2', name: 'Other room', members: []);
+    final at = DateTime(2026, 2, 3, 14, 15);
+    final groupAt = at.add(const Duration(hours: 1));
+    final pages = <String?>[];
+    final fixture = _Fixture(Future.value([_kept().first]), (before) async {
+      pages.add(before);
+      return before == null
+          ? ClaudeHistoryPage([
+              _assistant('head', '<bot_say>group at page head</bot_say>'),
+              _user(
+                'g-question',
+                '<bao-event>[group g] hidden input</bao-event>',
+              ),
+              _assistant('g-reply', '<bot_say>hidden group answer</bot_say>'),
+            ], earlier: 'head')
+          : ClaudeHistoryPage([
+              _user('phone', 'saved phone question', at: at),
+              _assistant('private', '<bot_say>saved phone answer</bot_say>'),
+              _assistant('raw', 'internal tool plan'),
+              _user(
+                'g-start',
+                '<bao-event>[group g] earlier route</bao-event>',
+              ),
+            ]);
+    });
+    addTearDown(fixture.dispose);
+    void keep(String path, Object data) => fixture.bots.folders.writeFile(
+      p.join('/bots/groups', path),
+      Uint8List.fromList(utf8.encode('${jsonEncode(data)}\n')),
+    );
+    keep('groups.json', [group.toJson(), otherGroup.toJson()]);
+    keep(
+      'g/messages.jsonl',
+      LinkGroupMessage(
+        seq: 1,
+        at: groupAt,
+        from: 'assistant',
+        text: '<bot_say>saved group answer</bot_say>',
+      ).toJson(),
+    );
+
+    final load = fixture.workspace.load();
+    await fixture.bots.start();
+    await load;
+    final newBot = fixture.bots.save(
+      name: 'New helper',
+      signature: 'Ready for a first chat',
+      identity: 'Helps',
+      abilities: {},
+    );
+    await tester.pumpWidget(fixture.hub());
+    await tester.pumpAndSettle();
+
+    expect(find.text('saved phone answer'), findsOneWidget);
+    expect(find.text('saved group answer'), findsOneWidget);
+    expect(find.text('Ready for a first chat'), findsOneWidget);
+    expect(find.textContaining('hidden'), findsNothing);
+    expect(find.textContaining('group at page head'), findsNothing);
+    expect(find.text('internal tool plan'), findsNothing);
+    expect(pages, [null, 'head']);
+    expect(fixture.cli, isEmpty);
+    expect(fixture.bots.threadOf(_main)?.id, _threadId);
+
+    final material = MaterialLocalizations.of(tester.element(find.text('Mia')));
+    String time(DateTime date) =>
+        '${material.formatMediumDate(date)} '
+        '${material.formatTimeOfDay(TimeOfDay.fromDateTime(date))}';
+    expect(find.text(time(at)), findsOneWidget);
+    expect(find.text(time(groupAt)), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Release room')).dy,
+      lessThan(tester.getTopLeft(find.text('Mia')).dy),
+    );
+    expect(
+      tester.getTopLeft(find.text('Mia')).dy,
+      lessThan(tester.getTopLeft(find.text(newBot.name)).dy),
+    );
+
+    await tester.tap(find.text('Release room'));
+    await tester.pumpAndSettle();
+    expect(find.text('saved group answer'), findsOneWidget);
+    expect(find.text('Other room'), findsNothing);
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+    expect(find.text('Group chats'), findsOneWidget);
+    expect(find.text('Other room'), findsOneWidget);
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Mia'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<DesktopBotPage>(find.byType(DesktopBotPage)).botId,
+      _main.id,
+    );
+    expect(find.text('saved phone question'), findsOneWidget);
+    expect(find.text('saved phone answer'), findsOneWidget);
+    expect(find.text('saved group answer'), findsNothing);
+    expect(fixture.cli.keys, [_main.folder]);
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Configure ${newBot.name}'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<DesktopBotSettings>(find.byType(DesktopBotSettings))
+          .bot
+          ?.id,
+      newBot.id,
+    );
+    await tester.pumpWidget(const SizedBox());
+    fixture.dispose();
+  });
+
+  testWidgets('hub updates from a phone turn and clears the selected unread', (
+    tester,
+  ) async {
+    final fixture = _Fixture(Future.value([_kept().first]), (_) async {
+      return ClaudeHistoryPage([
+        _user('old', 'saved question', at: DateTime(2026, 1, 1)),
+      ]);
+    });
+    addTearDown(fixture.dispose);
+    final load = fixture.workspace.load();
+    await fixture.bots.start();
+    await load;
+    final group = fixture.bots.groups.save(
+      name: 'Live room',
+      members: [_main.id],
+    );
+    final (phone, closePhone) = await fixture.openPhone();
+    await tester.pumpWidget(fixture.hub());
+    await tester.pumpAndSettle();
+    final privateRow = find.ancestor(
+      of: find.text('Mia'),
+      matching: find.byType(ListTile),
+    );
+    final groupRow = find.ancestor(
+      of: find.text(group.name),
+      matching: find.byType(ListTile),
+    );
+    Finder badge(Finder row) =>
+        find.descendant(of: row, matching: find.byType(Badge));
+    expect(badge(privateRow), findsNothing);
+    expect(badge(groupRow), findsNothing);
+
+    fixture.bots.groups.say(group.id, _main.id, 'live group reply');
+    await tester.pump();
+    expect(find.text('live group reply'), findsOneWidget);
+    expect(badge(groupRow), findsOneWidget);
+
+    expect(
+      await phone.call(LinkMethods.send, {
+        'bot': _main.id,
+        'text': 'new phone question',
+      }),
+      {'session': _threadId},
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('new phone question'), findsOneWidget);
+    expect(badge(privateRow), findsNothing);
+    fixture.cli[_main.folder]!.push(
+      _assistant('live', 'raw tool plan <bot_say>new private reply</bot_say>'),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('new private reply'), findsOneWidget);
+    expect(find.textContaining('raw tool plan'), findsNothing);
+    expect(badge(privateRow), findsOneWidget);
+
+    await tester.tap(find.text('Mia'));
+    await tester.pumpAndSettle();
+    expect(find.text('new private reply'), findsOneWidget);
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+    expect(badge(privateRow), findsNothing);
+    expect(badge(groupRow), findsOneWidget);
+
+    await tester.tap(find.text(group.name));
+    await tester.pumpAndSettle();
+    expect(find.text('live group reply'), findsOneWidget);
+    expect(fixture.bots.groups.unread(group.id), 0);
+    await tester.pumpWidget(const SizedBox());
+    await closePhone();
+    fixture.dispose();
+    await tester.pump();
+  });
+
   testWidgets('cold start restores history when the catalog only has bots', (
     tester,
   ) async {
@@ -500,6 +697,16 @@ class _Fixture {
     ),
   );
 
+  Widget hub() => MaterialApp(
+    home: Scaffold(
+      body: DesktopBotHub(
+        bots: bots,
+        onBack: () => back++,
+        onOpenChat: opened.add,
+      ),
+    ),
+  );
+
   bool _disposed = false;
 
   void dispose() {
@@ -545,9 +752,10 @@ List<ProjectRecord> _kept() => [
   ),
 ];
 
-Map<String, Object?> _user(String id, String text) => {
+Map<String, Object?> _user(String id, String text, {DateTime? at}) => {
   'type': 'user',
   'uuid': id,
+  if (at != null) 'timestamp': at.toIso8601String(),
   'message': {'role': 'user', 'content': text},
 };
 

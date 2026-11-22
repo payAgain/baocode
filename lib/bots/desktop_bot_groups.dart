@@ -10,10 +10,16 @@ import 'bots.dart';
 
 /// Desktop access to the same groups and message log that the phone uses.
 class DesktopBotGroups extends StatefulWidget {
-  const DesktopBotGroups({super.key, required this.bots, required this.onBack});
+  const DesktopBotGroups({
+    super.key,
+    required this.bots,
+    required this.onBack,
+    this.initialGroupId,
+  });
 
   final Bots bots;
   final VoidCallback onBack;
+  final String? initialGroupId;
 
   @override
   State<DesktopBotGroups> createState() => _DesktopBotGroupsState();
@@ -21,6 +27,12 @@ class DesktopBotGroups extends StatefulWidget {
 
 class _DesktopBotGroupsState extends State<DesktopBotGroups> {
   String? _selected;
+
+  @override
+  void initState() {
+    super.initState();
+    _selected = widget.initialGroupId;
+  }
 
   Future<void> _editGroup([BotGroup? original]) async {
     final bots = widget.bots;

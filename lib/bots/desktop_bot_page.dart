@@ -174,6 +174,17 @@ class _DesktopBotPageState extends State<DesktopBotPage> {
         !_workspaceReady ||
         (bot != null && session == null) ||
         session?.loadingHistory == true;
+    if (!loading && bot != null && widget.bots.unread(bot) > 0) {
+      final bots = widget.bots;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            identical(widget.bots, bots) &&
+            _bot?.id == bot.id &&
+            identical(_session, session)) {
+          bots.seen(bot);
+        }
+      });
+    }
     return Material(
       color: AppColors.conversationSurface,
       child: Column(
