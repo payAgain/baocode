@@ -1,11 +1,17 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
+import '../chat/chat_keys.dart';
+import '../chat/chat_models.dart' show UserMessageItem;
 import '../chat/chat_session.dart';
+import '../chat/composer/composer.dart';
+import '../chat/stop_confirmation.dart';
+import '../chat/widgets/user_message_bubble.dart';
 import '../kernel/kernel_types.dart' show KernelHealthStatus;
+import '../keybindings/chat_keybindings.dart';
 import '../l10n/l10n.dart';
+import '../link/chat_codec.dart';
 import '../theme/app_theme.dart';
 import '../workspace/editor_launcher.dart' show openExternal;
 import '../workspace/session_tools.dart';
@@ -35,13 +41,11 @@ class DesktopBotPage extends StatefulWidget {
   State<DesktopBotPage> createState() => _DesktopBotPageState();
 }
 
-class _DesktopBotPageState extends State<DesktopBotPage> {
-  final _input = TextEditingController();
+class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
   final _scroll = ScrollController();
   ChatSession? _session;
   bool _workspaceReady = false;
   bool _syncScheduled = false;
-  bool _restoringDraft = false;
   bool _triedEarlier = false;
   Bot? get _bot => switch (widget.botId) {
     final id? => widget.bots.byId(id),
@@ -51,7 +55,6 @@ class _DesktopBotPageState extends State<DesktopBotPage> {
   @override
   void initState() {
     super.initState();
-    _input.addListener(_inputChanged);
     _watch(widget.bots);
   }
 
@@ -108,17 +111,6 @@ class _DesktopBotPageState extends State<DesktopBotPage> {
     _session?.detach();
     _session = session;
     _triedEarlier = false;
-    _restoringDraft = true;
-    final text = session?.draft.content ?? '';
-    final selection = session?.draft.selection;
-    _input.value = TextEditingValue(
-      text: text,
-      selection:
-          selection != null && selection.isValid && selection.end <= text.length
-          ? selection
-          : TextSelection.collapsed(offset: text.length),
-    );
-    _restoringDraft = false;
     session?.addListener(_sessionChanged);
     session?.attach();
     if (_scroll.hasClients) _scroll.jumpTo(0);
@@ -126,41 +118,35 @@ class _DesktopBotPageState extends State<DesktopBotPage> {
 
   void _sessionChanged() => setState(() {});
 
-  void _inputChanged() {
-    if (_restoringDraft) return;
-    if (_session?.draft case final draft?) {
-      draft.save(_input.text, _input.selection, draft.images, by: this);
+  bool _canStop(ChatSession session) {
+    if (!identical(_session, session) || !session.isStreaming) return false;
+    // A private prompt queued during a group turn doesn't change the turn
+    // being answered. Only the surface that owns that turn may stop it.
+    for (var i = session.itemCount - 1; i >= 0; i--) {
+      if (session.itemAt(i) case final UserMessageItem item when !item.queued) {
+        return ChatCodec.botGroupOf(item) == null;
+      }
     }
-    setState(() {});
+    return !session.hasEarlierHistory;
   }
 
-  bool get _canSend => switch (_session) {
-    final session? =>
-      !session.loadingHistory &&
-          session.health.status != KernelHealthStatus.failed &&
-          session.canSend &&
-          _input.text.trim().isNotEmpty,
-    null => false,
+  @override
+  Object? chatContextKey(String key) => switch (key) {
+    ChatContextKeys.requestInProgress => _session?.isStreaming ?? false,
+    _ => null,
   };
 
-  void _send() {
-    final session = _session;
-    final bot = _bot;
-    if (session == null || bot == null || !_canSend) return;
-    session.send(
-      ComposerMessage(text: _input.text.trim()),
-      notes: widget.bots.suggestionNotes(bot, wanted: false),
-    );
-    _input.clear();
-    if (_scroll.hasClients) _scroll.jumpTo(0);
-  }
+  @override
+  Map<String, VoidCallback> get chatCommands => {
+    if (_session case final session? when _canStop(session))
+      ChatCommandIds.cancel: () => stopTurn(context, session),
+  };
 
   @override
   void dispose() {
     _unwatch(widget.bots);
     _session?.removeListener(_sessionChanged);
     _session?.detach();
-    _input.dispose();
     _scroll.dispose();
     super.dispose();
   }
@@ -250,56 +236,36 @@ class _DesktopBotPageState extends State<DesktopBotPage> {
               icon: const Icon(Icons.error_outline),
               label: Text(l10n.healthRetry),
             ),
-          _centered(
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 4, 18, 16),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: AppColors.bubbleFill,
-                  border: Border.all(color: AppColors.bubbleBorder()),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Expanded(
-                      child: CallbackShortcuts(
-                        bindings: {
-                          if (_canSend)
-                            const SingleActivator(
-                              LogicalKeyboardKey.enter,
-                            ): () {
-                              if (_input.value.composing.isCollapsed) _send();
-                            },
-                        },
-                        child: TextField(
-                          controller: _input,
-                          enabled: session != null,
-                          minLines: 1,
-                          maxLines: 5,
-                          style: TextStyle(color: AppColors.text),
-                          decoration: InputDecoration(
-                            hintText: l10n.editorStartTyping,
-                            border: InputBorder.none,
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 12,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      tooltip: l10n.cmdChatSubmit,
-                      color: AppColors.accent,
-                      onPressed: _canSend ? _send : null,
-                      icon: const Icon(Icons.arrow_upward),
-                    ),
-                  ],
+          if (bot != null && session != null)
+            _centered(
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 4, 18, 16),
+                child: ChatComposer(
+                  key: ObjectKey(session),
+                  session: session,
+                  draft: session.draft,
+                  showSessionControls: false,
+                  privatePromptText: desktopBotPromptText,
+                  canStop: () => _canStop(session),
+                  canSubmit: () =>
+                      identical(_session, session) &&
+                      _bot?.id == bot.id &&
+                      !session.loadingHistory &&
+                      session.health.status != KernelHealthStatus.failed &&
+                      session.canSend,
+                  onIntercept: (message) {
+                    // Like the phone, private bot chat has its own suggestion
+                    // policy and doesn't send ordinary chat's place notes.
+                    session.send(
+                      message,
+                      notes: widget.bots.suggestionNotes(bot, wanted: false),
+                    );
+                    if (_scroll.hasClients) _scroll.jumpTo(0);
+                    return true;
+                  },
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -403,7 +369,9 @@ class _DesktopBotPageState extends State<DesktopBotPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (message.text.isNotEmpty)
+                  if (message.textWithAttachments case final text?)
+                    UserMessageBubble(text: text)
+                  else if (message.text.isNotEmpty)
                     Text(
                       message.text,
                       style: TextStyle(
