@@ -197,6 +197,9 @@ class Sidebar extends StatefulWidget {
     this.onOpenFolder,
     this.onDropFolders,
     this.onAddSshHost,
+    this.onConnectComputer,
+    this.showingComputer = false,
+    this.connectedComputerName,
     this.onOpenFolderOn,
     this.editSshHost,
     this.onOpenSettings,
@@ -286,6 +289,9 @@ class Sidebar extends StatefulWidget {
   /// Opens the search palette (agents, what was said in them, files,
   /// actions); no Search row without it.
   final VoidCallback? onSearch;
+  final VoidCallback? onConnectComputer;
+  final bool showingComputer;
+  final String? connectedComputerName;
 
   final VoidCallback? onBot;
   final bool showingBot;
@@ -1114,6 +1120,21 @@ class _SidebarState extends State<Sidebar>
                 label: context.l10n.sidebarOpenProject,
                 onTap: open,
               ),
+            ),
+          if (widget.onConnectComputer case final connect?)
+            _NavRow(
+              icon: Codicons.deviceDesktop,
+              label: switch ((
+                widget.connectedComputerName,
+                Localizations.localeOf(context).languageCode,
+              )) {
+                (final name?, 'zh') => '来自 $name',
+                (final name?, _) => 'From $name',
+                (null, 'zh') => '连接另一台电脑',
+                _ => 'Connect to computer',
+              },
+              selected: widget.showingComputer,
+              onTap: connect,
             ),
           if (widget.onSearch case final search?)
             _NavRow(
