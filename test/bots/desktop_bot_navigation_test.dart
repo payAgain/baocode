@@ -1,6 +1,7 @@
 import 'package:baocode/bots/bot_folders.dart';
 import 'package:baocode/bots/bots.dart';
 import 'package:baocode/bots/desktop_bot_page.dart';
+import 'package:baocode/bots/desktop_bot_hub.dart';
 import 'package:baocode/link/link_host.dart';
 import 'package:baocode/main.dart';
 import 'package:baocode/settings/app_locale.dart';
@@ -27,6 +28,12 @@ void main() {
         computer: () async => 'Test Mac',
       );
       await bots.start();
+      final second = bots.save(
+        name: 'Build helper',
+        identity: 'Builds',
+        abilities: {},
+        writesFirst: false,
+      );
       final link = LinkHost(workspace: workspace, bots: bots);
       await tester.pumpWidget(
         BaoCodeApp(
@@ -42,13 +49,25 @@ void main() {
       expect(entry, findsOneWidget);
       await tester.tap(entry);
       await tester.pump();
-      expect(find.byType(DesktopBotPage), findsOneWidget);
-      expect(workspace.current, same(projectChat));
+      expect(find.byType(DesktopBotHub), findsOneWidget);
       final assistant = bots.bots.firstWhere((bot) => bot.assistant);
+      expect(find.text(assistant.name), findsOneWidget);
+      expect(find.text('Group chats'), findsOneWidget);
+      await tester.tap(find.text(second.name));
+      await tester.pump();
+      expect(find.byType(DesktopBotPage), findsOneWidget);
+      expect(
+        tester.widget<DesktopBotPage>(find.byType(DesktopBotPage)).botId,
+        second.id,
+      );
+      expect(workspace.current, same(projectChat));
       expect(workspace.listsInSidebar(bots.threadFor(assistant)), isFalse);
       tester.widget<DesktopBotPage>(find.byType(DesktopBotPage)).onBack();
       await tester.pump();
       expect(find.byType(DesktopBotPage), findsNothing);
+      tester.widget<DesktopBotHub>(find.byType(DesktopBotHub)).onBack();
+      await tester.pump();
+      expect(find.byType(DesktopBotHub), findsNothing);
       expect(workspace.current, same(projectChat));
       await tester.pumpWidget(const SizedBox.shrink());
       bots.dispose();

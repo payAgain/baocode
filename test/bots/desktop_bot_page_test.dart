@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:bao_link/bao_link.dart';
 import 'package:bao_remote/claude.dart' show ClaudeHistoryPage;
+import 'package:bao_remote/local.dart' show ClaudeSessions;
 import 'package:baocode/bots/bot.dart';
 import 'package:baocode/bots/bot_files.dart';
 import 'package:baocode/bots/bot_folders.dart';
@@ -28,8 +31,187 @@ const _main = Bot(
 );
 const _threadId = 'kept-main-bot';
 const _projectId = 'kept-project-chat';
+const _other = Bot(id: 'other', name: 'Tao', folder: '/bots/other');
+const _otherThreadId = 'kept-other-bot';
 
 void main() {
+  testWidgets('cold start restores history when the catalog only has bots', (
+    tester,
+  ) async {
+    final fixture = _Fixture(Future.value([_kept().first]), (_) async {
+      return ClaudeHistoryPage([
+        _user('phone-before-relaunch', 'saved phone question'),
+        _assistant('answer', '<bot_say>saved phone answer</bot_say>'),
+      ]);
+    });
+    addTearDown(fixture.dispose);
+    final load = fixture.workspace.load();
+    await fixture.bots.start();
+    await load;
+    await tester.pumpWidget(fixture.page());
+    await tester.pump();
+
+    expect(fixture.bots.threadOf(_main)?.id, _threadId);
+    expect(fixture.workspace.threads.map((thread) => thread.id), [_threadId]);
+    expect(find.text('saved phone question'), findsOneWidget);
+    expect(find.text('saved phone answer'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    fixture.dispose();
+  });
+
+  testWidgets('loads saved private history behind a group-only first page', (
+    tester,
+  ) async {
+    final pages = (await tester.runAsync(() async {
+      final dir = Directory.systemTemp.createTempSync('private-bot-history-');
+      try {
+        final transcript = File(p.join(dir.path, '$_threadId.jsonl'));
+        final entries = [
+          _user('phone', 'older phone question'),
+          _assistant('private', '<bot_say>older phone reply</bot_say>'),
+          for (var i = 0; i < 10; i++) ...[
+            _user(
+              'group-$i',
+              '<bao-event>[group g] group question</bao-event>',
+            ),
+            _assistant('group-reply-$i', '<bot_say>group reply</bot_say>'),
+          ],
+        ];
+        await transcript.writeAsString(
+          [
+            for (final (index, entry) in entries.indexed)
+              jsonEncode({
+                ...entry,
+                'parentUuid': index == 0 ? null : entries[index - 1]['uuid'],
+              }),
+          ].join('\n'),
+        );
+        final first = await ClaudeSessions.readPage(transcript.path, turns: 10);
+        expect(first.earlier, 'group-0');
+        final older = await ClaudeSessions.readPage(
+          transcript.path,
+          turns: 20,
+          before: first.earlier,
+        );
+        return {null: first, first.earlier: older};
+      } finally {
+        dir.deleteSync(recursive: true);
+      }
+    }))!;
+    final requested = <String?>[];
+    final fixture = _Fixture(Future.value(_kept()), (before) async {
+      requested.add(before);
+      return pages[before]!;
+    });
+    addTearDown(fixture.dispose);
+    final load = fixture.workspace.load();
+    await fixture.bots.start();
+    await load;
+    await tester.pumpWidget(fixture.page());
+    await tester.pumpAndSettle();
+
+    expect(requested, [null, 'group-0']);
+    expect(find.text('older phone question'), findsOneWidget);
+    expect(find.text('older phone reply'), findsOneWidget);
+    expect(find.textContaining('group question'), findsNothing);
+    expect(find.text('group reply'), findsNothing);
+    final (phone, closePhone) = await fixture.openPhone();
+    addTearDown(closePhone);
+    final state = LinkState.fromJson(
+      (await phone.call(LinkMethods.state, {}))! as Map<String, Object?>,
+    );
+    final id = state.bots.single.session;
+    expect(id, _threadId);
+    final opened = LinkSessionUpdate.fromJson(
+      (await phone.call(LinkMethods.open, {'session': id, 'window': 2}))!
+          as Map<String, Object?>,
+    );
+    expect(opened.earlier, isTrue);
+    final history =
+        (await phone.call(LinkMethods.earlier, {'session': id, 'count': 50}))!
+            as Map<String, Object?>;
+    final earlier = (history['items']! as List).cast<Map<String, Object?>>();
+    expect(
+      (ChatCodec.decode(earlier.first) as UserMessageItem).text,
+      'older phone question',
+    );
+    expect(
+      (ChatCodec.decode(earlier[1]) as AssistantTextItem).text,
+      '<bot_say>older phone reply</bot_say>',
+    );
+    expect(history['earlier'], isFalse);
+    await tester.pumpWidget(const SizedBox());
+    await closePhone();
+    fixture.dispose();
+  });
+
+  testWidgets('switches existing bot threads and keeps separate drafts', (
+    tester,
+  ) async {
+    final pending = Completer<ClaudeHistoryPage>();
+    final fixture = _Fixture(
+      Future.value([
+        ..._kept(),
+        ProjectRecord(
+          path: _other.folder,
+          sessions: [
+            SessionRecord(
+              id: _otherThreadId,
+              title: 'Second bot conversation',
+              updatedAt: DateTime(2026),
+              cwd: _other.folder,
+            ),
+          ],
+        ),
+      ]),
+      (_) async => ClaudeHistoryPage([_user('main', 'Mia on the phone')]),
+      otherHistory: pending.future,
+    );
+    addTearDown(fixture.dispose);
+    final load = fixture.workspace.load();
+    await fixture.bots.start();
+    await load;
+    await tester.pumpWidget(fixture.page());
+    await tester.pump();
+    expect(find.text('Mia on the phone'), findsOneWidget);
+    final main = fixture.bots.threadOf(_main)!;
+    final other = fixture.bots.threadOf(_other)!;
+    expect(main.id, _threadId);
+    expect(other.id, _otherThreadId);
+    await tester.enterText(find.byType(TextField), 'Mia draft');
+
+    await tester.pumpWidget(fixture.page(botId: _other.id));
+    await tester.pump();
+    expect(find.text('Tao'), findsOneWidget);
+    expect(find.text('Mia on the phone'), findsNothing);
+    expect(find.text('Mia draft'), findsNothing);
+    expect(find.text('Loading conversation…'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'Tao draft');
+
+    await tester.pumpWidget(fixture.page());
+    await tester.pump();
+    pending.complete(ClaudeHistoryPage([_user('tao', 'Tao on the phone')]));
+    await tester.pump();
+    expect(find.text('Mia on the phone'), findsOneWidget);
+    expect(find.text('Mia draft'), findsOneWidget);
+    expect(find.text('Tao on the phone'), findsNothing);
+
+    await tester.pumpWidget(fixture.page(botId: _other.id));
+    await tester.pump();
+    expect(find.text('Tao on the phone'), findsOneWidget);
+    expect(find.text('Tao draft'), findsOneWidget);
+    expect(find.text('Mia on the phone'), findsNothing);
+    expect(fixture.bots.threadOf(_other), same(other));
+
+    await tester.pumpWidget(fixture.page(botId: 'missing'));
+    await tester.pump();
+    expect(find.text('Tao on the phone'), findsNothing);
+    expect(find.text('Mia on the phone'), findsNothing);
+    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
+    await tester.pumpWidget(const SizedBox());
+    fixture.dispose();
+  });
+
   testWidgets('waits for workspace and shares desktop and phone messages', (
     tester,
   ) async {
@@ -88,29 +270,8 @@ void main() {
     expect(find.text('previous phone message'), findsOneWidget);
     expect(find.text('kept private reply'), findsOneWidget);
 
-    final (phoneConn, desktopConn) = MemoryLinkConnection.pair(
-      a: LinkIdentity.generate().id,
-      b: LinkIdentity.generate().id,
-    );
-    late final WorkspaceBridge bridge;
-    final accepting = LinkPeer.accept(
-      desktopConn,
-      onRequest: (method, params) => bridge.handle(method, params),
-    );
-    final phone = await LinkPeer.connect(phoneConn);
-    final desktop = await accepting;
-    bridge = WorkspaceBridge(
-      workspace: fixture.workspace,
-      peer: desktop,
-      device: () => const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
-      bots: fixture.bots,
-      throttle: const Duration(milliseconds: 10),
-    )..start();
-    addTearDown(() async {
-      bridge.dispose();
-      await phone.close();
-      await desktop.close();
-    });
+    final (phone, closePhone) = await fixture.openPhone();
+    addTearDown(closePhone);
 
     expect(
       original.session.health.status.name,
@@ -188,9 +349,7 @@ void main() {
     expect(find.text('local stream reply'), findsOneWidget);
     expect(find.textContaining('internal text'), findsNothing);
     await tester.pumpWidget(const SizedBox());
-    bridge.dispose();
-    await phone.close();
-    await desktop.close();
+    await closePhone();
     fixture.dispose();
     await tester.pump();
   });
@@ -261,8 +420,9 @@ void main() {
 class _Fixture {
   _Fixture(
     Future<List<ProjectRecord>> listing,
-    Future<ClaudeHistoryPage> Function(String?) history,
-  ) {
+    Future<ClaudeHistoryPage> Function(String?) history, {
+    Future<ClaudeHistoryPage>? otherHistory,
+  }) {
     late final KernelDescriptor descriptor;
     descriptor = KernelDescriptor(
       id: 'claude-code',
@@ -274,15 +434,19 @@ class _Fixture {
         descriptor,
         context,
         start: (_) async => cli[context.cwd] = FakeCli(),
-        readHistoryPage: (_, {required turns, before}) => history(before),
+        readHistoryPage: (session, {required turns, before}) =>
+            session.id == _otherThreadId ? otherHistory! : history(before),
       ),
     );
     workspace = Workspace(kernels: [descriptor]);
-    final folders = MemoryBotFolders()..make(_main.folder);
-    folders.writeFile(
-      p.join(_main.folder, BotFiles.card),
-      Uint8List.fromList(BotFiles.cardText(_main).codeUnits),
-    );
+    final folders = MemoryBotFolders();
+    for (final bot in [_main, if (otherHistory != null) _other]) {
+      folders.make(bot.folder);
+      folders.writeFile(
+        p.join(bot.folder, BotFiles.card),
+        Uint8List.fromList(BotFiles.cardText(bot).codeUnits),
+      );
+    }
     bots = Bots(
       workspace: workspace,
       folders: folders,
@@ -296,10 +460,40 @@ class _Fixture {
   final opened = <String>[];
   int back = 0;
 
-  Widget page() => MaterialApp(
+  Future<(LinkPeer, Future<void> Function())> openPhone() async {
+    final (phoneConn, desktopConn) = MemoryLinkConnection.pair(
+      a: LinkIdentity.generate().id,
+      b: LinkIdentity.generate().id,
+    );
+    late final WorkspaceBridge bridge;
+    final accepting = LinkPeer.accept(
+      desktopConn,
+      onRequest: (method, params) => bridge.handle(method, params),
+    );
+    final phone = await LinkPeer.connect(phoneConn);
+    final desktop = await accepting;
+    bridge = WorkspaceBridge(
+      workspace: workspace,
+      peer: desktop,
+      device: () => const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
+      bots: bots,
+      throttle: const Duration(milliseconds: 10),
+    )..start();
+    return (
+      phone,
+      () async {
+        bridge.dispose();
+        await phone.close();
+        await desktop.close();
+      },
+    );
+  }
+
+  Widget page({String? botId}) => MaterialApp(
     home: Scaffold(
       body: DesktopBotPage(
         bots: bots,
+        botId: botId,
         onBack: () => back++,
         onOpenChat: opened.add,
       ),
