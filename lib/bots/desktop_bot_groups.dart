@@ -43,12 +43,18 @@ class _DesktopBotGroupsState extends State<DesktopBotGroups> {
             if (!removed.contains(id)) id,
           ...draft.members.difference(previous),
         ],
+        lead: draft.lead == original.lead ? null : draft.lead,
+        clearLead: draft.clearLead,
       );
       return;
     }
     final members = draft.members.where((id) => bots.byId(id) != null).toList();
     if (members.isEmpty) return;
-    final group = bots.groups.save(name: draft.name, members: members);
+    final group = bots.groups.save(
+      name: draft.name,
+      members: members,
+      lead: draft.lead,
+    );
     setState(() => _selected = group.id);
   }
 
@@ -169,6 +175,53 @@ class _GroupChatState extends State<_GroupChat> {
     if (_scroll.hasClients) _scroll.jumpTo(0);
   }
 
+  Future<void> _changeLead() async {
+    final bots = widget.bots;
+    final group = widget.group;
+    final choice = await showDialog<({String? id})>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: Text(_labels(context, 'Change default lead', '更换默认主理人')),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+            child: Text(
+              _labels(
+                context,
+                'An @mention takes priority. The current turn continues.',
+                '@提及优先。当前轮次会继续。',
+              ),
+            ),
+          ),
+          for (final id in <String?>[null, ...group.members])
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, (id: id)),
+              child: Text(
+                id == null
+                    ? _labels(context, 'No default lead', '不设默认主理人')
+                    : _memberName(bots, group, id),
+              ),
+            ),
+        ],
+      ),
+    );
+    if (!mounted || !identical(bots, widget.bots) || choice == null) return;
+    final current = bots.groups.byId(group.id);
+    final lead = choice.id;
+    if (current == null || current.lead == lead) return;
+    if (lead != null &&
+        (!current.members.contains(lead) || bots.byId(lead) == null)) {
+      return;
+    }
+    bots.groups.save(
+      id: current.id,
+      name: current.name,
+      members: current.members,
+      lead: lead,
+      clearLead: lead == null,
+    );
+  }
+
   void _markRead() {
     final groups = widget.bots.groups;
     final id = widget.group.id;
@@ -188,17 +241,50 @@ class _GroupChatState extends State<_GroupChat> {
     final bots = widget.bots;
     final group = widget.group;
     final messages = bots.groups.messages(group.id);
+    final relay = bots.groups.relay(group.id);
+    final lead = group.lead;
+    final leadName = lead == null
+        ? _labels(context, 'None', '无')
+        : _memberName(bots, group, lead);
+    final handler = switch (relay.holder) {
+      final id? => _memberName(bots, group, id),
+      null => null,
+    };
+    final status = handler == null
+        ? _labels(context, 'No bot handling this turn', '当前没有机器人处理')
+        : relay.waiting
+        ? _labels(context, 'Waiting for: $handler', '等待 $handler')
+        : _labels(context, 'Handling: $handler', '正在处理：$handler');
     _markRead();
     return Column(
       children: [
         _GroupHeader(
           title: group.name,
-          subtitle: _memberLine(bots, group),
+          subtitle: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ?_memberLine(bots, group),
+              _headerLine(
+                _labels(context, 'Default lead: $leadName', '默认主理人：$leadName'),
+              ),
+              Semantics(liveRegion: true, child: _headerLine(status)),
+            ],
+          ),
           onBack: widget.onBack,
-          action: IconButton(
-            tooltip: _labels(context, 'Edit group', '编辑群聊'),
-            onPressed: widget.onEdit,
-            icon: const Icon(Icons.edit_outlined),
+          action: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                tooltip: _labels(context, 'Change default lead', '更换默认主理人'),
+                onPressed: group.members.isEmpty ? null : _changeLead,
+                icon: const Icon(Icons.swap_horiz),
+              ),
+              IconButton(
+                tooltip: _labels(context, 'Edit group', '编辑群聊'),
+                onPressed: widget.onEdit,
+                icon: const Icon(Icons.edit_outlined),
+              ),
+            ],
           ),
         ),
         Expanded(
@@ -378,7 +464,12 @@ class _GroupMessage extends StatelessWidget {
   }
 }
 
-typedef _GroupDraft = ({String name, Set<String> members});
+typedef _GroupDraft = ({
+  String name,
+  Set<String> members,
+  String? lead,
+  bool clearLead,
+});
 
 class _GroupEditor extends StatefulWidget {
   const _GroupEditor({required this.bots, this.group});
@@ -393,6 +484,13 @@ class _GroupEditor extends StatefulWidget {
 class _GroupEditorState extends State<_GroupEditor> {
   late final _name = TextEditingController(text: widget.group?.name);
   late final _members = widget.group?.members.toSet() ?? <String>{};
+  late String? _lead = widget.group?.lead;
+  bool _clearLead = false;
+
+  String? get _selectedLead => switch (_lead) {
+    final id? when widget.bots.byId(id) != null => id,
+    _ => null,
+  };
 
   bool get _editing => widget.group != null;
 
@@ -438,9 +536,35 @@ class _GroupEditorState extends State<_GroupEditor> {
                     _members.add(bot.id);
                   } else {
                     _members.remove(bot.id);
+                    if (_lead == bot.id) _lead = null;
                   }
                 }),
               ),
+            const SizedBox(height: 12),
+            Text(_labels(context, 'Default lead', '默认主理人')),
+            DropdownButton<({String? id})>(
+              key: const ValueKey('group-lead-picker'),
+              isExpanded: true,
+              value: (id: _selectedLead),
+              items: [
+                DropdownMenuItem(
+                  value: (id: null),
+                  child: Text(_labels(context, 'No default lead', '不设默认主理人')),
+                ),
+                for (final bot in widget.bots.bots)
+                  if (_members.contains(bot.id))
+                    DropdownMenuItem(
+                      value: (id: bot.id),
+                      child: Text(bot.name, overflow: TextOverflow.ellipsis),
+                    ),
+              ],
+              onChanged: _members.any((id) => widget.bots.byId(id) != null)
+                  ? (choice) => setState(() {
+                      _lead = choice?.id;
+                      _clearLead = _lead == null;
+                    })
+                  : null,
+            ),
           ],
         ),
       ),
@@ -455,6 +579,8 @@ class _GroupEditorState extends State<_GroupEditor> {
               ? () => Navigator.pop(context, (
                   name: _name.text.trim(),
                   members: _members.toSet(),
+                  lead: _selectedLead,
+                  clearLead: _clearLead,
                 ))
               : null,
           child: Text(
@@ -524,13 +650,17 @@ String _memberName(Bots bots, BotGroup group, String id) =>
 
 Widget? _memberLine(Bots bots, BotGroup group) => group.members.isEmpty
     ? null
-    : Text(
+    : _headerLine(
         [for (final id in group.members) _memberName(bots, group, id)]
             .join(', '),
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(fontSize: 12, color: AppColors.textMuted),
       );
+
+Widget _headerLine(String text) => Text(
+  text,
+  maxLines: 1,
+  overflow: TextOverflow.ellipsis,
+  style: TextStyle(fontSize: 12, color: AppColors.textMuted),
+);
 
 Widget _centered(Widget child) => Align(
   child: ConstrainedBox(

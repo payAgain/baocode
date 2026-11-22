@@ -32,6 +32,7 @@ class LinkGroup {
     this.passes = linkGroupPasses,
     this.rules = '',
     this.gap = 0,
+    this.lead,
   });
 
   factory LinkGroup.fromJson(Map<String, Object?> json) => LinkGroup(
@@ -59,6 +60,7 @@ class LinkGroup {
     passes: (json['passes'] as num?)?.toInt() ?? linkGroupPasses,
     rules: json['rules'] as String? ?? '',
     gap: (json['gap'] as num?)?.toInt() ?? 0,
+    lead: json['lead'] as String?,
   );
 
   final String id;
@@ -95,6 +97,9 @@ class LinkGroup {
   /// before it answers: 0, at once.
   final int gap;
 
+  /// The member who gets first turn by default when the user speaks.
+  final String? lead;
+
   Map<String, Object?> toJson() => {
     'id': id,
     'name': name,
@@ -108,6 +113,7 @@ class LinkGroup {
     if (passes != linkGroupPasses) 'passes': passes,
     if (rules.isNotEmpty) 'rules': rules,
     if (gap > 0) 'gap': gap,
+    'lead': ?lead,
   };
 }
 

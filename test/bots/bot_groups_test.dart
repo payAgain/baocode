@@ -85,6 +85,82 @@ void main() {
     expect((kept.single as Map)['members'], [mia.id, leo.id]);
   });
 
+  test('the stored lead clears on removal, bot deletion, and reset', () {
+    final members = [mia.id, leo.id, ann.id];
+    final group = groups.save(name: 'Planning', members: members, lead: leo.id);
+    final id = group.id;
+    BotGroup? coldGroup() {
+      final cold = BotGroups(bots)..start();
+      try {
+        return cold.byId(id);
+      } finally {
+        cold.dispose();
+      }
+    }
+
+    expect(coldGroup()!.lead, leo.id);
+    groups.save(id: id, name: 'Planning', members: [mia.id, ann.id]);
+    expect(coldGroup()!.toJson().containsKey('lead'), isFalse);
+    groups.save(id: id, name: 'Planning', members: members);
+    expect(coldGroup()!.lead, isNull);
+
+    groups.save(id: id, name: 'Planning', members: members, lead: leo.id);
+    bots.delete(leo.id);
+    expect(coldGroup()!.members, [mia.id, ann.id]);
+    expect(coldGroup()!.lead, isNull);
+
+    groups.save(
+      id: id,
+      name: 'Planning',
+      members: [mia.id, ann.id],
+      lead: ann.id,
+    );
+    expect(coldGroup()!.lead, ann.id);
+    groups.save(
+      id: id,
+      name: 'Planning',
+      members: [mia.id, ann.id],
+      clearLead: true,
+    );
+    expect(coldGroup()!.lead, isNull);
+    groups.say(id, mia.id, 'Recent reply');
+    groups.send(id, text: 'Continue');
+    expect(groups.relay(id).holder, mia.id);
+    groups.delete(id);
+    expect(coldGroup(), isNull);
+  });
+
+  test('removing the active lead cannot replay the next message', () {
+    final group = groups.save(
+      name: 'g',
+      members: [mia.id, leo.id],
+      lead: mia.id,
+    );
+    groups.send(group.id, text: 'Start');
+    groups.send(group.id, text: 'While the lead is busy');
+    expect(toldNames(), ['Mia']);
+    groups.save(id: group.id, name: group.name, members: [leo.id]);
+    groups.send(group.id, text: 'Next');
+    expect(toldNames(), ['Mia', 'Leo']);
+    groups.turnEnded(group.id, leo.id, '<bot_say>Done</bot_say>');
+    expect(toldNames(), ['Mia', 'Leo']);
+    expect(groups.relay(group.id).holder, isNull);
+  });
+
+  test('a timed-out lead does not hand off to a removed member', () async {
+    groups.stuck = const Duration(milliseconds: 20);
+    final group = groups.save(
+      name: 'g',
+      members: [mia.id, leo.id],
+      lead: mia.id,
+    );
+    groups.send(group.id, text: 'Start');
+    groups.save(id: group.id, name: group.name, members: [mia.id]);
+    await wait(50);
+    expect(toldNames(), ['Mia']);
+    expect(groups.relay(group.id).holder, isNull);
+  });
+
   test('what is said kept, and as the bots read it: each message under its '
       'number, who and when; pictures by their files', () async {
     final group = groups.save(name: '江湖', members: [mia.id, leo.id]);
@@ -126,6 +202,44 @@ void main() {
   });
 
   String? holder(BotGroup group) => groups.relay(group.id).holder;
+
+  test(
+    'cold group routing prioritizes @, then the saved lead, then fallback',
+    () {
+      const path = '/bots/groups/groups.json';
+      final base = groups.save(
+        name: 'Legacy',
+        members: [mia.id, leo.id, ann.id],
+      );
+      final led = groups.save(name: 'With lead', members: base.members);
+      folders.writeFile(
+        path,
+        utf8.encode(
+          jsonEncode([
+            base.toJson(),
+            {...led.toJson(), 'lead': leo.id},
+          ]),
+        ),
+      );
+      final cold = BotGroups(bots)..start();
+      addTearDown(cold.dispose);
+      cold.tell = (_, member, note) => told.add((member, note));
+
+      cold.say(led.id, ann.id, 'Earlier update');
+      cold.send(led.id, text: 'Check this @Mia', ref: 1);
+      expect(cold.relay(led.id).holder, mia.id);
+      cold.turnEnded(led.id, mia.id, '<bot_say>Acknowledged</bot_say>');
+
+      cold.send(led.id, text: 'Continue', ref: 1);
+      expect(cold.relay(led.id).holder, leo.id);
+      expect(told.last.$2, contains('you are this group\'s default lead'));
+
+      cold.say(base.id, ann.id, 'Quote this');
+      cold.say(base.id, mia.id, 'More recent');
+      cold.send(base.id, text: 'Follow up', ref: 1);
+      expect(cold.relay(base.id).holder, ann.id);
+    },
+  );
 
   test('the user speaks: it goes to whom they call on; else to the bot '
       'that spoke last; else to one at random', () async {
