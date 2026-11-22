@@ -1,4 +1,5 @@
 import '../chat/chat_models.dart';
+import '../chat/composer/composer_files.dart';
 import '../link/chat_codec.dart';
 
 enum DesktopBotMessageKind { user, reply, narration, chat }
@@ -6,10 +7,23 @@ enum DesktopBotMessageKind { user, reply, narration, chat }
 typedef DesktopBotMessage = ({
   DesktopBotMessageKind kind,
   String text,
+  String? textWithAttachments,
   List<ImageAttachment> images,
   Uri? imageUrl,
   DateTime? sentAt,
 });
+
+/// The user's own prompts, with any app notes cut out. The attachment
+/// appendix is retained here so prompt recall can restore its chips.
+String? desktopBotPromptText(UserMessageItem item) {
+  if (item.fromAgent != null ||
+      item.fromSession != null ||
+      ChatCodec.botEvent(item) != null) {
+    return null;
+  }
+  if (item.images.isNotEmpty && ChatCodec.sticker(item.text) != null) return '';
+  return ChatCodec.withoutBotEvents(item.text);
+}
 
 /// The private view of the bot's shared transcript. Use the phone's wire
 /// format for routing and reply tags, but never expose raw transcript items.
@@ -27,6 +41,7 @@ List<DesktopBotMessage> desktopBotMessages(
   void add(
     DesktopBotMessageKind kind,
     String text, {
+    String? textWithAttachments,
     List<ImageAttachment> images = const [],
     Uri? imageUrl,
     DateTime? sentAt,
@@ -38,6 +53,7 @@ List<DesktopBotMessage> desktopBotMessages(
     messages.add((
       kind: kind,
       text: text,
+      textWithAttachments: textWithAttachments,
       images: images,
       imageUrl: imageUrl,
       sentAt: sentAt,
@@ -65,14 +81,15 @@ List<DesktopBotMessage> desktopBotMessages(
           privateTurn = !inGroup && (!previewOnly || event == null);
           turnAt = item.sentAt;
         }
-        if (event == null) {
-          final text =
-              ChatCodec.sticker(item.text) != null && item.images.isNotEmpty
-              ? ''
-              : words(item.text);
+        if (desktopBotPromptText(item) case final prompt?) {
+          final (:body, :references) = splitCodeAppendix(prompt);
+          final display = words(body);
           add(
             DesktopBotMessageKind.user,
-            text,
+            display,
+            textWithAttachments: previewOnly || references.isEmpty
+                ? null
+                : display + codeAppendix(references.values),
             images: item.images,
             sentAt: item.sentAt,
           );

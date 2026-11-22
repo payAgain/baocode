@@ -92,6 +92,10 @@ class ChatComposer extends StatefulWidget {
     this.initialImages = const [],
     this.onSubmit,
     this.onIntercept,
+    this.canSubmit,
+    this.canStop,
+    this.showSessionControls = true,
+    this.privatePromptText,
     this.onCancel,
     this.tapRegionGroupId,
     this.draft,
@@ -111,9 +115,24 @@ class ChatComposer extends StatefulWidget {
   final List<ImageAttachment> initialImages;
   final ValueChanged<ComposerMessage>? onSubmit;
 
-  /// Takes a message the app handles itself, never the agent's (a side
-  /// question, say): true when it was, and what is typed is gone.
+  /// Takes over delivery of a message (a side question, say). Return true
+  /// to clear the input and skip the default send.
   final bool Function(ComposerMessage message)? onIntercept;
+
+  /// An extra submission guard, checked both for the button and at send time.
+  final bool Function()? canSubmit;
+
+  /// Whether this view may interrupt the current turn.
+  final bool Function()? canStop;
+
+  /// Whether the user can change the kernel, mode, permissions or model here.
+  final bool showSessionControls;
+
+  /// Which prompts are visible in a restricted view of the session. When
+  /// supplied, raw agent replies and reply suggestions are also excluded
+  /// from the input's context.
+  final String? Function(UserMessageItem)? privatePromptText;
+
   final VoidCallback? onCancel;
 
   /// Group of a [TapRegion] around this composer: its menus, which open in
@@ -1110,7 +1129,8 @@ class ChatComposerState extends State<ChatComposer>
         ChatCommandIds.acceptPromptSuggestion: _acceptSuggestion,
       if (_modePickerKey.currentState case final picker?)
         ChatCommandIds.openModePicker: picker.toggle,
-      if (widget.session.modes case final modes?)
+      if ((widget.showSessionControls ? widget.session.modes : null)
+          case final modes?)
         ChatCommandIds.nextMode: () => _nextMode(modes),
       if (_modelPickerKey.currentState case final picker?)
         ChatCommandIds.openModelPicker: picker.toggle,
@@ -1298,10 +1318,15 @@ class ChatComposerState extends State<ChatComposer>
     final session = widget.session;
     final prompts = <String>[];
     for (var i = 0; i < session.itemCount; i++) {
-      if (session.itemAt(i) case UserMessageItem(:final text, fromAgent: null)
-          when text.trim().isNotEmpty &&
-              (prompts.isEmpty || prompts.last != text)) {
-        prompts.add(text);
+      if (session.itemAt(i) case final UserMessageItem item
+          when item.fromAgent == null) {
+        final project = widget.privatePromptText;
+        final text = project == null ? item.text : project(item);
+        if (text != null &&
+            text.trim().isNotEmpty &&
+            prompts.lastOrNull != text) {
+          prompts.add(text);
+        }
       }
     }
     return prompts;
@@ -1377,7 +1402,9 @@ class ChatComposerState extends State<ChatComposer>
       try {
         polished = await polishComposerText(
           asked,
-          reply: widget.session.lastTurnReply,
+          reply: widget.privatePromptText == null
+              ? widget.session.lastTurnReply
+              : null,
           model: widget.session.selected(KernelChoiceKind.model),
           location: widget.session.kernelContext.cwd,
         );
@@ -1453,6 +1480,7 @@ class ChatComposerState extends State<ChatComposer>
   bool get _showsStop =>
       widget.onSubmit == null &&
       widget.session.isStreaming &&
+      widget.canStop?.call() != false &&
       !(widget.session.canQueue && _canSend);
 
   /// Emptied: what was in it sent from elsewhere (a suggested reply put
@@ -1466,10 +1494,15 @@ class ChatComposerState extends State<ChatComposer>
   }
 
   void _submit() {
+    if (widget.canSubmit?.call() == false) return;
     // Empty while a turn runs, messages queued behind it: the first of them
     // taken up now, as its Send Now.
     if (widget.onSubmit == null && widget.session.isStreaming && !_canSend) {
-      if (widget.session.queued.firstOrNull case (final id, _)) {
+      final privatePromptText = widget.privatePromptText;
+      if (widget.session.queued.firstOrNull case (final id, final queued)
+          when widget.canStop?.call() != false &&
+              (privatePromptText == null ||
+                  privatePromptText(queued) != null)) {
         widget.session.sendQueuedNow(id);
       }
       return;
@@ -1507,7 +1540,7 @@ class ChatComposerState extends State<ChatComposer>
   Widget build(BuildContext context) {
     _shownBuilt = _shownOfText();
     final focused = _focusNode.hasFocus;
-    _suggestion = widget.onSubmit == null
+    _suggestion = widget.onSubmit == null && widget.privatePromptText == null
         ? widget.session.replySuggestions.firstOrNull
         : null;
     final colors = themeColors;
@@ -1595,6 +1628,8 @@ class ChatComposerState extends State<ChatComposer>
     return [
       session,
       widget.onSubmit == null,
+      widget.showSessionControls,
+      widget.canSubmit?.call() != false,
       widget.tapRegionGroupId,
       widget.contextPanelOpen,
       widget.onToggleContextPanel,
@@ -1887,10 +1922,13 @@ class ChatComposerState extends State<ChatComposer>
   Widget _buildToolbar() {
     final session = widget.session;
     // Only the dock's composer picks the kernel, and only until it starts.
-    final kernel = widget.onSubmit == null ? session.kernelChoice : null;
-    final mode = session.modes;
-    final permission = session.permissions;
-    final model = session.models;
+    final showSessionControls = widget.showSessionControls;
+    final kernel = showSessionControls && widget.onSubmit == null
+        ? session.kernelChoice
+        : null;
+    final mode = showSessionControls ? session.modes : null;
+    final permission = showSessionControls ? session.permissions : null;
+    final model = showSessionControls ? session.models : null;
     final context = session.context;
     final l10n = this.context.l10n;
     KernelOption localized(KernelOption option) => localizedKernelOption(
@@ -1952,7 +1990,8 @@ class ChatComposerState extends State<ChatComposer>
                       const SizedBox(width: 2),
                     ],
                     // With none to pick, one to set up.
-                    if (model != null || session.health.noModel)
+                    if (showSessionControls &&
+                        (model != null || session.health.noModel))
                       SessionModelPicker(
                         session: session,
                         pickerKey: _modelPickerKey,
@@ -1990,9 +2029,13 @@ class ChatComposerState extends State<ChatComposer>
           const SizedBox(width: 2),
           _SendButton(
             streaming: _showsStop,
-            enabled: _canSend,
+            enabled: _canSend && widget.canSubmit?.call() != false,
             onSend: _submit,
-            onStop: () => stopTurn(this.context, session),
+            onStop: () {
+              if (widget.canStop?.call() != false) {
+                stopTurn(this.context, session);
+              }
+            },
           ),
         ],
       ),
