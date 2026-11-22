@@ -146,7 +146,9 @@ void main() {
     expect(fixture.cli.keys, [_main.folder]);
     await tester.tap(find.byTooltip('Back'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Configure ${newBot.name}'));
+    await tester.tap(find.text(newBot.name));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Bot settings'));
     await tester.pumpAndSettle();
     expect(
       tester
