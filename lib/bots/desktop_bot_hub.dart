@@ -74,13 +74,20 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
             bots: widget.bots,
             botId: selected.id,
             onBack: back,
+            onSettings: () => _show(_Panel.settings, selected.id),
             onOpenChat: widget.onOpenChat,
           );
         case _Panel.settings when id == null || selected != null:
           return DesktopBotSettings(
             bots: widget.bots,
             bot: selected,
-            onBack: back,
+            onBack: () {
+              if (id != null && widget.bots.byId(id) != null) {
+                _show(_Panel.chat, id);
+              } else {
+                back();
+              }
+            },
           );
         case _Panel.groups:
           return DesktopBotGroups(
@@ -225,17 +232,10 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
               if (row.unread > 0) Badge(label: Text('${row.unread}')),
             ],
           ),
-          if (row.group)
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 12),
-              child: Icon(Icons.chevron_right),
-            )
-          else
-            IconButton(
-              tooltip: zh ? '配置 ${row.name}' : 'Configure ${row.name}',
-              icon: const Icon(Icons.tune),
-              onPressed: () => _show(_Panel.settings, row.id),
-            ),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12),
+            child: Icon(Icons.chevron_right),
+          ),
         ],
       ),
     );
