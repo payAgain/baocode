@@ -1487,12 +1487,16 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
       var lived = count;
       var loading = session.loadingHistory;
       var prepended = session.prependedCount;
+      _seen[bot.id] = (count, prepended);
       void listener() {
         if (session.prependedCount != prepended) {
           lived += session.prependedCount - prepended;
           prepended = session.prependedCount;
         }
         if (loading || session.loadingHistory) lived = session.itemCount;
+        if (loading && !session.loadingHistory) {
+          _seen[bot.id] = (session.itemCount, session.prependedCount);
+        }
         loading = session.loadingHistory;
         if (session.itemCount != count) {
           count = session.itemCount;
@@ -1520,16 +1524,19 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
           scheduleMicrotask(() => _restart(byId(bot.id) ?? bot));
         }
         final last = session.itemCount - 1;
+        final parts = last >= 0 && session.itemAt(last) is AssistantTextItem
+            ? ChatCodec.botParts(
+                (session.itemAt(last) as AssistantTextItem).text,
+              )
+            : null;
         final now = (
           session.itemCount,
           session.isStreaming,
-          // Each of its messages, narration and cards, as its reply's tags
-          // close.
-          last >= 0 && session.itemAt(last) is AssistantTextItem
-              ? ChatCodec.botParts(
-                  (session.itemAt(last) as AssistantTextItem).text,
-                ).length
-              : null,
+          session.loadingHistory,
+          session.hasEarlierHistory,
+          parts?.length,
+          // An in-place update can change a preview without adding an item.
+          parts?.lastOrNull,
         );
         if (now == was) return;
         was = now;

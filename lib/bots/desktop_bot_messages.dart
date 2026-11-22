@@ -8,51 +8,78 @@ typedef DesktopBotMessage = ({
   String text,
   List<ImageAttachment> images,
   Uri? imageUrl,
+  DateTime? sentAt,
 });
 
 /// The private view of the bot's shared transcript. Use the phone's wire
 /// format for routing and reply tags, but never expose raw transcript items.
+/// A preview needs an explicit private turn and contains only message text.
 List<DesktopBotMessage> desktopBotMessages(
   Iterable<ChatItem> items, {
   required bool hasEarlier,
+  bool previewOnly = false,
 }) {
   final messages = <DesktopBotMessage>[];
   // A history window can begin without the user item that routed its turn.
   // Until we see one, only show sends explicitly addressed to private chat.
-  var privateTurn = !hasEarlier;
+  var privateTurn = !hasEarlier && !previewOnly;
+  DateTime? turnAt;
   void add(
     DesktopBotMessageKind kind,
-    String text, [
+    String text, {
     List<ImageAttachment> images = const [],
     Uri? imageUrl,
-  ]) {
+    DateTime? sentAt,
+  }) {
     if (text.isEmpty && images.isEmpty && imageUrl == null) return;
-    messages.add((kind: kind, text: text, images: images, imageUrl: imageUrl));
+    if (previewOnly && (text.isEmpty || kind == DesktopBotMessageKind.chat)) {
+      return;
+    }
+    messages.add((
+      kind: kind,
+      text: text,
+      images: images,
+      imageUrl: imageUrl,
+      sentAt: sentAt,
+    ));
   }
 
   String words(String text) =>
       ChatCodec.withoutBotEvents(text.replaceAll(imageReferencePattern, ''));
 
   for (final item in items) {
+    if (previewOnly && item is ToolCallItem) continue;
     final privateSend = ChatCodec.botSentToUser(item);
     if (item is ToolCallItem && privateSend != null) {
-      add(DesktopBotMessageKind.reply, words(privateSend), item.images);
+      add(DesktopBotMessageKind.reply, words(privateSend), images: item.images);
       continue;
     }
     switch (item) {
       case UserMessageItem()
           when item.fromAgent == null && item.fromSession == null:
-        final inGroup = ChatCodec.botGroupOf(item) != null;
+        final event = ChatCodec.botEvent(item);
+        final inGroup = event != null && ChatCodec.botGroupOf(item) != null;
         // A queued private message can be displayed amidst a group turn
         // that's still streaming. It doesn't route that turn's reply.
-        if (!item.queued) privateTurn = !inGroup;
-        if (!inGroup && ChatCodec.botEvent(item) == null) {
+        if (!item.queued) {
+          privateTurn = !inGroup && (!previewOnly || event == null);
+          turnAt = item.sentAt;
+        }
+        if (event == null) {
           final text =
               ChatCodec.sticker(item.text) != null && item.images.isNotEmpty
               ? ''
               : words(item.text);
-          add(DesktopBotMessageKind.user, text, item.images);
+          add(
+            DesktopBotMessageKind.user,
+            text,
+            images: item.images,
+            sentAt: item.sentAt,
+          );
         }
+      case UserMessageItem(queued: false) when previewOnly:
+        // A handoff from another agent does not establish a private turn.
+        privateTurn = false;
       case AssistantTextItem(:final text) when privateTurn:
         for (final (tag, part) in ChatCodec.botParts(
           ChatCodec.withoutBotEvents(text),
@@ -62,11 +89,13 @@ List<DesktopBotMessage> desktopBotMessages(
               add(
                 DesktopBotMessageKind.reply,
                 ChatCodec.withoutVoiceCues(words(part)),
+                sentAt: turnAt,
               );
             case ChatCodec.botNarrateTag:
               add(
                 DesktopBotMessageKind.narration,
                 ChatCodec.withoutVoiceCues(words(part)),
+                sentAt: turnAt,
               );
             case ChatCodec.botCardTag:
               add(DesktopBotMessageKind.chat, part);
@@ -87,8 +116,8 @@ List<DesktopBotMessage> desktopBotMessages(
         add(
           DesktopBotMessageKind.reply,
           '',
-          images,
-          uri?.host.isNotEmpty == true ? uri : null,
+          images: images,
+          imageUrl: uri?.host.isNotEmpty == true ? uri : null,
         );
       default:
         break;

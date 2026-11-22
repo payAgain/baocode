@@ -1,13 +1,26 @@
 import 'package:flutter/material.dart';
 
+import '../chat/chat_session.dart';
 import '../theme/app_theme.dart';
-import 'bot.dart';
+import '../workspace/workspace.dart';
+import 'bot_groups.dart';
 import 'bots.dart';
 import 'desktop_bot_groups.dart';
+import 'desktop_bot_messages.dart';
 import 'desktop_bot_page.dart';
 import 'desktop_bot_settings.dart';
 
 enum _Panel { list, chat, settings, groups }
+
+typedef _Preview = ({String text, DateTime at});
+typedef _Conversation = ({
+  String id,
+  bool group,
+  String name,
+  String fallback,
+  _Preview? preview,
+  int unread,
+});
 
 class DesktopBotHub extends StatefulWidget {
   const DesktopBotHub({
@@ -28,22 +41,31 @@ class DesktopBotHub extends StatefulWidget {
 class _DesktopBotHubState extends State<DesktopBotHub> {
   _Panel _panel = _Panel.list;
   String? _selectedId;
+  final _searchedHistory = <ChatSession>{};
 
-  void _show(_Panel panel, [Bot? bot]) => setState(() {
+  void _show(_Panel panel, [String? id]) => setState(() {
     _panel = panel;
-    _selectedId = bot?.id;
+    _selectedId = id;
   });
+
+  @override
+  void didUpdateWidget(DesktopBotHub oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (identical(oldWidget.bots, widget.bots)) return;
+    _searchedHistory.clear();
+    _panel = _Panel.list;
+    _selectedId = null;
+  }
 
   @override
   Widget build(BuildContext context) =>
       Material(type: MaterialType.transparency, child: _panels());
 
   Widget _panels() => ListenableBuilder(
-    listenable: widget.bots,
+    listenable: Listenable.merge([widget.bots, widget.bots.groups]),
     builder: (context, _) {
-      final selected = widget.bots.bots
-          .where((bot) => bot.id == _selectedId)
-          .firstOrNull;
+      final id = _selectedId;
+      final selected = id == null ? null : widget.bots.byId(id);
       void back() => _show(_Panel.list);
       switch (_panel) {
         case _Panel.chat when selected != null:
@@ -54,19 +76,170 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
             onBack: back,
             onOpenChat: widget.onOpenChat,
           );
-        case _Panel.settings when _selectedId == null || selected != null:
+        case _Panel.settings when id == null || selected != null:
           return DesktopBotSettings(
             bots: widget.bots,
             bot: selected,
             onBack: back,
           );
         case _Panel.groups:
-          return DesktopBotGroups(bots: widget.bots, onBack: back);
+          return DesktopBotGroups(
+            bots: widget.bots,
+            onBack: back,
+            initialGroupId: id,
+          );
         default:
           return _list(context);
       }
     },
   );
+
+  _Preview? _privatePreview(AgentThread thread) {
+    final session = thread.session;
+    if (session.loadingHistory) return null;
+    final latest = desktopBotMessages(
+      Iterable.generate(session.itemCount, session.itemAt),
+      hasEarlier: session.hasEarlierHistory,
+      previewOnly: true,
+    ).lastOrNull;
+    if (latest == null) return null;
+    return (text: latest.text, at: latest.sentAt ?? thread.updatedAt);
+  }
+
+  void _findOlderPrivateText(AgentThread thread) {
+    final session = thread.session;
+    if (!session.hasEarlierHistory ||
+        session.loadingEarlier ||
+        !_searchedHistory.add(session)) {
+      return;
+    }
+    final bots = widget.bots;
+    // The latest page can be entirely group turns. Page through the local
+    // transcript without attaching a view or preparing the backend.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      while (mounted &&
+          identical(bots, widget.bots) &&
+          _panel == _Panel.list &&
+          session.hasEarlierHistory) {
+        final before = session.prependedCount;
+        await session.loadEarlier();
+        if (!mounted ||
+            session.prependedCount == before ||
+            _privatePreview(thread) != null) {
+          return;
+        }
+      }
+      // If the user left the list before the search finished, resume on return.
+      _searchedHistory.remove(session);
+    });
+  }
+
+  List<_Conversation> _conversations() {
+    final bots = widget.bots;
+    final rows = <_Conversation>[];
+    for (final bot in bots.bots) {
+      final thread = bots.threadOf(bot);
+      _Preview? preview;
+      if (thread != null && thread.isOpen) {
+        preview = _privatePreview(thread);
+        if (preview == null) _findOlderPrivateText(thread);
+      }
+      rows.add((
+        id: bot.id,
+        group: false,
+        name: bot.name,
+        fallback: bot.signature,
+        preview: preview,
+        unread: bots.unread(bot),
+      ));
+    }
+    for (final group in bots.groups.groups) {
+      _Preview? preview;
+      for (final message in bots.groups.messages(group.id).reversed) {
+        if (message.notice) continue;
+        final text = BotGroups.quotedText(message);
+        if (text.isEmpty) continue;
+        preview = (text: text, at: message.at);
+        break;
+      }
+      rows.add((
+        id: group.id,
+        group: true,
+        name: group.name,
+        fallback: '',
+        preview: preview,
+        unread: bots.groups.unread(group.id),
+      ));
+    }
+    rows.sort((a, b) {
+      final recent = switch ((a.preview, b.preview)) {
+        (final a?, final b?) => b.at.compareTo(a.at),
+        (_?, null) => -1,
+        (null, _?) => 1,
+        _ => 0,
+      };
+      if (recent != 0) return recent;
+      final byName = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      if (byName != 0) return byName;
+      if (a.group != b.group) return a.group ? 1 : -1;
+      return a.id.compareTo(b.id);
+    });
+    return rows;
+  }
+
+  String _formatTime(BuildContext context, DateTime at) {
+    final material = MaterialLocalizations.of(context);
+    final local = at.toLocal();
+    return '${material.formatMediumDate(local)} '
+        '${material.formatTimeOfDay(TimeOfDay.fromDateTime(local))}';
+  }
+
+  Widget _row(BuildContext context, _Conversation row, bool zh) {
+    final text = row.preview?.text ?? row.fallback;
+    return ListTile(
+      key: ValueKey((row.group, row.id)),
+      leading: Icon(
+        row.group ? Icons.groups_outlined : Icons.chat_bubble_outline,
+      ),
+      title: Text(row.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: text.isEmpty
+          ? null
+          : Text(
+              text.replaceAll(RegExp(r'\s+'), ' ').trim(),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+      onTap: () => _show(row.group ? _Panel.groups : _Panel.chat, row.id),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              if (row.preview case final preview?)
+                Text(
+                  _formatTime(context, preview.at),
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+              if (row.unread > 0) Badge(label: Text('${row.unread}')),
+            ],
+          ),
+          if (row.group)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 12),
+              child: Icon(Icons.chevron_right),
+            )
+          else
+            IconButton(
+              tooltip: zh ? '配置 ${row.name}' : 'Configure ${row.name}',
+              icon: const Icon(Icons.tune),
+              onPressed: () => _show(_Panel.settings, row.id),
+            ),
+        ],
+      ),
+    );
+  }
 
   Widget _list(BuildContext context) {
     final zh = Localizations.localeOf(context).languageCode == 'zh';
@@ -103,32 +276,7 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => _show(_Panel.groups),
               ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-                child: Text(
-                  zh ? '私聊' : 'Private chats',
-                  style: TextStyle(color: AppColors.textMuted),
-                ),
-              ),
-              for (final bot in widget.bots.bots)
-                ListTile(
-                  key: ValueKey(bot.id),
-                  leading: const Icon(Icons.chat_bubble_outline),
-                  title: Text(bot.name),
-                  subtitle: bot.signature.isEmpty
-                      ? null
-                      : Text(
-                          bot.signature,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                  onTap: () => _show(_Panel.chat, bot),
-                  trailing: IconButton(
-                    tooltip: zh ? '配置 ${bot.name}' : 'Configure ${bot.name}',
-                    icon: const Icon(Icons.tune),
-                    onPressed: () => _show(_Panel.settings, bot),
-                  ),
-                ),
+              for (final row in _conversations()) _row(context, row, zh),
             ],
           ),
         ),
