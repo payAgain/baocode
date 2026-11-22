@@ -79,12 +79,18 @@ void main() {
     await tester.tap(find.widgetWithText(CheckboxListTile, 'Leo'));
     await tester.tap(find.widgetWithText(CheckboxListTile, 'Mia'));
     await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('group-lead-picker')));
+    await tester.pumpAndSettle();
+    expect(find.text('Leo'), findsWidgets);
+    await tester.tap(find.text('Leo').last);
+    await tester.pumpAndSettle();
     await tester.tap(create);
     await tester.pumpAndSettle();
 
     final group = bots.groups.groups.single;
     expect(group.name, 'Release');
     expect(group.members, [leo.id, fixture.mia.id]);
+    expect(group.lead, leo.id);
     expect(find.text('Release'), findsOneWidget);
     expect(find.text('Leo, Mia'), findsOneWidget);
     expect(find.text('No messages yet'), findsOneWidget);
@@ -100,6 +106,7 @@ void main() {
     final group = bots.groups.save(
       name: 'Planning',
       members: [fixture.mia.id],
+      lead: fixture.mia.id,
       rules: 'Keep updates short.',
       gap: 12,
     );
@@ -117,6 +124,10 @@ void main() {
     await tester.tap(find.widgetWithText(CheckboxListTile, 'Mia'));
     await tester.tap(find.widgetWithText(CheckboxListTile, 'Leo'));
     await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('group-lead-picker')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Leo').last);
+    await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, 'Save'));
     await tester.pumpAndSettle();
 
@@ -124,11 +135,92 @@ void main() {
     expect(updated.id, group.id);
     expect(updated.name, 'Launch');
     expect(updated.members, [leo.id]);
+    expect(updated.lead, leo.id);
     expect((updated.rules, updated.gap), (group.rules, group.gap));
     expect(find.text('Previous update'), findsOneWidget);
     expect(find.text('Mia'), findsOneWidget);
     expect(find.text('Launch'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('the room shows the actual handler while changing the default', (
+    tester,
+  ) async {
+    final fixture = _Fixture();
+    await fixture.start();
+    final bots = fixture.bots;
+    final mia = fixture.mia;
+    final leo = bots.save(name: 'Leo', identity: '', abilities: {});
+    final ann = bots.save(name: 'Ann', identity: '', abilities: {});
+    final groups = bots.groups;
+    final told = <String>[];
+    groups.tell = (_, member, _) => told.add(member);
+    final room = groups.save(
+      name: 'Planning',
+      members: [mia.id, leo.id, ann.id],
+      lead: leo.id,
+      gap: 1,
+    );
+    try {
+      await tester.pumpWidget(fixture.page());
+      await tester.tap(find.text(room.name));
+      await tester.pump();
+      expect(find.text('Default lead: Leo'), findsOneWidget);
+      expect(find.text('No bot handling this turn'), findsOneWidget);
+
+      Future<void> send(String text) async {
+        await tester.enterText(find.byType(TextField), text);
+        await tester.pump();
+        await tester.tap(find.widgetWithIcon(IconButton, Icons.arrow_upward));
+        await tester.pump();
+      }
+
+      Future<void> changeLead(String choice) async {
+        await tester.tap(find.byTooltip('Change default lead'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(choice));
+        await tester.pumpAndSettle();
+      }
+
+      await send('@Mia start');
+      expect(find.text('Handling: Mia'), findsOneWidget);
+      expect(told, [mia.id]);
+      await changeLead('Ann');
+      expect(find.text('Default lead: Ann'), findsOneWidget);
+      expect(find.text('Handling: Mia'), findsOneWidget);
+      expect(told, [mia.id]);
+      expect(groups.messages(room.id), hasLength(1));
+
+      groups.turnEnded(
+        room.id,
+        mia.id,
+        '<bot_say>Ready</bot_say>',
+        next: 'Leo',
+      );
+      await tester.pump();
+      expect(find.text('Waiting for: Leo'), findsOneWidget);
+      expect(told, [mia.id]);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Handling: Leo'), findsOneWidget);
+      groups.turnEnded(room.id, leo.id, '');
+      await tester.pump();
+
+      await send('Continue');
+      expect(find.text('Handling: Ann'), findsOneWidget);
+      expect(told, [mia.id, leo.id, ann.id]);
+      await changeLead('No default lead');
+      expect(find.text('Default lead: None'), findsOneWidget);
+      expect(find.text('Handling: Ann'), findsOneWidget);
+      expect(told, [mia.id, leo.id, ann.id]);
+      groups.turnEnded(room.id, ann.id, '');
+      await tester.pump();
+      expect(find.text('No bot handling this turn'), findsOneWidget);
+      expect(groups.byId(room.id)!.lead, isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      fixture.dispose();
+      await tester.pump();
+    }
   });
 
   testWidgets('desktop and phone share an ordered log and one member thread', (

@@ -341,6 +341,7 @@ class WorkspaceBridge {
       passes: group.passes,
       rules: group.rules,
       gap: group.gap,
+      lead: group.lead,
     );
   }
 
@@ -831,16 +832,29 @@ class WorkspaceBridge {
         );
         return null;
       case LinkMethods.saveGroup:
+        final members = [
+          for (final member in (params['members'] as List?) ?? const [])
+            if (member is String) member,
+        ];
+        final lead = params['lead'];
+        if (lead != null &&
+            (lead is! String ||
+                !members.contains(lead) ||
+                bots?.byId(lead) == null)) {
+          throw const LinkRemoteException(
+            LinkErrors.notFound,
+            'The default lead must be a group member',
+          );
+        }
         final group = _groups().save(
           id: params['group'] as String?,
           name: params['name'] as String? ?? '',
-          members: [
-            for (final member in (params['members'] as List?) ?? const [])
-              if (member is String) member,
-          ],
+          members: members,
           passes: (params['passes'] as num?)?.toInt(),
           rules: params['rules'] as String?,
           gap: (params['gap'] as num?)?.toInt(),
+          lead: lead as String?,
+          clearLead: lead == null && params.containsKey('lead'),
         );
         return {'group': _linkGroup(_groups(), group).toJson()};
       case LinkMethods.deleteGroup:

@@ -33,8 +33,8 @@ import 'bots.dart';
 ///
 /// Who speaks when, as a relay: one at a time holds the group's
 /// conversation, and passes it on as it sees fit.
-/// - The user speaks: it goes to whom they called on (@), else to the bot
-///   that spoke there last, else to one picked at random.
+/// - The user speaks: it goes to whom they called on (@), else to the
+///   default lead, the bot they quoted, the last speaker, or a random bot.
 /// - The one who has it is told the latest messages ([recent], each cut at
 ///   [longest]) and says what it will, if anything; then passes it on
 ///   (`<bot_next>`), or keeps it, and it stops. It goes [passes] times at
@@ -304,6 +304,7 @@ class BotGroups extends ChangeNotifier {
   /// [passes] times (0, unbounded; none, as it was), each bot handed it
   /// waiting [gap] seconds before it answers. Who joined or left, and a
   /// new name, said in it, as done [by] (a bot's id; none, the user).
+  /// Omit [lead] to keep the current default, or set [clearLead] to reset it.
   BotGroup save({
     String? id,
     required String name,
@@ -311,6 +312,8 @@ class BotGroups extends ChangeNotifier {
     int? passes,
     String? rules,
     int? gap,
+    String? lead,
+    bool clearLead = false,
     String by = linkGroupUser,
   }) {
     if (_root == null) throw StateError('No bots here');
@@ -342,6 +345,7 @@ class BotGroups extends ChangeNotifier {
         passes: passes ?? linkGroupPasses,
         rules: rules?.trim() ?? '',
         gap: gap ?? 0,
+        lead: clearLead ? null : lead,
       );
       _groups.add(group);
       _messages[group.id] = [];
@@ -361,6 +365,8 @@ class BotGroups extends ChangeNotifier {
         passes: passes,
         rules: rules?.trim(),
         gap: gap,
+        lead: lead,
+        clearLead: clearLead,
       );
       if (rules != null && rules.trim() != had.rules) rulesChanged = true;
       joined = [
@@ -757,7 +763,7 @@ class BotGroups extends ChangeNotifier {
   }
 
   /// [message], the user's, starts the relay again: given to whom it calls
-  /// on, else the bot that spoke last, else one at random.
+  /// on, else to the lead, quoted bot, last speaker, or a random member.
   void _start(BotGroup group, LinkGroupMessage message) {
     final members = [
       for (final id in group.members)
@@ -765,6 +771,7 @@ class BotGroups extends ChangeNotifier {
     ];
     if (members.isEmpty) return;
     final called = _called(message.text, members);
+    final lead = group.lead;
     final quoted = switch (message.ref) {
       final ref? => _message(group.id, ref)?.from,
       null => null,
@@ -778,6 +785,7 @@ class BotGroups extends ChangeNotifier {
         .from;
     final (first, by) = switch ((called, last)) {
       (final called?, _) => (called, _By.called),
+      _ when lead != null && members.contains(lead) => (lead, _By.lead),
       _ when quoted != null && members.contains(quoted) => (quoted, _By.quoted),
       (null, final last) when last != linkGroupUser => (last, _By.last),
       _ => (members[random.nextInt(members.length)], _By.picked),
@@ -953,9 +961,10 @@ class BotGroups extends ChangeNotifier {
     room.stuck?.cancel();
     room.stuck = Timer(stuck, () {
       room.stuck = null;
-      if (room.holder == member && _answering[member] == group) {
+      if (byId(group) case final current?
+          when room.holder == member && _answering[member] == group) {
         _instead(
-          found,
+          current,
           member,
           'did not answer in ${stuck.inMinutes > 0 ? '${stuck.inMinutes} minutes' : '${stuck.inSeconds} seconds'}',
         );
@@ -992,6 +1001,7 @@ class BotGroups extends ChangeNotifier {
       longest: longest,
       by: switch (room.by) {
         _By.called => '$user called on you (@)',
+        _By.lead => '$user spoke, and you are this group\'s default lead',
         _By.quoted => '$user answered your message (quoted it)',
         _By.last => '$user spoke, and you were the last to speak here',
         _By.picked => '$user spoke, and no one here has yet: you start',
@@ -1255,6 +1265,7 @@ class BotGroups extends ChangeNotifier {
 /// How one came to have a group's conversation.
 enum _By {
   called,
+  lead,
   quoted,
   last,
   picked,
@@ -1297,8 +1308,12 @@ class _Room {
     looked.remove(member);
     if (holder == member) {
       holder = null;
+      left = 0;
+      again = false;
       stuck?.cancel();
+      stuck = null;
       waiting?.cancel();
+      waiting = null;
     }
   }
 }

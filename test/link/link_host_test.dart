@@ -3,6 +3,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:bao_link/bao_link.dart';
+import 'package:baocode/bots/bot_folders.dart';
+import 'package:baocode/bots/bots.dart';
 import 'package:baocode/chat/chat_models.dart';
 import 'package:baocode/customize/customization_store.dart';
 import 'package:baocode/icons/project_icon.dart';
@@ -107,6 +109,100 @@ void main() {
     expect(device.addrs.first, '192.168.1.5:47100');
     expect(device.relays, contains(defaultLinkRelays.first));
   });
+
+  test(
+    'a paired phone can set a lead and older group edits preserve it',
+    () async {
+      host.dispose();
+      final bots = Bots(
+        workspace: workspace,
+        folders: MemoryBotFolders(),
+        computer: () async => 'Test Mac',
+      );
+      await bots.start();
+      addTearDown(bots.dispose);
+      host = LinkHost(workspace: workspace, platform: platform, bots: bots);
+      await host.load();
+      final mia = bots.save(name: 'Mia', identity: '', abilities: {});
+      final leo = bots.save(name: 'Leo', identity: '', abilities: {});
+      final told = <String>[];
+      bots.groups.tell = (_, member, _) => told.add(member);
+      final members = [mia.id, leo.id];
+
+      final peer = await pair();
+      addTearDown(peer.close);
+      Future<Map<String, Object?>> save(Map<String, Object?> params) async =>
+          ((await peer.call(LinkMethods.saveGroup, params)) as Map)['group']
+              as Map<String, Object?>;
+      Future<LinkGroup> groupState() async => LinkState.fromJson(
+        (await peer.call(LinkMethods.state)) as Map<String, Object?>,
+      ).groups.single;
+
+      final created = await save({'name': 'Planning', 'members': members});
+      final id = created['id']! as String;
+      expect(created.containsKey('lead'), isFalse);
+      final edit = {'group': id, 'name': 'Launch', 'members': members};
+
+      final guest = await connect(LinkIdentity.generate());
+      try {
+        final unpaired = isA<LinkRemoteException>().having(
+          (e) => e.code,
+          'code',
+          LinkErrors.unpaired,
+        );
+        await expectLater(
+          guest.call(LinkMethods.saveGroup, {...edit, 'lead': leo.id}),
+          throwsA(unpaired),
+        );
+        await expectLater(
+          guest.call(LinkMethods.sendGroup, {'group': id, 'text': 'hi'}),
+          throwsA(unpaired),
+        );
+        expect(bots.groups.byId(id)!.name, 'Planning');
+        expect(bots.groups.messages(id), isEmpty);
+      } finally {
+        await guest.close();
+      }
+
+      expect(
+        await save({...edit, 'lead': leo.id}),
+        containsPair('lead', leo.id),
+      );
+      final oldEdit = await save({...edit, 'name': 'Release'});
+      expect(oldEdit, containsPair('name', 'Release'));
+      expect(oldEdit, containsPair('lead', leo.id));
+      await expectLater(
+        save({...edit, 'lead': 'assistant'}),
+        throwsA(
+          isA<LinkRemoteException>().having(
+            (e) => e.code,
+            'code',
+            LinkErrors.notFound,
+          ),
+        ),
+      );
+      expect((await groupState()).name, 'Release');
+
+      final send = {'group': id, 'text': 'Start', 'id': 'first'};
+      final result = await peer.call(LinkMethods.sendGroup, send);
+      expect(await peer.call(LinkMethods.sendGroup, send), result);
+      expect(told, [leo.id]);
+      expect((await groupState()).holder, leo.id);
+      expect((await groupState()).toJson(), containsPair('lead', leo.id));
+      bots.groups.turnEnded(id, leo.id, '<bot_say>Ready</bot_say>');
+      await peer.call(LinkMethods.sendGroup, {
+        'group': id,
+        'text': '@Mia review',
+      });
+      expect(told, [leo.id, mia.id]);
+      expect(
+        (await save({...edit, 'lead': null})).containsKey('lead'),
+        isFalse,
+      );
+      expect((await groupState()).holder, mia.id);
+      expect((await groupState()).toJson().containsKey('lead'), isFalse);
+    },
+  );
 
   test('the offer tells where the desktop is: relays, addresses', () async {
     final offer = (await host.beginPairing())!;

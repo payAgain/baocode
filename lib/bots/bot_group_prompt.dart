@@ -19,6 +19,7 @@ class BotGroup {
     this.passes = linkGroupPasses,
     this.rules = '',
     this.gap = 0,
+    this._lead,
   });
 
   factory BotGroup.fromJson(Map<String, Object?> json) => BotGroup(
@@ -40,6 +41,10 @@ class BotGroup {
     passes: (json['passes'] as num?)?.toInt() ?? linkGroupPasses,
     rules: json['rules'] as String? ?? '',
     gap: (json['gap'] as num?)?.toInt() ?? 0,
+    lead: switch (json['lead']) {
+      final String id => id,
+      _ => null,
+    },
   );
 
   final String id;
@@ -56,6 +61,10 @@ class BotGroup {
   /// answers: 0, at once.
   final int gap;
 
+  /// The member who gets first turn by default when the user speaks.
+  final String? _lead;
+  String? get lead => members.contains(_lead) ? _lead : null;
+
   BotGroup copyWith({
     String? name,
     List<String>? members,
@@ -63,6 +72,8 @@ class BotGroup {
     int? passes,
     String? rules,
     int? gap,
+    String? lead,
+    bool clearLead = false,
   }) => BotGroup(
     id: id,
     name: name ?? this.name,
@@ -72,6 +83,7 @@ class BotGroup {
     passes: passes ?? this.passes,
     rules: rules ?? this.rules,
     gap: gap ?? this.gap,
+    lead: clearLead ? null : lead ?? this.lead,
   );
 
   Map<String, Object?> toJson() => {
@@ -83,6 +95,7 @@ class BotGroup {
     if (passes != linkGroupPasses) 'passes': passes,
     if (rules.isNotEmpty) 'rules': rules,
     if (gap > 0) 'gap': gap,
+    'lead': ?lead,
   };
 }
 

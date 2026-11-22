@@ -251,12 +251,14 @@ abstract final class LinkMethods {
   /// itself. A phone not connected is away too.
   static const away = 'away';
 
-  /// `{"group"?, "name", "members", "passes"?, "rules"?, "gap"?}`: the
+  /// `{"group"?, "name", "members", "passes"?, "rules"?, "gap"?, "lead"?}`: the
   /// group chat changed, or a new one (no `group`), of the bots [members]
   /// names (their ids) and the user; `passes`, how many times its
   /// conversation may be passed on ([LinkGroup.passes]), `rules` its
   /// rules, `gap` the seconds between its bots' answers ([LinkGroup.gap])
-  /// (each none, as it was): `{"group": LinkGroup}`.
+  /// (each none, as it was). `lead` sets the default member by id, null
+  /// clears it, and omitting it keeps it if that member stays.
+  /// Returns `{"group": LinkGroup}`.
   /// `unknown` from a desktop before groups.
   static const saveGroup = 'saveGroup';
 
