@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:bao_link/bao_link.dart';
+import 'package:bao_markdown/bao_markdown.dart' show MarkdownEditor;
 import 'package:baocode/chat/chat_column.dart';
 import 'package:baocode/chat/chat_width.dart';
 import 'package:baocode/chat/composer/file_drop.dart';
@@ -26,6 +27,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../window/fake_window_host.dart';
+import 'desktop_mutual_pairing_test.dart' show Machine, machines;
+import 'my_computers_test.dart' show admit, tap;
 
 void main() {
   setUp(() {
@@ -39,18 +42,20 @@ void main() {
   ) async {
     _sizeWindow(tester);
     final windowCalls = _windowCalls(tester);
-    final workspace = Workspace.mock();
-    await tester.pumpWidget(BaoCodeApp(workspace: workspace));
+    final (viewer, owner) = await linkedComputers();
+    final workspace = viewer.workspace;
+    await openWorkbench(tester, viewer);
     await tester.pump();
     final entry = find.descendant(
       of: find.byType(Sidebar),
-      matching: find.text('Switch to remote workspace'),
+      matching: find.text('My computers'),
     );
     expect(entry, findsOneWidget);
     final selected = workspace.current;
     final threads = workspace.threads.toList();
     await tester.tap(entry);
-    await tester.pump();
+    await tester.pumpAndSettle();
+    await tap(tester, 'Open workspace');
     final page = find.byType(DesktopHostPage);
     expect(page, findsOneWidget);
     expect(tester.getSize(page).width, 1440);
@@ -88,6 +93,8 @@ void main() {
     expect(find.byType(Sidebar), findsOneWidget);
     expect(workspace.current, same(selected));
     await tester.pumpWidget(const SizedBox.shrink());
+    await viewer.host.pauseGroupConnections();
+    await owner.host.pauseGroupConnections();
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   testWidgets('the main window restores the last workspace across restarts', (
@@ -97,19 +104,18 @@ void main() {
     final kept = <String, Object?>{};
     final page = find.byType(DesktopHostPage);
 
+    final (viewer, owner) = await linkedComputers();
     Future<void> start() async {
+      // Workbench owns/disposes its connection. Keep signed state on its host.
       final files = _SettingsFiles(kept);
       addTearDown(files.dispose);
-      await tester.pumpWidget(
-        BaoCodeApp(workspace: Workspace.mock(), settings: _Settings(files)),
-      );
-      await tester.pump();
+      await openWorkbench(tester, viewer, files: files, reuseClient: false);
     }
 
     await start();
     expect(page, findsNothing);
-    await tester.tap(find.text('Switch to remote workspace'));
-    await tester.pump();
+    await tap(tester, 'My computers');
+    await tap(tester, 'Open workspace');
     expect(page, findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
 
@@ -132,75 +138,58 @@ void main() {
     expect(page, findsNothing);
     expect(find.byType(Sidebar), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
+    await viewer.host.pauseGroupConnections();
+    await owner.host.pauseGroupConnections();
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
-  testWidgets('a legacy pairing restores the remote workspace even offline', (
+  testWidgets('a stale legacy mode stays local without dialing', (
     tester,
   ) async {
     _sizeWindow(tester);
     final windowCalls = _windowCalls(tester);
-    final files = _SettingsFiles({});
+    final files = _SettingsFiles({'workbench.desktopWorkspace': 'remote'});
     addTearDown(files.dispose);
     final workspace = Workspace.mock();
     addTearDown(workspace.dispose);
     final identity = LinkIdentity.generate();
     final host = LinkIdentity.generate();
-    await SecretStore.instance.write(
-      'desktop_host_connection.v1',
-      jsonEncode({
-        'identity': identity.toJson(),
-        'name': 'Synthetic host',
-        'address': LinkAddress(host.id).toJson(),
-        'direct': true,
-      }),
-    );
-    var dials = 0;
+    final stored = jsonEncode({
+      'identity': identity.toJson(),
+      'name': 'Synthetic host',
+      'address': LinkAddress(host.id).toJson(),
+      'direct': true,
+    });
+    await SecretStore.instance.write('desktop_host_connection.v1', stored);
     await tester.pumpWidget(
       MaterialApp(
-        localizationsDelegates: const [AppLocalizations.delegate],
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
         home: Workbench(
           workspace: workspace,
           settings: _Settings(files),
-          createDesktopHostConnection: () =>
-              DesktopHostConnection.withDependencies(
-                store: SecretStore.instance,
-                bind: (_, _) async {
-                  dials++;
-                  throw const LinkClosedException();
-                },
-                device: () async => throw StateError('Host is offline'),
-              ),
+          createDesktopHostConnection: () => throw StateError('No legacy dial'),
         ),
       ),
     );
-    await tester.pump();
-    expect(find.byType(DesktopHostPage), findsOneWidget);
-    expect(find.text('Synthetic host'), findsWidgets);
-    expect(dials, 1);
-    expect(files.storage.get<String>('workbench.desktopWorkspace'), 'remote');
+    await tester.pumpAndSettle();
+    await tap(tester, 'My computers');
+    expect(find.byType(DesktopHostPage), findsNothing);
+    expect(find.text('Synthetic host'), findsNothing);
+    expect(find.byType(TextField), findsNothing);
+    expect(
+      find.text('Computer connections are unavailable on this installation.'),
+      findsOneWidget,
+    );
+    expect(
+      await SecretStore.instance.read('desktop_host_connection.v1'),
+      stored,
+    );
     expect(
       windowCalls.any(
         (call) => call.method == 'setRemoteWorkspace' && call.arguments == true,
       ),
-      isTrue,
-    );
-    final gesture = await tester.startGesture(const Offset(600, 15));
-    await gesture.moveBy(const Offset(60, 0));
-    await gesture.up();
-    await tester.pump();
-    expect(windowCalls.any((call) => call.method == 'dragWindow'), isTrue);
-    WindowControls.menuCommandsOf(0)!.call('workbench.action.files.openFolder');
-    await tester.pump();
-    expect(windowCalls.any((call) => call.method == 'pickDirectory'), isFalse);
-    await tester.tap(find.text('Switch to local'));
-    await tester.pump();
-    expect(
-      windowCalls
-          .lastWhere((call) => call.method == 'setRemoteWorkspace')
-          .arguments,
       isFalse,
     );
-    expect(find.text('Switch to Synthetic host'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
@@ -208,8 +197,12 @@ void main() {
     'a secondary agent window keeps its own workspace and keys',
     (tester) async {
       _sizeWindow(tester);
-      final files = _SettingsFiles({'workbench.desktopWorkspace': 'remote'});
+      final (viewer, owner) = await linkedComputers();
+      final files = _SettingsFiles({
+        'workbench.desktopWorkspace': 'group:${owner.host.id}',
+      });
       addTearDown(files.dispose);
+      // BaoCodeApp owns this local workspace. Machine owns its host workspace.
       final workspace = Workspace.mock();
       final windows = AppWindows(
         host: FakeWindowHost(tester.view),
@@ -223,7 +216,7 @@ void main() {
         BaoCodeApp(
           workspace: workspace,
           windows: windows,
-          settings: _Settings(files),
+          settings: _Settings(files, machine: viewer),
         ),
         wrapWithView: false,
       );
@@ -244,7 +237,10 @@ void main() {
         find.descendant(of: inAgent, matching: find.byType(Sidebar)),
         findsOneWidget,
       );
-      expect(find.text('Switch to remote workspace'), findsNothing);
+      expect(
+        find.descendant(of: inAgent, matching: find.text('My computers')),
+        findsNothing,
+      );
 
       const drop = {
         'x': 600,
@@ -261,23 +257,79 @@ void main() {
 
       WindowControls.activeViewId = windows.chat.viewId;
       await tester.tap(
-        find.descendant(of: page, matching: find.byType(TextField)).first,
+        find
+            .descendant(of: page, matching: find.text(owner.name))
+            .hitTestable(),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find
+            .descendant(
+              of: page,
+              matching: find.text('Optimize virtual list scrolling'),
+            )
+            .hitTestable(),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find
+            .descendant(of: page, matching: find.byType(MarkdownEditor))
+            .hitTestable(),
       );
       await tester.pump();
+      WindowControls.activeViewId = windows.chat.viewId;
       await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.keyP);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
       await tester.pump();
       expect(find.byType(SearchPalette), findsNothing);
       await tester.pumpWidget(const SizedBox.shrink());
+      await viewer.host.pauseGroupConnections();
+      await owner.host.pauseGroupConnections();
     },
     semanticsEnabled: false,
     variant: TargetPlatformVariant.only(TargetPlatform.windows),
   );
 }
 
+Future<(Machine, Machine)> linkedComputers() async {
+  final (viewer, owner) = await machines();
+  await owner.host.createComputerGroup();
+  await admit(owner, viewer);
+  return (viewer, owner);
+}
+
+Future<void> openWorkbench(
+  WidgetTester tester,
+  Machine viewer, {
+  SettingsFiles? files,
+  bool reuseClient = true,
+}) async {
+  await tester.pumpWidget(
+    MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Workbench(
+        workspace: viewer.workspace,
+        settings: _Settings(files, machine: viewer),
+        createDesktopHostConnection: () {
+          if (!reuseClient) {
+            return DesktopHostConnection.withDependencies(
+              localHost: viewer.host,
+            );
+          }
+          viewer.workbenchOwnsClient = true;
+          return viewer.client;
+        },
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
 class _Settings extends AppSettings {
-  _Settings(SettingsFiles files) : super(locale: AppLocale(), files: files);
+  _Settings(SettingsFiles? files, {Machine? machine})
+    : super(locale: AppLocale(), files: files, link: machine?.host);
 
   @override
   FeatureTipsController? get tips => null;

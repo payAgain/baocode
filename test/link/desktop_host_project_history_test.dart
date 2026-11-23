@@ -305,7 +305,9 @@ class _Connection extends ChangeNotifier implements DesktopHostConnection {
   @override
   final LinkPeer peer;
   @override
-  String? get pendingCode => null;
+  bool get groupSelected => true;
+  @override
+  String get selectedHostId => peer.remote;
   @override
   String? get hostName => 'Fixture Windows host';
   @override

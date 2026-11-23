@@ -1,4 +1,6 @@
 {
+  "myComputers": "我的电脑",
+  "myComputersUnavailable": "此安装无法使用电脑连接。",
   "@@locale": "zh",
   "commonCancel": "取消",
   "commonClose": "关闭",

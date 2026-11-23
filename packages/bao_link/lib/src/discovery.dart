@@ -18,13 +18,15 @@ abstract final class LinkDiscovery {
 }
 
 /// A desktop as it advertises itself, and as a phone finds it: the TXT
-/// record's `v` (version), `k` (its key) and `p` (`1` while it pairs).
+/// record's `v` (version), `k` (its key), `p` (`1` for phone pairing),
+/// and optional `g` (`1` while explicitly inviting nearby group members).
 class LinkAdvert {
   const LinkAdvert({
     required this.name,
     required this.key,
     required this.port,
     this.pairing = false,
+    this.groupInviting = false,
     this.addresses = const [],
   });
 
@@ -49,6 +51,7 @@ class LinkAdvert {
       key: key,
       port: port,
       pairing: attributes['p'] == '1',
+      groupInviting: attributes['g'] == '1',
       addresses: addresses,
     );
   }
@@ -60,6 +63,7 @@ class LinkAdvert {
 
   /// It takes a new phone now: its user is pairing one.
   final bool pairing;
+  final bool groupInviting;
 
   /// Where it was found (IPv4, IPv6), as resolved: the phone's side only.
   final List<String> addresses;
@@ -70,6 +74,7 @@ class LinkAdvert {
     'v': LinkDiscovery.version,
     'k': encodeKey(key),
     'p': pairing ? '1' : '0',
+    if (groupInviting) 'g': '1',
   };
 
   /// Where to dial (`ip:port`): IPv4 first; not link-local IPv6 addresses,
@@ -93,5 +98,6 @@ class LinkAdvert {
       other.id == id &&
       other.name == name &&
       other.port == port &&
-      other.pairing == pairing;
+      other.pairing == pairing &&
+      other.groupInviting == groupInviting;
 }

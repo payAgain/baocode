@@ -10,6 +10,13 @@ class AppLocalizationsEn extends AppLocalizations {
   AppLocalizationsEn([String locale = 'en']) : super(locale);
 
   @override
+  String get myComputers => 'My computers';
+
+  @override
+  String get myComputersUnavailable =>
+      'Computer connections are unavailable on this installation.';
+
+  @override
   String get commonCancel => 'Cancel';
 
   @override

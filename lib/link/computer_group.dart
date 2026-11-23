@@ -11,6 +11,7 @@ const _domain = 'baocode/computer-group/v1/full-workspace-and-membership';
 
 abstract final class ComputerGroupWire {
   static const prepare = 'computerGroup.prepare';
+  static const prepareNearby = 'computerGroup.prepareNearby';
   static const join = 'computerGroup.join';
   static const sync = 'computerGroup.sync';
   static const open = 'computerGroup.open';

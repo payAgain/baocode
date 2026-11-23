@@ -194,8 +194,7 @@ class Sidebar extends StatefulWidget {
     this.onOpened,
     this.onOpenFolder,
     this.onAddSshHost,
-    this.onSwitchToRemote,
-    this.remoteWorkspaceName,
+    this.onMyComputers,
     this.onOpenFolderOn,
     this.editSshHost,
     this.onOpenSettings,
@@ -281,9 +280,8 @@ class Sidebar extends StatefulWidget {
   /// actions); no Search row without it.
   final VoidCallback? onSearch;
 
-  /// Opens the separate desktop-host workspace.
-  final VoidCallback? onSwitchToRemote;
-  final String? remoteWorkspaceName;
+  /// Opens the My computers workspace chooser and membership controls.
+  final VoidCallback? onMyComputers;
 
   /// Shows Claude Code's customizations in place of the chat; no
   /// Customize row without it.
@@ -1104,18 +1102,10 @@ class _SidebarState extends State<Sidebar>
               label: context.l10n.sidebarOpenProject,
               onTap: open,
             ),
-          if (widget.onSwitchToRemote case final open?)
+          if (widget.onMyComputers case final open?)
             _NavRow(
               icon: Codicons.deviceDesktop,
-              label: switch ((
-                widget.remoteWorkspaceName,
-                Localizations.localeOf(context).languageCode,
-              )) {
-                (final name?, 'zh') => '切换到 $name',
-                (final name?, _) => 'Switch to $name',
-                (null, 'zh') => '切换到远程工作区',
-                _ => 'Switch to remote workspace',
-              },
+              label: context.l10n.myComputers,
               onTap: open,
             ),
           if (widget.onSearch case final search?)

@@ -3,13 +3,14 @@ part of 'link_host.dart';
 /// An authenticated preview. Only confirming this exact object signs consent.
 class ComputerGroupJoinPreview {
   ComputerGroupJoinPreview._(
-    this.group,
+    this._history,
     this.sponsor,
     this.code,
     this._invite,
     this._epoch,
   );
-  final ComputerGroup group;
+  final ComputerGroup? _history;
+  String get groupId => _invite.group;
   final ComputerGroupMember sponsor;
   final String code;
   final _GroupInvite _invite;
@@ -23,12 +24,14 @@ class ComputerGroupApproval {
     this._consent,
     this._peer,
     this._invite,
+    this._window,
   );
   final ComputerGroupMember member;
   final String code;
   final ComputerGroupConsent _consent;
   final LinkPeer _peer;
   final _GroupInvite _invite;
+  final _GroupInvite? _window;
   final _result = Completer<ComputerGroup?>();
   bool _approving = false;
 }
@@ -80,6 +83,12 @@ class _ComputerGroupHost {
   bool independent = false;
   bool _paused = false;
   _GroupInvite? _invite;
+  Timer? _inviteTimer;
+  bool _nearby = false;
+  bool _creating = false;
+  Object? _preparing;
+  Timer? _previewTimer;
+  LinkPeer? _previewPeer;
   ComputerGroupJoinPreview? _preview;
   ComputerGroupJoinPreview? confirming;
   bool joinFailed = false;
@@ -92,6 +101,14 @@ class _ComputerGroupHost {
   final _denied = <String>{};
 
   bool get ready => epoch != null && !storageError;
+  bool get invitingNearby =>
+      _nearby &&
+      !host._unadvertised &&
+      _invite?.valid == true &&
+      pending == null &&
+      ready &&
+      group?.canAdmit == true &&
+      group?.active.containsKey(host.id) == true;
   Object? get epoch =>
       !host._disposed &&
           !_paused &&
@@ -282,15 +299,27 @@ class _ComputerGroupHost {
     );
   }
 
-  Future<void> create() => _serial(() async {
-    if (!ready || group != null || _preview != null) {
+  Future<void> create() async {
+    if (!ready ||
+        group != null ||
+        _preview != null ||
+        _preparing != null ||
+        _creating) {
       throw ComputerGroupWire.rejected;
     }
-    await _persist(ComputerGroup.create(_self, host._identity));
-    startSync();
-  });
+    _creating = true;
+    try {
+      await _serial(() async {
+        if (!ready || group != null) throw ComputerGroupWire.rejected;
+        await _persist(ComputerGroup.create(_self, host._identity));
+        startSync();
+      });
+    } finally {
+      _creating = false;
+    }
+  }
 
-  String invite() {
+  String invite(bool nearby) {
     final current = group;
     if (!ready ||
         current == null ||
@@ -299,12 +328,33 @@ class _ComputerGroupHost {
         pending != null) {
       throw ComputerGroupWire.rejected;
     }
-    return (_invite = _GroupInvite(
+    final invite = _invite = _GroupInvite(
       current.id,
       _self,
       encodeKey(randomBytes(16)),
       DateTime.now().add(host.offerLifetime),
-    )).encode();
+    );
+    _nearby = nearby;
+    _inviteTimer?.cancel();
+    _inviteTimer = Timer(host.offerLifetime, cancelInvite);
+    host.notifyListeners();
+    return invite.encode();
+  }
+
+  void _clearInvite() {
+    _inviteTimer?.cancel();
+    _inviteTimer = null;
+    _invite = null;
+    _nearby = false;
+  }
+
+  void cancelInvite() {
+    if (_invite == null) return;
+    _clearInvite();
+    if (pending case final request? when !request._approving) {
+      _clearPending(request);
+    }
+    host.notifyListeners();
   }
 
   bool _validInvite(_GroupInvite invite, String remote) =>
@@ -345,44 +395,121 @@ class _ComputerGroupHost {
   }
 
   Future<ComputerGroupJoinPreview> prepare(String link) async {
-    if (!ready || group != null || _joinPeer != null) {
-      throw ComputerGroupWire.rejected;
-    }
-    final epoch = this.epoch!;
-    _preview = null;
-    joinFailed = false;
     final invite = _GroupInvite.decode(link);
-    final peer = await dial(invite.sponsor);
-    try {
-      final answer = await peer.call(ComputerGroupWire.prepare, {
+    return _prepare(invite.sponsor, (peer) async {
+      final history = await peer.call(ComputerGroupWire.prepare, {
         'group': invite.group,
         'token': invite.token,
       });
-      final proposed = ComputerGroup.decode(answer);
-      if (!ready ||
-          this.epoch != epoch ||
-          !invite.valid ||
-          group != null ||
-          proposed.id != invite.group ||
-          !proposed.active.containsKey(peer.remote) ||
-          proposed.known.containsKey(host.id)) {
+      return (invite, history);
+    });
+  }
+
+  Future<ComputerGroupJoinPreview> prepareNearby(
+    LinkAdvert advert,
+    bool Function() stillVisible,
+  ) async {
+    if (!advert.groupInviting ||
+        advert.addrs.isEmpty ||
+        !DesktopMutualPairing.validId(advert.id) ||
+        !stillVisible()) {
+      throw ComputerGroupWire.rejected;
+    }
+    // The advert supplies a key to prove and temporary direct routes.
+    final hint = ComputerGroupMember(
+      id: advert.id,
+      name: '',
+      addrs: const [],
+      relays: const [],
+      direct: true,
+    );
+    return _prepare(hint, (peer) async {
+      if (!stillVisible() || !await _onLan(peer)) {
         throw ComputerGroupWire.rejected;
       }
-      return _preview = ComputerGroupJoinPreview._(
+      final answer = await peer.call(ComputerGroupWire.prepareNearby);
+      if (!stillVisible() || answer is! Map || answer['invite'] is! String) {
+        throw ComputerGroupWire.rejected;
+      }
+      return (_GroupInvite.decode(answer['invite'] as String), null);
+    }, nearby: advert.addrs);
+  }
+
+  static Future<bool> _onLan(LinkPeer peer) async =>
+      (await peer.connection.path()).kind == LinkPathKind.lan && !peer.isClosed;
+
+  Future<ComputerGroupJoinPreview> _prepare(
+    ComputerGroupMember sponsor,
+    Future<(_GroupInvite, Object?)> Function(LinkPeer) preview, {
+    List<String>? nearby,
+  }) async {
+    if (!ready ||
+        group != null ||
+        confirming != null ||
+        _preparing != null ||
+        _creating) {
+      throw ComputerGroupWire.rejected;
+    }
+    final epoch = this.epoch!;
+    final attempt = _preparing = Object();
+    _clearPreview();
+    joinFailed = false;
+    LinkPeer? peer;
+    try {
+      peer = await dial(sponsor, nearby: nearby ?? const []);
+      final (invite, history) = await preview(peer);
+      final proposed = nearby == null ? ComputerGroup.decode(history) : null;
+      if (!ready ||
+          this.epoch != epoch ||
+          _preparing != attempt ||
+          peer.isClosed ||
+          !invite.valid ||
+          group != null ||
+          invite.sponsor.id != peer.remote ||
+          (proposed != null &&
+              (proposed.id != invite.group ||
+                  !proposed.active.containsKey(peer.remote) ||
+                  proposed.known.containsKey(host.id)))) {
+        throw ComputerGroupWire.rejected;
+      }
+      final result = _preview = ComputerGroupJoinPreview._(
         proposed,
         invite.sponsor,
         invite.sponsor.codeWith(host.id),
         invite,
         epoch,
       );
+      if (nearby != null) {
+        _previewPeer = peer;
+        _previewTimer = Timer(
+          invite.expires.difference(DateTime.now()),
+          () => cancel(result),
+        );
+        unawaited(
+          peer.done.then((_) {
+            if (_preview == result && confirming != result) _clearPreview();
+          }),
+        );
+      }
+      return result;
     } finally {
-      await peer.close();
+      if (_preparing == attempt) _preparing = null;
+      if (_previewPeer != peer) await peer?.close();
     }
+  }
+
+  void _clearPreview() {
+    _previewTimer?.cancel();
+    _previewTimer = null;
+    _preview = null;
+    final peer = _previewPeer;
+    _previewPeer = null;
+    unawaited(peer?.close());
   }
 
   void cancel(ComputerGroupJoinPreview preview) {
     if (_preview != preview) return;
-    _preview = null;
+    _clearPreview();
     unawaited(_joinPeer?.close());
   }
 
@@ -391,19 +518,24 @@ class _ComputerGroupHost {
         ready &&
         group == null &&
         _preview == preview &&
-        epoch == preview._epoch &&
-        preview._invite.valid;
-    if (!current() || confirming != null) throw ComputerGroupWire.rejected;
+        epoch == preview._epoch;
+    if (!current() || !preview._invite.valid || confirming != null) {
+      throw ComputerGroupWire.rejected;
+    }
+    _previewTimer?.cancel();
+    _previewTimer = null;
     confirming = preview;
     joinFailed = false;
     host.notifyListeners();
     LinkPeer? peer;
     try {
-      peer = await dial(preview._invite.sponsor);
-      if (!current() || _joinPeer != null) throw ComputerGroupWire.rejected;
+      peer = _previewPeer ?? await dial(preview._invite.sponsor);
+      if (!current() || !preview._invite.valid || _joinPeer != null) {
+        throw ComputerGroupWire.rejected;
+      }
       _joinPeer = peer;
       final consent = ComputerGroupConsent.sign(
-        preview.group.id,
+        preview.groupId,
         preview.sponsor.id,
         preview._invite.token,
         _self,
@@ -414,8 +546,10 @@ class _ComputerGroupHost {
       }, const Duration(minutes: 2));
       await _serial(() async {
         if (!current() || _joinPeer != peer) throw ComputerGroupWire.rejected;
-        final verified = preview.group.merge(answer);
-        if (!verified.includesConsent(consent) ||
+        final verified =
+            preview._history?.merge(answer) ?? ComputerGroup.decode(answer);
+        if (verified.id != preview.groupId ||
+            !verified.includesConsent(consent) ||
             !verified.active.containsKey(host.id) ||
             !verified.active.containsKey(peer!.remote)) {
           throw ComputerGroupWire.rejected;
@@ -428,7 +562,7 @@ class _ComputerGroupHost {
       rethrow;
     } finally {
       if (_joinPeer == peer) _joinPeer = null;
-      if (_preview == preview) _preview = null;
+      if (_preview == preview) _clearPreview();
       if (confirming == preview) confirming = null;
       host.notifyListeners();
       await peer?.close();
@@ -457,14 +591,19 @@ class _ComputerGroupHost {
     try {
       final others = await _serial(() async {
         final remote = request._peer.remote;
+        final window = request._window;
+        if (window != null && !await _onLan(request._peer)) {
+          throw ComputerGroupWire.rejected;
+        }
         if (pending != request ||
             request._peer.isClosed ||
-            !_validInvite(request._invite, remote)) {
+            !request._invite.valid ||
+            !_validInvite(window ?? request._invite, remote)) {
           throw ComputerGroupWire.rejected;
         }
         final prior = group!;
         await _persist(prior.admit(request._consent, host._identity));
-        _invite = null;
+        _clearInvite();
         return prior.active.values
             .where((member) => member.id != host.id)
             .toList();
@@ -555,8 +694,9 @@ class _ComputerGroupHost {
   void stopSync() {
     _periodic?.cancel();
     _periodic = null;
-    _invite = null;
-    _preview = null;
+    _clearInvite();
+    _preparing = null;
+    _clearPreview();
     unawaited(_joinPeer?.close());
     if (pending case final request?) _clearPending(request);
   }
@@ -608,8 +748,6 @@ class _ComputerGroupHost {
     if (!ready ||
         connection.peer.isClosed ||
         connection.phone != null ||
-        connection.desktopGrant != null ||
-        connection.desktopBinding != null ||
         host._pending?._connection == connection) {
       throw ComputerGroupWire.rejected;
     }
@@ -629,10 +767,37 @@ class _ComputerGroupHost {
           throw ComputerGroupWire.rejected;
         }
         return group!.toJson();
+      case ComputerGroupWire.prepareNearby:
+        final window = _invite;
+        if (window == null ||
+            !invitingNearby ||
+            !_validInvite(window, remote) ||
+            !await _onLan(connection.peer) ||
+            !invitingNearby ||
+            !_validInvite(window, remote) ||
+            connection.nearbyInvite != null) {
+          throw ComputerGroupWire.rejected;
+        }
+        final invite = _GroupInvite(
+          window.group,
+          _self,
+          encodeKey(randomBytes(16)),
+          window.expires,
+        );
+        connection.nearbyInvite = (window: window, invite: invite);
+        return {'invite': invite.encode()};
       case ComputerGroupWire.join:
-        final invite = _invite;
+        final nearby = connection.nearbyInvite;
+        final invite = nearby?.invite ?? _invite;
+        final window = nearby?.window ?? invite;
+        if (nearby != null && !await _onLan(connection.peer)) {
+          throw ComputerGroupWire.rejected;
+        }
         if (invite == null ||
-            !_validInvite(invite, remote) ||
+            window == null ||
+            !_validInvite(window, remote) ||
+            !invite.valid ||
+            connection.peer.isClosed ||
             pending != null) {
           throw ComputerGroupWire.rejected;
         }
@@ -653,6 +818,7 @@ class _ComputerGroupHost {
           consent,
           connection.peer,
           invite,
+          nearby?.window,
         );
         unawaited(connection.peer.done.then((_) => _clearPending(request)));
         host.notifyListeners();

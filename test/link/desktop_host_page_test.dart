@@ -10,7 +10,6 @@ import 'package:baocode/link/desktop_host_connection.dart';
 import 'package:baocode/link/desktop_host_page.dart';
 import 'package:baocode/link/desktop_remote_media.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -62,8 +61,7 @@ void main() {
     expect(find.text('Route unavailable'), findsNothing);
     await tester.tap(find.text('Close'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Host options'));
-    await tester.pumpAndSettle();
+    expect(find.byTooltip('Host options'), findsNothing);
     expect(find.text('Connection info'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
     await peer.close();
@@ -269,179 +267,24 @@ void main() {
       await host.done;
     },
   );
-  testWidgets(
-    'nearby browse requires selection and can cancel while the other computer confirms',
-    (tester) async {
-      final c = _Connection();
-      await _pumpPage(tester, c);
-      await tester.tap(find.text('Nearby computers'));
-      await tester.pumpAndSettle();
-      expect(c.invites, isEmpty);
-      await tester.tap(find.text('Fixture PC'));
-      await tester.pumpAndSettle();
-      expect(find.text('123 456 789 012'), findsOneWidget);
-      await tester.tap(find.text('Codes match, pair'));
-      await tester.pump();
-      expect(c.waitingForHostApproval, isTrue);
-      await tester.tap(find.text('Cancel pairing'));
-      await tester.pumpAndSettle();
-      expect(c.cancellations, 1);
-      expect(c.peer, isNull);
-    },
-  );
-
-  testWidgets('paste invite, compare codes, then explicitly pair', (
-    tester,
-  ) async {
-    final connection = _Connection();
-    await _pumpPage(tester, connection);
-
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      SystemChannels.platform,
-      (call) async => call.method == 'Clipboard.getData'
-          ? {'text': ' baocode://pair?d=example '}
-          : null,
-    );
-    addTearDown(() {
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform,
-        null,
-      );
-    });
-
-    expect(find.byType(TextField), findsOneWidget);
-    expect(find.text('Pair'), findsOneWidget);
-    await tester.tap(find.text('Paste'));
-    await tester.pump();
-    expect(connection.invites, isEmpty);
-    await tester.tap(find.text('Pair'));
-    await tester.pump();
-
-    expect(connection.invites, ['baocode://pair?d=example']);
-    expect(find.byType(TextField), findsNothing);
-    expect(find.text('123 456 789 012'), findsOneWidget);
-    expect(connection.confirmations, 0);
-    expect(find.text('Connected'), findsNothing);
-
-    await tester.tap(find.text('Codes match, pair'));
-    await tester.pump();
-    expect(connection.confirmations, 1);
-    expect(find.text('Development Host'), findsOneWidget);
-    expect(find.text('Connected'), findsOneWidget);
-    expect(find.text('123 456 789 012'), findsNothing);
-  });
-
-  testWidgets(
-    'failed pairing keeps the invite and prevents duplicate submits',
-    (tester) async {
-      final result = Completer<void>();
-      final connection = _Connection()..pairResult = result.future;
-      await _pumpPage(tester, connection);
-      await tester.enterText(find.byType(TextField), ' retry this invite ');
-      await tester.testTextInput.receiveAction(TextInputAction.done);
-      await tester.tap(find.text('Pair'));
-      await tester.pump();
-      expect(connection.invites, ['retry this invite']);
-      expect(find.text('Working…'), findsOneWidget);
-      result.completeError(const FormatException('The invite expired.'));
-      await tester.pump();
-
-      expect(find.text('The invite expired.'), findsOneWidget);
-      expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        ' retry this invite ',
-      );
-      await tester.tap(find.text('Pair'));
-      await tester.pump();
-      expect(connection.invites, ['retry this invite', 'retry this invite']);
-    },
-  );
-
-  testWidgets('a mismatched safety code cancels without pairing', (
-    tester,
-  ) async {
-    final connection = _Connection()..pendingCode = '123 456 789 012';
-    await _pumpPage(tester, connection);
-
-    await tester.tap(find.text('Cancel pairing'));
-    await tester.pump();
-
-    expect(connection.cancellations, 1);
-    expect(connection.confirmations, 0);
-    expect(find.byType(TextField), findsOneWidget);
-  });
-
-  testWidgets('switch to local remains available while opening an invite', (
-    tester,
-  ) async {
-    final pending = Completer<void>();
-    final connection = _Connection()..pairResult = pending.future;
-    var back = 0;
-    await _pumpPage(tester, connection, onBack: () => back++);
-    await tester.enterText(find.byType(TextField), 'Development invite');
-    await tester.pump();
-    await tester.tap(find.text('Pair'));
-    await tester.pump();
-    await tester.tap(find.text('Switch to local'));
-    await tester.pump();
-    expect(back, 1);
-    expect(connection.cancellations, 1);
-    pending.complete();
-    await tester.pump();
-    expect(connection.pendingCode, isNull);
-    expect(connection.confirmations, 0);
-  });
-
-  testWidgets('keeps pairing hidden while looking for a saved host', (
-    tester,
-  ) async {
-    final connection = _Connection()..busy = true;
-    await _pumpPage(tester, connection);
-    expect(find.text('Working…'), findsOneWidget);
-    expect(find.text('Pairing link'), findsNothing);
-    connection.disconnect();
-    await tester.pump();
-    expect(find.text('Pairing link'), findsOneWidget);
-  });
-
-  testWidgets('reconnects an offline host and confirms before forgetting it', (
+  testWidgets('reconnects a group workspace without offering legacy pairing', (
     tester,
   ) async {
     final connection = _Connection()..hostName = 'Development Host';
     final chats = _Chats()
       ..chats = [_Chat('project', 'Project chat', 'project')];
     await _pumpPage(tester, connection, chats: chats);
-    expect(find.text('Host offline'), findsOneWidget);
+    expect(find.text('Group computer not connected'), findsOneWidget);
     expect(find.byType(TextField), findsNothing);
     expect(find.text('Project chat'), findsNothing);
     await tester.tap(find.text('Reconnect'));
     await tester.pump();
     expect(connection.reconnections, 1);
     expect(find.text('Project chat'), findsOneWidget);
-
+    await tester.tap(find.byTooltip('Host options'));
+    await tester.pumpAndSettle();
+    expect(find.text('Connection info'), findsOneWidget);
     expect(find.text('Forget host'), findsNothing);
-    await tester.tap(find.byTooltip('Host options'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Forget host'));
-    await tester.pumpAndSettle();
-    expect(connection.forgets, 0);
-    await tester.tap(find.text('Cancel'));
-    await tester.pumpAndSettle();
-    expect(connection.forgets, 0);
-    await tester.tap(find.byTooltip('Host options'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Forget host'));
-    await tester.pumpAndSettle();
-    await tester.tap(
-      find.descendant(
-        of: find.byType(AlertDialog),
-        matching: find.text('Forget host'),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(connection.forgets, 1);
-    expect(find.byType(TextField), findsOneWidget);
-    expect(find.text('Project chat'), findsNothing);
   });
 
   testWidgets(
@@ -768,21 +611,15 @@ void main() {
 
     connection.disconnect();
     await tester.pump();
-    expect(find.text('Host offline'), findsOneWidget);
+    expect(find.text('Group computer not connected'), findsOneWidget);
     expect(_composer, findsNothing);
     await tester.tap(find.text('Reconnect'));
     await tester.pump();
     expect(_editor(tester).controller.text, 'A private draft');
 
-    connection.disconnect(revoked: true);
-    // The workbench resets the chat catalog on revocation.
+    // Workbench resets the catalog when selecting a different authenticated host.
     chats.closeChat();
-    await tester.pump();
-    await tester.enterText(find.byType(TextField), 'new host invite');
-    await tester.pump();
-    await tester.tap(find.text('Pair'));
-    await tester.pump();
-    await tester.tap(find.text('Codes match, pair'));
+    connection.replacePeer(_Peer('another-host'));
     await tester.pump();
     // Another host may have a chat with the same public ID.
     await tester.tap(find.text('Project chat'));
@@ -819,14 +656,15 @@ void main() {
     expect(chats.sends, isEmpty);
   });
 
-  testWidgets('narrow Chinese pairing view fits enlarged text', (tester) async {
+  testWidgets('narrow Chinese remote workspace fits enlarged text', (
+    tester,
+  ) async {
     tester.view.physicalSize = const Size(300, 640);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
-    final connection = _Connection()..pendingCode = '123 456 789 012';
+    final connection = _Connection()..hostName = '开发电脑';
     await _pumpPage(tester, connection, locale: const Locale('zh'), scale: 1.8);
-    expect(find.text('核对安全码'), findsOneWidget);
-    expect(find.text('安全码一致，完成配对'), findsOneWidget);
+    expect(find.text('开发电脑'), findsOneWidget);
     expect(find.text('切回本地').hitTestable(), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
@@ -1124,7 +962,10 @@ class _LastChats implements DesktopHostLastChatStore {
 
 class _Connection extends ChangeNotifier implements DesktopHostConnection {
   @override
-  String? pendingCode;
+  bool get groupSelected => true;
+  @override
+  String? get selectedHostId =>
+      peer?.remote ?? (hostName != null ? 'fixture-host' : null);
   @override
   String? hostName;
   @override
@@ -1134,97 +975,7 @@ class _Connection extends ChangeNotifier implements DesktopHostConnection {
   @override
   LinkPeer? peer;
 
-  @override
-  bool get discoverySupported => true;
-  @override
-  bool discovering = false;
-  @override
-  String? get discoveryError => null;
-  @override
-  List<LinkAdvert> get nearbyHosts => [
-    LinkAdvert(
-      name: 'Fixture PC',
-      key: Uint8List(32),
-      port: 12345,
-      pairing: true,
-      addresses: const ['127.0.0.1'],
-    ),
-  ];
-  @override
-  void startDiscovery() {
-    discovering = true;
-    notifyListeners();
-  }
-
-  @override
-  Future<void> stopDiscovery() async {
-    discovering = false;
-  }
-
-  @override
-  bool pendingNeedsApproval = false;
-  @override
-  bool waitingForHostApproval = false;
-  Completer<void>? hostConfirm;
-  @override
-  Future<void> pairNearby(String id) async {
-    pendingNeedsApproval = true;
-    await pair(id);
-  }
-
-  final invites = <String>[];
-  int confirmations = 0;
-  int cancellations = 0;
   int reconnections = 0;
-  int forgets = 0;
-  Future<void>? pairResult;
-  bool _pairCancelled = false;
-
-  @override
-  Future<void> pair(String invite) async {
-    _pairCancelled = false;
-    invites.add(invite);
-    error = null;
-    final result = pairResult;
-    pairResult = null;
-    try {
-      if (result != null) await result;
-    } on FormatException catch (failure) {
-      error = failure.message;
-      notifyListeners();
-      return;
-    }
-    if (_pairCancelled) return;
-    pendingCode = '123 456 789 012';
-    notifyListeners();
-  }
-
-  @override
-  Future<void> confirm() async {
-    confirmations++;
-    if (pendingNeedsApproval) {
-      waitingForHostApproval = true;
-      hostConfirm = Completer<void>();
-      notifyListeners();
-      await hostConfirm!.future;
-      return;
-    }
-    pendingCode = null;
-    hostName = 'Development Host';
-    peer = _Peer();
-    notifyListeners();
-  }
-
-  @override
-  Future<void> cancelPairing() async {
-    cancellations++;
-    waitingForHostApproval = false;
-    pendingNeedsApproval = false;
-    hostConfirm?.complete();
-    _pairCancelled = true;
-    pendingCode = null;
-    notifyListeners();
-  }
 
   @override
   Future<void> reconnect() async {
@@ -1233,18 +984,11 @@ class _Connection extends ChangeNotifier implements DesktopHostConnection {
     notifyListeners();
   }
 
-  void disconnect({bool revoked = false}) {
-    busy = false;
-    peer = null;
-    if (revoked) hostName = null;
-    notifyListeners();
-  }
+  void disconnect() => replacePeer(null);
 
-  @override
-  Future<void> forget() async {
-    forgets++;
-    hostName = null;
-    peer = null;
+  void replacePeer(LinkPeer? next) {
+    busy = false;
+    peer = next;
     notifyListeners();
   }
 
