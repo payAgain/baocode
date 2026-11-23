@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../settings/pages/settings_widgets.dart'
     show SettingsColors, SettingsText;
+import '../settings/user_settings.dart' show GlobalStorage;
 import '../theme/app_theme.dart' show AppColors;
 import 'desktop_host_chats.dart';
 import 'desktop_host_connection.dart';
@@ -16,6 +17,29 @@ typedef DesktopHostChatKey = ({String kind, String id});
 abstract interface class DesktopHostLastChatStore {
   Future<DesktopHostChatKey?> read(String host);
   Future<void> write(String host, DesktopHostChatKey chat);
+}
+
+class SavedDesktopHostChat implements DesktopHostLastChatStore {
+  SavedDesktopHostChat._(this.storage);
+  final GlobalStorage storage;
+  static final _instances = Expando<SavedDesktopHostChat>();
+  static SavedDesktopHostChat? forStorage(GlobalStorage? storage) =>
+      storage == null
+      ? null
+      : _instances[storage] ??= SavedDesktopHostChat._(storage);
+
+  @override
+  Future<DesktopHostChatKey?> read(String host) async => switch (storage
+      .get<Map>('workbench.desktopLastChat.$host')) {
+    {'kind': final String kind, 'id': final String id} => (kind: kind, id: id),
+    _ => null,
+  };
+
+  @override
+  Future<void> write(String host, DesktopHostChatKey chat) => storage.set(
+    'workbench.desktopLastChat.$host',
+    {'kind': chat.kind, 'id': chat.id},
+  );
 }
 
 /// A client view of one remote host. The workbench owns both models and their

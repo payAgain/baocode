@@ -194,9 +194,8 @@ class Sidebar extends StatefulWidget {
     this.onOpened,
     this.onOpenFolder,
     this.onAddSshHost,
-    this.onConnectComputer,
-    this.showingComputer = false,
-    this.connectedComputerName,
+    this.onSwitchToRemote,
+    this.remoteWorkspaceName,
     this.onOpenFolderOn,
     this.editSshHost,
     this.onOpenSettings,
@@ -281,9 +280,10 @@ class Sidebar extends StatefulWidget {
   /// Opens the search palette (agents, what was said in them, files,
   /// actions); no Search row without it.
   final VoidCallback? onSearch;
-  final VoidCallback? onConnectComputer;
-  final bool showingComputer;
-  final String? connectedComputerName;
+
+  /// Opens the separate desktop-host workspace.
+  final VoidCallback? onSwitchToRemote;
+  final String? remoteWorkspaceName;
 
   /// Shows Claude Code's customizations in place of the chat; no
   /// Customize row without it.
@@ -1104,20 +1104,19 @@ class _SidebarState extends State<Sidebar>
               label: context.l10n.sidebarOpenProject,
               onTap: open,
             ),
-          if (widget.onConnectComputer case final connect?)
+          if (widget.onSwitchToRemote case final open?)
             _NavRow(
               icon: Codicons.deviceDesktop,
               label: switch ((
-                widget.connectedComputerName,
+                widget.remoteWorkspaceName,
                 Localizations.localeOf(context).languageCode,
               )) {
-                (final name?, 'zh') => '来自 $name',
-                (final name?, _) => 'From $name',
-                (null, 'zh') => '连接另一台电脑',
-                _ => 'Connect to computer',
+                (final name?, 'zh') => '切换到 $name',
+                (final name?, _) => 'Switch to $name',
+                (null, 'zh') => '切换到远程工作区',
+                _ => 'Switch to remote workspace',
               },
-              selected: widget.showingComputer,
-              onTap: connect,
+              onTap: open,
             ),
           if (widget.onSearch case final search?)
             _NavRow(

@@ -77,9 +77,13 @@ class WindowHeader extends StatefulWidget {
     this.compact = false,
     this.title,
     this.settingsShown = false,
+    this.windowOnly = false,
   });
 
   final Workspace workspace;
+
+  /// Only the draggable caption and native buttons, over a remote workspace.
+  final bool windowOnly;
 
   /// The project the session works in, for opening it in an editor; null
   /// before there is one.
@@ -249,6 +253,15 @@ class _WindowHeaderState extends State<WindowHeader> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.windowOnly) {
+      return Material(
+        color: AppColors.windowCanvas,
+        child: SizedBox(
+          height: AppMetrics.headerHeight,
+          child: Row(children: [const Spacer(), _windowButtons()]),
+        ),
+      );
+    }
     final layout = _ide ? widget.ideLayout : null;
     final ide = layout != null;
     final settings = widget.settingsShown;
@@ -363,11 +376,7 @@ class _WindowHeaderState extends State<WindowHeader> {
             // title bar's.
             if (!settings) ..._tools(layout, ide),
             const SizedBox(width: 10),
-            WindowButtons(
-              minimizeKey: _minimize,
-              maximizeKey: _maximize,
-              closeKey: _close,
-            ),
+            _windowButtons(),
           ],
         ),
       ),
@@ -401,6 +410,12 @@ class _WindowHeaderState extends State<WindowHeader> {
   }
 
   static const _quickOpenCommand = 'workbench.action.quickOpen';
+
+  Widget _windowButtons() => WindowButtons(
+    minimizeKey: _minimize,
+    maximizeKey: _maximize,
+    closeKey: _close,
+  );
 
   /// The tools on the right of the strip, before the window's buttons.
   List<Widget> _tools(IdeLayout? layout, bool ide) => [
