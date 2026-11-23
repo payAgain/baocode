@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -7,33 +9,50 @@ import '../theme/app_theme.dart' show AppColors;
 import 'desktop_host_chats.dart';
 import 'desktop_host_connection.dart';
 
+typedef DesktopHostChatKey = ({String kind, String id});
+
+/// Optional persistence for selection, keyed by the authenticated host ID.
+/// Writes for a host must preserve invocation order.
+abstract interface class DesktopHostLastChatStore {
+  Future<DesktopHostChatKey?> read(String host);
+  Future<void> write(String host, DesktopHostChatKey chat);
+}
+
 /// A client view of one remote host. The workbench owns both models and their
-/// binding; displaying this page never opens a host conversation on its own.
+/// binding.
 class DesktopHostPage extends StatefulWidget {
   const DesktopHostPage({
     super.key,
     required this.connection,
     required this.chats,
     required this.onBack,
+    this.lastChatStore,
   });
 
   final DesktopHostConnection connection;
   final DesktopHostChats chats;
   final VoidCallback onBack;
+  final DesktopHostLastChatStore? lastChatStore;
 
   @override
   State<DesktopHostPage> createState() => _DesktopHostPageState();
 }
 
 class _DesktopHostPageState extends State<DesktopHostPage> {
+  // The connection belongs to the workbench and outlives this page. Keep
+  // its unsent text in memory when switching back to the local workspace.
+  static final _drafts = Expando<Map<(String, String, String), String>>();
+
   final _invite = TextEditingController();
   final _inviteFocus = FocusNode();
-  final _draft = TextEditingController();
   bool _working = false;
+  bool _openingInvite = false;
+  bool _leaving = false;
   bool _confirmingForget = false;
   String? _confirmingCode;
   Object? _chatRequest;
-  (String, String)? _draftChat;
+  final _restoring = <String>{};
+  final _restoreHandled = <String>{};
   String? _localError;
   String? _localChatError;
 
@@ -62,7 +81,6 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     }
     _invite.dispose();
     _inviteFocus.dispose();
-    _draft.dispose();
     super.dispose();
   }
 
@@ -114,18 +132,25 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   Future<void> _pair() async {
     final invite = _invite.text.trim();
     if (!_showInvite || invite.isEmpty) return;
-    await _runConnection((connection) => connection.pair(invite));
+    await _runConnection((connection) async {
+      _openingInvite = true;
+      try {
+        await connection.pair(invite);
+      } finally {
+        _openingInvite = false;
+      }
+    });
   }
 
   Future<void> _confirm(String code) async {
     if (_connection.pendingCode != code) return;
     await _runConnection((connection) async {
       _confirmingCode = code;
+      _drafts[connection]?.clear();
       try {
         await connection.confirm();
         if (mounted && identical(_connection, connection) && _stored) {
           _invite.clear();
-          _discardDraft();
         }
       } finally {
         _confirmingCode = null;
@@ -170,9 +195,11 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
       }
       await _runConnection((connection) async {
         await connection.forget();
-        if (mounted && identical(connection, _connection) && !_stored) {
-          _invite.clear();
-          _discardDraft();
+        if (connection.hostName == null &&
+            connection.peer == null &&
+            connection.pendingCode == null) {
+          _drafts[connection]?.clear();
+          if (mounted && identical(connection, _connection)) _invite.clear();
         }
       });
     } finally {
@@ -180,11 +207,12 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     }
   }
 
-  Future<void> _back() async {
-    if (!_stored && _busy) return;
-    if (_connection.pendingCode != null) {
-      await _runConnection((connection) => connection.cancelPairing());
-      if (!mounted || _connection.pendingCode != null) return;
+  void _back() {
+    if (_leaving) return;
+    _leaving = true;
+    if (_openingInvite ||
+        (_connection.pendingCode != null && _confirmingCode == null)) {
+      unawaited(_connection.cancelPairing().onError<Exception>((_, _) {}));
     }
     if (_chats.selected != null) _closeChat();
     widget.onBack();
@@ -219,42 +247,92 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     }
   }
 
-  Future<void> _openChat(DesktopHostChat chat) async {
-    if (_chats.selected != null) return;
-    await _runChat((chats) {
-      // A manual open starts with a clean composer. Reconnect restores the
-      // still-selected chat through the model and does not enter here.
-      _draft.clear();
-      _draftChat = (chat.kind, chat.id);
-      return chats.open(chat);
+  Future<void> _openChat(DesktopHostChat chat, {bool remember = true}) async {
+    final selected = _chats.selected;
+    if (selected?.kind == chat.kind && selected?.id == chat.id) return;
+    final host = _connection.peer?.remote;
+    if (host == null || !_online || _busy || _chatBusy) return;
+    _restoreHandled.add(host);
+    final store = widget.lastChatStore;
+    final opened = await _runChat((chats) => chats.open(chat));
+    final current = _chats.selected;
+    if (remember &&
+        opened &&
+        store != null &&
+        current?.kind == chat.kind &&
+        current?.id == chat.id) {
+      try {
+        await store.write(host, (kind: chat.kind, id: chat.id));
+      } on Exception {
+        // A storage failure should not close a working conversation.
+      }
+    }
+  }
+
+  bool _canRestore(String host) =>
+      _online &&
+      !_leaving &&
+      !_busy &&
+      !_chatBusy &&
+      _connection.peer?.remote == host &&
+      _chats.selected == null &&
+      _chats.error == null &&
+      !_restoreHandled.contains(host);
+
+  void _queueRestore() {
+    final store = widget.lastChatStore;
+    final host = _connection.peer?.remote;
+    if (store == null ||
+        host == null ||
+        !_canRestore(host) ||
+        _chats.chats.isEmpty ||
+        _restoring.contains(host)) {
+      return;
+    }
+    final connection = _connection;
+    final chats = _chats;
+    bool isCurrent() =>
+        mounted &&
+        identical(connection, _connection) &&
+        identical(chats, _chats) &&
+        identical(store, widget.lastChatStore) &&
+        _canRestore(host);
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!isCurrent() || !_restoring.add(host)) return;
+      DesktopHostChatKey? key;
+      try {
+        key = await store.read(host);
+      } on Exception {
+        // Storage can be unavailable. The catalog remains usable.
+      } finally {
+        _restoring.remove(host);
+      }
+      if (!isCurrent()) return;
+      _restoreHandled.add(host);
+      final match = chats.chats
+          .where((chat) => chat.kind == key?.kind && chat.id == key?.id)
+          .firstOrNull;
+      if (match != null) await _openChat(match, remember: false);
     });
   }
 
   void _closeChat() {
-    _discardDraft();
-    _chats.closeChat();
-  }
-
-  void _discardDraft() {
-    _draft.clear();
-    _draftChat = null;
     setState(() {
       _chatRequest = null;
       _localChatError = null;
     });
+    _chats.closeChat();
   }
 
-  Future<void> _send(DesktopHostChat chat) async {
-    final draft = _draft.text;
+  Future<bool> _send((String, String, String) chatKey, String draft) async {
+    final chat = _chats.selected;
     final message = draft.trim();
-    if (message.isEmpty || _draftChat != (chat.kind, chat.id)) return;
-    final sent = await _runChat((chats) => chats.send(message));
-    if (sent &&
-        mounted &&
-        _draftChat == (chat.kind, chat.id) &&
-        _draft.text == draft) {
-      _draft.clear();
+    if (message.isEmpty ||
+        chat == null ||
+        chatKey != (_connection.peer?.remote, chat.kind, chat.id)) {
+      return false;
     }
+    return _runChat((chats) => chats.send(message));
   }
 
   @override
@@ -263,30 +341,84 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     return ListenableBuilder(
       listenable: Listenable.merge([_connection, _chats]),
       builder: (context, _) {
-        final code = _connection.pendingCode ?? _confirmingCode;
-        final error = _localError ?? _connection.error;
-        final selected = _online ? _chats.selected : null;
+        _queueRestore();
         return Material(
           color: AppColors.code,
           child: LayoutBuilder(
             builder: (context, constraints) {
-              final inset = constraints.maxWidth < 600 ? 16.0 : 32.0;
-              final header = _HostHeading(
-                title: text.title,
-                tooltip: text.back,
-                icon: Icons.arrow_back,
-                onBack: !_stored && _busy ? null : _back,
+              final code = _connection.pendingCode ?? _confirmingCode;
+              final error = _localError ?? _connection.error;
+              final host = code == null ? _connection.peer?.remote : null;
+              final selected = host == null ? null : _chats.selected;
+              final wide = host != null && constraints.maxWidth >= 880;
+              final catalog = _catalog(
+                text,
+                code,
+                error,
+                showChatStatus: selected == null,
               );
-              return Padding(
-                padding: EdgeInsets.symmetric(horizontal: inset),
-                child: Center(
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 760),
-                    child: selected == null
-                        ? _catalog(text, header, code, error)
-                        : _conversation(text, header, selected, error),
+              final conversation = host == null || selected == null
+                  ? Center(child: _Notice(text.chooseChat))
+                  : _conversation(text, host, selected, error, wide: wide);
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    child: Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 16,
+                      runSpacing: 4,
+                      children: [
+                        FilledButton.icon(
+                          onPressed: _back,
+                          icon: const Icon(Icons.arrow_back),
+                          label: Text(
+                            text.switchToLocal,
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                        Semantics(
+                          header: true,
+                          child: Text(
+                            text.title,
+                            style: SettingsText.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
+                  const Divider(height: 1),
+                  Expanded(
+                    child: Row(
+                      children: [
+                        if (wide) ...[
+                          SizedBox(
+                            width: 280,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                              ),
+                              child: catalog,
+                            ),
+                          ),
+                          const VerticalDivider(width: 1),
+                        ],
+                        Expanded(
+                          key: const ValueKey('host-content'),
+                          child: _contentPane(
+                            wide || selected != null ? conversation : catalog,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               );
             },
           ),
@@ -295,7 +427,22 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     );
   }
 
-  Widget _catalog(_HostText text, Widget header, String? code, String? error) {
+  Widget _contentPane(Widget child) => Center(
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 792),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: child,
+      ),
+    ),
+  );
+
+  Widget _catalog(
+    _HostText text,
+    String? code,
+    String? error, {
+    required bool showChatStatus,
+  }) {
     final chatError = _localChatError ?? _chats.error;
     final groups = <String, List<DesktopHostChat>>{
       'project': [],
@@ -315,17 +462,16 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const SizedBox(height: 16),
-              header,
-              const SizedBox(height: 12),
               if (_busy) _Progress(text.working),
-              if (error != null) _Notice(error, isError: true),
+              if (showChatStatus && error != null)
+                _Notice(error, isError: true),
               if (code != null)
                 _comparison(text, code)
-              else if (_showInvite)
+              else if (_showInvite && (!_connection.busy || _working))
                 _pairing(text)
-              else
+              else if (_stored)
                 _host(text),
-              if (_online) ...[
+              if (_online && showChatStatus) ...[
                 const SizedBox(height: 16),
                 if (_chatBusy) _Progress(text.loadingChats),
                 if (chatError != null) _Notice(chatError, isError: true),
@@ -355,9 +501,13 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
               itemCount: entry.value.length,
               itemBuilder: (context, index) {
                 final chat = entry.value[index];
+                final selected = _chats.selected;
                 return ListTile(
                   key: ValueKey((chat.kind, chat.id)),
                   dense: true,
+                  selected:
+                      selected?.kind == chat.kind && selected?.id == chat.id,
+                  selectedTileColor: SettingsColors.card,
                   enabled: !_busy && !_chatBusy,
                   onTap: () => _openChat(chat),
                   contentPadding: const EdgeInsets.symmetric(horizontal: 12),
@@ -416,23 +566,26 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
 
   Widget _conversation(
     _HostText text,
-    Widget header,
+    String host,
     DesktopHostChat chat,
-    String? connectionError,
-  ) {
+    String? connectionError, {
+    required bool wide,
+  }) {
     final messages = _chats.messages;
     final hasEarlier = _chats.hasEarlier;
     final error = _localChatError ?? _chats.error;
+    final connection = _connection;
+    final chatKey = (host, chat.kind, chat.id);
+    final drafts = _drafts[connection] ??= {};
     return Column(
-      key: ValueKey((chat.kind, chat.id)),
+      key: ValueKey(chatKey),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SizedBox(height: 8),
-        header,
         _HostHeading(
           title: chat.title,
-          tooltip: text.backToChats,
-          icon: Icons.list_alt_outlined,
+          tooltip: wide ? text.closeChat : text.backToChats,
+          icon: wide ? Icons.close : Icons.list_alt_outlined,
           onBack: _closeChat,
         ),
         if (connectionError != null) _Notice(connectionError, isError: true),
@@ -472,36 +625,18 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 ),
         ),
         const Divider(height: 1),
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _draft,
-                  minLines: 1,
-                  maxLines: 3,
-                  style: SettingsText.label,
-                  decoration: InputDecoration(
-                    labelText: text.message,
-                    isDense: true,
-                    border: const OutlineInputBorder(),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              ValueListenableBuilder<TextEditingValue>(
-                valueListenable: _draft,
-                builder: (context, value, _) => FilledButton(
-                  onPressed: _busy || _chatBusy || value.text.trim().isEmpty
-                      ? null
-                      : () => _send(chat),
-                  child: Text(text.send),
-                ),
-              ),
-            ],
-          ),
+        _HostComposer(
+          key: ObjectKey(connection),
+          initialDraft: drafts[chatKey] ?? '',
+          busy: _busy || _chatBusy,
+          onChanged: (draft) {
+            if (draft.isEmpty) {
+              drafts.remove(chatKey);
+            } else {
+              drafts[chatKey] = draft;
+            }
+          },
+          onSend: (draft) => _send(chatKey, draft),
         ),
       ],
     );
@@ -589,6 +724,83 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
       ],
     ),
   );
+}
+
+class _HostComposer extends StatefulWidget {
+  const _HostComposer({
+    super.key,
+    required this.initialDraft,
+    required this.busy,
+    required this.onChanged,
+    required this.onSend,
+  });
+
+  final String initialDraft;
+  final bool busy;
+  final ValueChanged<String> onChanged;
+  final Future<bool> Function(String) onSend;
+
+  @override
+  State<_HostComposer> createState() => _HostComposerState();
+}
+
+class _HostComposerState extends State<_HostComposer> {
+  late final _draft = TextEditingController(text: widget.initialDraft);
+  int _revision = 0;
+
+  @override
+  void dispose() {
+    _draft.dispose();
+    super.dispose();
+  }
+
+  Future<void> _send() async {
+    final revision = _revision;
+    if (await widget.onSend(_draft.text) && mounted && _revision == revision) {
+      _draft.clear();
+      widget.onChanged('');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final text = _HostText(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _draft,
+              onChanged: (draft) {
+                _revision++;
+                widget.onChanged(draft);
+              },
+              minLines: 1,
+              maxLines: 3,
+              style: SettingsText.label,
+              decoration: InputDecoration(
+                labelText: text.message,
+                isDense: true,
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          ValueListenableBuilder<TextEditingValue>(
+            valueListenable: _draft,
+            builder: (context, value, _) => FilledButton(
+              onPressed: widget.busy || value.text.trim().isEmpty
+                  ? null
+                  : _send,
+              child: Text(text.send),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _HostHeading extends StatelessWidget {
@@ -722,8 +934,8 @@ class _HostText {
     : _zh = Localizations.localeOf(context).languageCode == 'zh';
 
   final bool _zh;
-  String get title => _zh ? '连接电脑' : 'Connect to a Host';
-  String get back => _zh ? '返回' : 'Back';
+  String get title => _zh ? '远程工作区' : 'Remote workspace';
+  String get switchToLocal => _zh ? '切回本地' : 'Switch to local';
   String get pairTitle => _zh ? '配对一台电脑' : 'Pair a Host';
   String get pairDescription => _zh
       ? '在要连接的电脑上打开 BaoCode 的「设置 → 手机」，显示配对二维码并复制链接。'
@@ -757,6 +969,8 @@ class _HostText {
   String get emptyCatalog =>
       _zh ? '主机上没有会话。' : 'No conversations on this host.';
   String get backToChats => _zh ? '返回主机会话列表' : 'Back to host chats';
+  String get closeChat => _zh ? '关闭会话' : 'Close chat';
+  String get chooseChat => _zh ? '请选择主机会话。' : 'Select a host conversation.';
   String get emptyChat => _zh ? '还没有消息。' : 'No messages yet.';
   String get earlier => _zh ? '加载更早的消息' : 'Load earlier messages';
   String get message => _zh ? '消息' : 'Message';
