@@ -684,6 +684,12 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     String? connectionError, {
     required bool wide,
   }) {
+    final history = chat.kind == 'project' ? _chats.projectHistory : null;
+    // The native history lays out its own text column and paints the minimap
+    // in the surrounding margin. Only the composer is width-capped here.
+    Widget bodyColumn(Widget child) => history == null ? _column(child) : child;
+    Widget composerColumn(Widget child) =>
+        history == null ? child : _column(child);
     final messages = _chats.messages;
     final hasEarlier = _chats.hasEarlier;
     final error = _localChatError ?? _chats.error;
@@ -747,7 +753,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
           ],
         ),
         Expanded(
-          child: _column(
+          child: bodyColumn(
             Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -757,9 +763,9 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 if (error != null) _Notice(error, isError: true),
                 const Divider(height: 1),
                 Expanded(
-                  child: chat.kind == 'project' && _chats.projectHistory != null
+                  child: history != null
                       ? DesktopHostProjectHistory(
-                          feed: _chats.projectHistory!,
+                          feed: history,
                           earlierEnabled: !_busy && !_chatBusy,
                           emptyLabel: !_chatBusy && error == null
                               ? text.emptyChat
@@ -810,24 +816,26 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                         ),
                 ),
                 const Divider(height: 1),
-                _HostComposer(
-                  key: ObjectKey(connection),
-                  initialDraft: drafts[chatKey] ?? '',
-                  busy: _busy || _chatBusy,
-                  controls: _chats.sessionControls,
-                  project: chat.kind == 'project'
-                      ? _chats.projects
-                            .where((p) => p.id == chat.projectId)
-                            .firstOrNull
-                      : null,
-                  onChanged: (draft) {
-                    if (draft.isEmpty) {
-                      drafts.remove(chatKey);
-                    } else {
-                      drafts[chatKey] = draft;
-                    }
-                  },
-                  onSend: (draft) => _send(chatKey, draft),
+                composerColumn(
+                  _HostComposer(
+                    key: ObjectKey(connection),
+                    initialDraft: drafts[chatKey] ?? '',
+                    busy: _busy || _chatBusy,
+                    controls: _chats.sessionControls,
+                    project: chat.kind == 'project'
+                        ? _chats.projects
+                              .where((p) => p.id == chat.projectId)
+                              .firstOrNull
+                        : null,
+                    onChanged: (draft) {
+                      if (draft.isEmpty) {
+                        drafts.remove(chatKey);
+                      } else {
+                        drafts[chatKey] = draft;
+                      }
+                    },
+                    onSend: (draft) => _send(chatKey, draft),
+                  ),
                 ),
               ],
             ),
