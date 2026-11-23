@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:bao_link/bao_link.dart' show ProjectInfo;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -75,6 +77,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   bool _confirmingForget = false;
   String? _confirmingCode;
   Object? _chatRequest;
+  final _collapsedFolders = <(String, String)>{};
   final _restoring = <String>{};
   final _restoreHandled = <String>{};
   String? _localError;
@@ -478,6 +481,14 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
         groups[chat.kind]?.add(chat);
       }
     }
+    final host = _connection.peer?.remote;
+    final folders = _online ? _chats.projects : const <ProjectInfo>[];
+    final byFolder = <String, List<DesktopHostChat>>{};
+    for (final chat in groups['project']!) {
+      if (chat.projectId case final id?) {
+        (byFolder[id] ??= []).add(chat);
+      }
+    }
     return CustomScrollView(
       key: const ValueKey('host-catalog'),
       slivers: [
@@ -501,6 +512,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 if (chatError != null) _Notice(chatError, isError: true),
                 if (!_chatBusy &&
                     chatError == null &&
+                    folders.isEmpty &&
                     groups.values.every((group) => group.isEmpty))
                   _Notice(text.emptyCatalog),
               ],
@@ -508,7 +520,9 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
           ),
         ),
         for (final entry in groups.entries)
-          if (entry.value.isNotEmpty) ...[
+          if (entry.key == 'project'
+              ? folders.isNotEmpty
+              : entry.value.isNotEmpty) ...[
             SliverToBoxAdapter(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 2),
@@ -521,43 +535,71 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 ),
               ),
             ),
-            SliverList.builder(
-              itemCount: entry.value.length,
-              itemBuilder: (context, index) {
-                final chat = entry.value[index];
-                final selected = _chats.selected;
-                return ListTile(
-                  key: ValueKey((chat.kind, chat.id)),
-                  dense: true,
-                  selected:
-                      selected?.kind == chat.kind && selected?.id == chat.id,
-                  selectedTileColor: SettingsColors.card,
-                  enabled: !_busy && !_chatBusy,
-                  onTap: () => _openChat(chat),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(6),
+            if (entry.key == 'project' && host != null)
+              for (final folder in folders) ...[
+                SliverToBoxAdapter(
+                  child: ListTile(
+                    key: ValueKey(('folder', folder.id)),
+                    dense: true,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                    leading: const Icon(Icons.folder_outlined, size: 19),
+                    title: Text(folder.name, style: SettingsText.label),
+                    trailing: Icon(
+                      _collapsedFolders.contains((host, folder.id))
+                          ? Icons.chevron_right
+                          : Icons.expand_more,
+                      size: 18,
+                    ),
+                    onTap: () => setState(() {
+                      final key = (host, folder.id);
+                      if (!_collapsedFolders.remove(key))
+                        _collapsedFolders.add(key);
+                    }),
                   ),
-                  leading: Icon(switch (chat.kind) {
-                    'project' => Icons.folder_outlined,
-                    'bot' => Icons.smart_toy_outlined,
-                    _ => Icons.groups_outlined,
-                  }, size: 19),
-                  title: Text(
-                    chat.title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: SettingsText.label,
-                  ),
-                  trailing: const Icon(Icons.chevron_right, size: 18),
-                );
-              },
-            ),
+                ),
+                if (!_collapsedFolders.contains((host, folder.id)))
+                  _chatRows(byFolder[folder.id] ?? const []),
+              ]
+            else
+              _chatRows(entry.value),
           ],
         const SliverToBoxAdapter(child: SizedBox(height: 16)),
       ],
     );
   }
+
+  Widget _chatRows(List<DesktopHostChat> chats) => SliverList.builder(
+    itemCount: chats.length,
+    itemBuilder: (context, index) {
+      final chat = chats[index];
+      final selected = _chats.selected;
+      return ListTile(
+        key: ValueKey((chat.kind, chat.id)),
+        dense: true,
+        selected: selected?.kind == chat.kind && selected?.id == chat.id,
+        selectedTileColor: SettingsColors.card,
+        enabled: !_busy && !_chatBusy,
+        onTap: () => _openChat(chat),
+        contentPadding: EdgeInsets.only(
+          left: chat.kind == 'project' ? 36 : 12,
+          right: 12,
+        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+        leading: Icon(switch (chat.kind) {
+          'project' => Icons.chat_bubble_outline,
+          'bot' => Icons.smart_toy_outlined,
+          _ => Icons.groups_outlined,
+        }, size: 19),
+        title: Text(
+          chat.title,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: SettingsText.label,
+        ),
+        trailing: const Icon(Icons.chevron_right, size: 18),
+      );
+    },
+  );
 
   Widget _host(_HostText text) => _HostCard(
     child: Column(
