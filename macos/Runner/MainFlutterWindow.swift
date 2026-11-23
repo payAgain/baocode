@@ -767,6 +767,9 @@ class MainFlutterWindow: BaoWindow {
     case "setFileMenuTitles":
       fileMenu?.setTitles(call.arguments as? [String: String] ?? [:])
       result(nil)
+    case "setRemoteWorkspace":
+      fileMenu?.remoteWorkspace = call.arguments as? Bool ?? false
+      result(nil)
     case "setRecentItems":
       fileMenu?.setRecent(call.arguments as? [String] ?? [])
       result(nil)
@@ -1133,7 +1136,7 @@ extension FileDropView: NSDraggingSource {
 /// Open Recent lists what Flutter says (`setRecentItems`); one picked is
 /// opened as a path the system asks the app to open (see OpenRequests), as
 /// `code <path>` would.
-private class FileMenu: NSObject {
+private class FileMenu: NSObject, NSMenuDelegate {
   private let menu = NSMenu(title: "File")
   private let recentMenu = NSMenu(title: "Open Recent")
   private var titles: [String: String] = [
@@ -1153,6 +1156,12 @@ private class FileMenu: NSObject {
     "checkForUpdates": "Check for Updates…",
   ]
   private var recent: [String] = []
+  var remoteWorkspace = false
+
+  private var remoteInFront: Bool {
+    let window = NSApp.keyWindow ?? NSApp.mainWindow ?? AppWindows.shared?.main
+    return remoteWorkspace && window is MainFlutterWindow
+  }
 
   /// The keys of the items ticked (`setFileMenuChecked`): Auto Save's.
   private var checked: Set<String> = []
@@ -1178,7 +1187,13 @@ private class FileMenu: NSObject {
 
   override init() {
     super.init()
+    menu.delegate = self
     recentMenu.autoenablesItems = false
+  }
+
+  func menuNeedsUpdate(_ menu: NSMenu) {
+    // The active window may have changed since the last workspace switch.
+    build()
   }
 
   /// The app menu's Check for Updates…, under About (see lib/update/).
@@ -1223,7 +1238,9 @@ private class FileMenu: NSObject {
     menu.title = title("file")
     menu.supermenu?.items.first(where: { $0.submenu === menu })?.title = title("file")
     menu.removeAllItems()
+    let remote = remoteInFront
     for (key, command) in layout {
+      if remote && key != "closeWindow" { continue }
       if key.isEmpty {
         menu.addItem(.separator())
         continue
@@ -1271,6 +1288,7 @@ private class FileMenu: NSObject {
 
   @objc private func runCommand(_ sender: NSMenuItem) {
     guard let command = sender.representedObject as? String else { return }
+    if remoteInFront && command != "workbench.action.closeWindow" { return }
     // The stash's panel in front: its own (Close closes it, not a window
     // behind).
     if let panel = NSApp.keyWindow as? StashPanel {
@@ -1284,6 +1302,7 @@ private class FileMenu: NSObject {
   }
 
   @objc private func openRecent(_ sender: NSMenuItem) {
+    guard !remoteInFront else { return }
     guard let path = sender.representedObject as? String else { return }
     OpenRequests.shared.deliver([path])
   }

@@ -729,6 +729,17 @@ abstract final class WindowControls {
     }
   }
 
+  /// The main macOS window's File menu omits local actions while it shows
+  /// a remote workspace. Secondary windows keep their own local commands.
+  static Future<void> setRemoteWorkspace(bool remote) async {
+    if (!hasEditMenu) return;
+    try {
+      await _main.invokeMethod<void>('setRemoteWorkspace', remote);
+    } on MissingPluginException {
+      // A host without the channel (e.g. tests).
+    }
+  }
+
   /// What the macOS File menu's Open Recent lists: [paths], the latest
   /// first, then Clear Recently Opened (`workbench.action.clearRecentlyOpened`
   /// through [onMenuCommand]). A path picked there comes back as one the

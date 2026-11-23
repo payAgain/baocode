@@ -204,6 +204,7 @@ class Workbench extends StatefulWidget {
     this.customizations,
     this.windows,
     this.window,
+    this.createDesktopHostConnection,
   });
 
   final Workspace workspace;
@@ -213,6 +214,9 @@ class Workbench extends StatefulWidget {
 
   /// The one this is built in (the chat's, by default).
   final AppWindow? window;
+
+  @visibleForTesting
+  final DesktopHostConnection Function()? createDesktopHostConnection;
 
   /// What the search palette searches the agents' conversations with.
   final ConversationSearch conversations;
@@ -454,7 +458,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   /// Whether the keyboard is in this window (each window's workbench sees
   /// every key).
   bool get _hasKeyboard {
-    if (!_multi) return true;
+    if (!(_windows?.started ?? false)) return true;
     final focus = FocusManager.instance.primaryFocus?.context;
     if (focus != null && focus.mounted) {
       final view = focus.findAncestorWidgetOfExactType<View>();
@@ -659,9 +663,6 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     SshHosts.instance.savedServers = () => _workspace.sshServers;
     unawaited(_loadSshConfigHosts());
     FileDrops.listen(_viewId);
-    if (_windows?.started ?? false) {
-      FileDrops.setUnhandledDrop(_viewId, _dropped);
-    }
     widget.window?.attach(this);
     _windows?.addListener(_windowsChanged);
     if (_main) {
@@ -716,6 +717,8 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     _restoreSidePanel();
     _workspace.addListener(_syncWorkspaceFolders);
     _workspace.addListener(_reloadedElsewhere);
+    _restoreDesktopWorkspace();
+    _syncWorkspaceFileDrops();
   }
 
   /// A conversation read anew elsewhere in the workspace (its session
@@ -812,9 +815,16 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     });
   }
 
+  void _syncWorkspaceFileDrops() {
+    if (_windows?.started ?? false) {
+      FileDrops.setUnhandledDrop(_viewId, _remoteWorkspace ? null : _dropped);
+    }
+  }
+
   /// Files dropped on the window where nothing in it takes them: opened
   /// as the `code` command opens them.
   bool _dropped(List<ComposerFile> files) {
+    if (_remoteWorkspace) return false;
     // Theme extensions (.vsix) dropped on the IDE install there.
     if (_showsIde &&
         (_ide?.dropExtensions([for (final file in files) file.path]) ??
@@ -1223,7 +1233,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   /// the app has windows (the IDE in the main one: New Window shows its
   /// empty window there, Show Chat Window the chat); full screen and zoom
   /// in any.
-  Map<String, VoidCallback> _windowCommands() {
+  Map<String, VoidCallback> _windowCommands({bool controlsOnly = false}) {
     final windows = _windows;
     final window = widget.window;
     final anyWindow = {
@@ -1239,7 +1249,6 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     }
     return {
       ...anyWindow,
-      WindowCommandIds.newWindow: () => unawaited(windows.newWindow()),
       WindowCommandIds.closeWindow: () => unawaited(
         windows.requestClose(
           window,
@@ -1247,11 +1256,14 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
           byKeyboard: HardwareKeyboard.instance.logicalKeysPressed.isNotEmpty,
         ),
       ),
-      WindowCommandIds.switchWindow: () => windows.switchWindow(window),
-      WindowCommandIds.showChat: () {
-        if (windows.multi || window.isAgent) return windows.showChat();
-        windows.focus(window);
-        _workspace.layout = WorkspaceLayout.chat;
+      if (!controlsOnly) ...{
+        WindowCommandIds.newWindow: () => unawaited(windows.newWindow()),
+        WindowCommandIds.switchWindow: () => windows.switchWindow(window),
+        WindowCommandIds.showChat: () {
+          if (windows.multi || window.isAgent) return windows.showChat();
+          windows.focus(window);
+          _workspace.layout = WorkspaceLayout.chat;
+        },
       },
     };
   }
@@ -1399,14 +1411,59 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     _closeDrawer();
     setState(() {
       _showingBot = true;
-      _customizing = _stashing = _showingComputer = false;
+      _customizing = _stashing = false;
     });
   }
 
-  bool _showingComputer = false;
+  static const _desktopWorkspaceKey = 'workbench.desktopWorkspace';
+  bool _remoteWorkspace = false;
+  bool _workspaceChosen = false;
+  bool get _canSwitchWorkspace =>
+      (widget.window?.isChat ?? true) && WindowControls.isDesktop;
   DesktopHostConnection? _desktopConnection;
   DesktopHostChats? _desktopChats;
   String? _lastHostKey;
+
+  void _restoreDesktopWorkspace() {
+    final storage = widget.settings?.files?.storage;
+    if (!_canSwitchWorkspace || storage == null || !storage.loaded) return;
+    switch (storage.get<String>(_desktopWorkspaceKey)) {
+      case 'remote':
+        _remoteWorkspace = true;
+        unawaited(_loadComputer());
+      case null when storage.error == null:
+        // Old versions kept only the protected pairing. Let the connection
+        // validate it; a present but unreadable/invalid record is not a choice.
+        unawaited(_migrateDesktopWorkspace());
+    }
+  }
+
+  Future<void> _migrateDesktopWorkspace() async {
+    await _loadComputer();
+    if (mounted && !_workspaceChosen && _desktopConnection?.hostName != null) {
+      _openComputer();
+    }
+  }
+
+  Future<void> _loadComputer() async {
+    if (_desktopConnection != null) return;
+    _desktopChats = DesktopHostChats();
+    _desktopConnection =
+        (widget.createDesktopHostConnection?.call() ?? DesktopHostConnection())
+          ..addListener(_remoteChanged);
+    await _desktopConnection!.load();
+  }
+
+  Future<void> _keepDesktopWorkspace() async {
+    try {
+      await widget.settings?.files?.storage.set(
+        _desktopWorkspaceKey,
+        _remoteWorkspace ? 'remote' : 'local',
+      );
+    } on Exception {
+      appEvent('window', 'Could not save desktop workspace selection');
+    }
+  }
 
   void _remoteChanged() {
     if (!mounted) return;
@@ -1423,18 +1480,25 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   }
 
   void _openComputer() {
-    _closeDrawer();
-    if (_showingComputer) {
-      _closeCustomize();
-      return;
-    }
-    _closeCustomize();
-    if (_desktopConnection == null) {
-      _desktopChats = DesktopHostChats();
-      _desktopConnection = DesktopHostConnection()..addListener(_remoteChanged);
-      unawaited(_desktopConnection!.load());
-    }
-    setState(() => _showingComputer = true);
+    if (!_canSwitchWorkspace || _remoteWorkspace) return;
+    _leaveChord();
+    setState(() {
+      _workspaceChosen = true;
+      _remoteWorkspace = true;
+      _drawerOpen = _drawerClosing = false;
+    });
+    _syncWorkspaceFileDrops();
+    unawaited(_loadComputer());
+    unawaited(_keepDesktopWorkspace());
+  }
+
+  void _openLocalWorkspace() {
+    setState(() {
+      _workspaceChosen = true;
+      _remoteWorkspace = false;
+    });
+    _syncWorkspaceFileDrops();
+    unawaited(_keepDesktopWorkspace());
   }
 
   CustomizationKind _customizeKind = CustomizationKind.skills;
@@ -1449,7 +1513,6 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     setState(() {
       _customizing = true;
       _showingBot = false;
-      _showingComputer = false;
       _stashing = false;
       if (kind != null) _customizeKind = kind;
     });
@@ -1458,9 +1521,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   /// The conversations show again, in place of Customize or the stashes.
   void _closeCustomize() {
     if (_replacingChat) {
-      setState(
-        () => _customizing = _stashing = _showingBot = _showingComputer = false,
-      );
+      setState(() => _customizing = _stashing = _showingBot = false);
     }
   }
 
@@ -1475,8 +1536,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   final GlobalKey<StashViewState> _stashKey = GlobalKey();
 
   /// Something shows in place of the conversations.
-  bool get _replacingChat =>
-      _customizing || _stashing || _showingBot || _showingComputer;
+  bool get _replacingChat => _customizing || _stashing || _showingBot;
 
   /// Shows the stashes, [id]'s if given.
   void _showStash([int? id]) {
@@ -1486,7 +1546,6 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     setState(() {
       _stashing = true;
       _showingBot = false;
-      _showingComputer = false;
       _customizing = false;
       _stashShown = id;
     });
@@ -2001,6 +2060,26 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   /// where the focus is in none (the sidebar). The IDE resolves its own
   /// keys.
   bool _handleKey(KeyEvent event) {
+    if (_remoteWorkspace) {
+      if (event is KeyUpEvent ||
+          !mounted ||
+          !_hasKeyboard ||
+          !(ModalRoute.isCurrentOf(context) ?? true) ||
+          ChatKeys.isComposing) {
+        return false;
+      }
+      final commands = _windowCommands(controlsOnly: true);
+      final result = _keybindings.resolveEvent(
+        event,
+        context: (_) => null,
+        canRun: (entry) => commands.containsKey(entry.command),
+      );
+      if (result case KeybindingFound(:final command)) {
+        commands[command]!();
+        return true;
+      }
+      return false;
+    }
     if (event is KeyDownEvent) _noteTyping();
     if (event is KeyUpEvent ||
         _showsIde ||
@@ -2137,6 +2216,10 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   /// is its own, a project there). The window's own: New Window, Close
   /// Window.
   void _runMenuCommand(String command) {
+    if (_remoteWorkspace) {
+      _windowCommands(controlsOnly: true)[command]?.call();
+      return;
+    }
     if (command == openSettingsCommandId) {
       unawaited(openSettings());
       return;
@@ -2594,7 +2677,12 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   /// The macOS File menu's titles, in the language they were last set in.
   String? _fileMenuLocale;
+  bool? _fileMenuRemote;
   void _syncFileMenu(AppLocalizations l10n) {
+    if (_fileMenuRemote != _remoteWorkspace) {
+      _fileMenuRemote = _remoteWorkspace;
+      unawaited(WindowControls.setRemoteWorkspace(_remoteWorkspace));
+    }
     if (_fileMenuLocale == l10n.localeName) return;
     _fileMenuLocale = l10n.localeName;
     unawaited(
@@ -2928,6 +3016,41 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   @override
   Widget build(BuildContext context) {
     if (_main) _syncFileMenu(context.l10n);
+    if (_remoteWorkspace) {
+      return Material(
+        color: AppColors.windowCanvas,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (WindowControls.drawsHeader)
+              WindowHeader(
+                workspace: _workspace,
+                windowOnly: true,
+                sidebarShown: false,
+                onToggleSidebar: null,
+                pinned: false,
+                onTogglePin: (_) {},
+                onOpenFolder: () async {},
+                onToggleContextPanel: () {},
+              )
+            else if (WindowControls.handlesTitleDoubleClick)
+              const TitleBarDoubleClick(
+                child: SizedBox(height: AppMetrics.titleBarHeight),
+              ),
+            Expanded(
+              child: DesktopHostPage(
+                connection: _desktopConnection!,
+                chats: _desktopChats!,
+                onBack: _openLocalWorkspace,
+                lastChatStore: SavedDesktopHostChat.forStorage(
+                  widget.settings?.files?.storage,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         _windowWidth = constraints.maxWidth;
@@ -3401,9 +3524,8 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
               _workspace.newWindowAgent((project ?? agent.project).path),
             ),
       link: _sidebarLink,
-      onConnectComputer: _main && !kIsWeb ? _openComputer : null,
-      showingComputer: _showingComputer,
-      connectedComputerName: _desktopConnection?.hostName,
+      onSwitchToRemote: _canSwitchWorkspace ? _openComputer : null,
+      remoteWorkspaceName: _desktopConnection?.hostName,
       onCollapse: _toggle,
       onOpened: () {
         _closeCustomize();
@@ -4802,15 +4924,6 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
               _openAgent(thread);
             }
           },
-        ),
-      );
-    }
-    if (_showingComputer) {
-      return _footless(
-        DesktopHostPage(
-          connection: _desktopConnection!,
-          chats: _desktopChats!,
-          onBack: _closeCustomize,
         ),
       );
     }
