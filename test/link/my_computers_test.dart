@@ -18,6 +18,31 @@ import 'desktop_mutual_pairing_test.dart' show Machine, machines;
 void main() {
   final desktop = TargetPlatformVariant.only(TargetPlatform.macOS);
 
+  testWidgets(
+    'device details stay out of the workspace picker until requested',
+    (tester) async {
+      final (a, b) = await machines();
+      await a.host.createComputerGroup();
+      await admit(a, b);
+      await pumpWorkbench(tester, b);
+      await tap(tester, 'My computers');
+      expect(find.text(a.host.fingerprint), findsNothing);
+      expect(find.text('Remove ${a.name}'), findsNothing);
+      expect(find.text('Open workspace').hitTestable(), findsOneWidget);
+      await tester.tap(find.byKey(ValueKey(('computer-menu', a.host.id))));
+      await tester.pumpAndSettle();
+      await tap(tester, 'Device details');
+      expect(find.text(a.host.fingerprint), findsOneWidget);
+      await tap(tester, 'Close');
+      expect(find.text('Open workspace').hitTestable(), findsOneWidget);
+      expect(b.host.computerGroup!.active.containsKey(a.host.id), isTrue);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await a.host.pauseGroupConnections();
+      await b.host.pauseGroupConnections();
+    },
+    variant: desktop,
+  );
+
   testWidgets('the environment switcher offers one first-run setup', (
     tester,
   ) async {
@@ -33,7 +58,8 @@ void main() {
     expect(a.host.computerGroup, isNull);
     await tap(tester, 'Create and trust group');
     expect(a.host.computerGroup?.active.keys, [a.host.id]);
-    expect(find.text('${a.name} (this computer)'), findsOneWidget);
+    expect(find.text(a.name), findsOneWidget);
+    expect(find.text('This computer'), findsOneWidget);
     expect(find.text('Invite computer'), findsOneWidget);
     expect(find.text('Use invite'), findsNothing);
     expect(find.text('Create group'), findsNothing);

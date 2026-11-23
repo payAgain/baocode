@@ -239,6 +239,8 @@ void main() {
     expect(peer.remote, b.host.id);
     expect(await peer.call(LinkMethods.state), isA<Map>());
     await settings();
+    await tester.tap(find.byKey(ValueKey(('computer-menu', a.host.id))));
+    await tester.pumpAndSettle();
     await tap('Remove ${a.name}');
     expect(peer.isClosed, isFalse);
     await tap('Remove from group');

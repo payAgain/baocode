@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../l10n/l10n.dart';
+import '../theme/app_theme.dart';
 import 'computer_group.dart';
 import 'desktop_host_connection.dart';
 import 'link_host.dart';
@@ -219,8 +220,7 @@ class _GroupDialogState extends State<_GroupDialog> {
               child: Text(text.decline),
             ),
           ] else ...[
-            for (final member in group.active.values)
-              _member(text, group, member),
+            _roster(text, group),
             if (!share) ...[
               Text(text.paused),
               FilledButton(
@@ -229,17 +229,8 @@ class _GroupDialogState extends State<_GroupDialog> {
                     : () => _run(_host.enableGroupConnections),
                 child: Text(text.enable),
               ),
-            ] else ...[
-              if (group.canAdmit && !_showInviteOptions)
-                OutlinedButton.icon(
-                  icon: const Icon(Icons.add),
-                  onPressed: _busy
-                      ? null
-                      : () => setState(() => _showInviteOptions = true),
-                  label: Text(text.createInvite),
-                ),
-              if (_showInviteOptions) ..._inviteWidgets(text),
-            ],
+            ] else if (_showInviteOptions)
+              ..._inviteWidgets(text),
             for (final id in group.removed)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 6),
@@ -257,65 +248,152 @@ class _GroupDialogState extends State<_GroupDialog> {
                   ],
                 ),
               ),
-            if (share) ...[
-              TextButton(
-                onPressed: () => showDialog<void>(
-                  context: context,
-                  builder: (context) => AlertDialog(
-                    title: Text(text.access),
-                    content: Text(text.scope),
-                    scrollable: true,
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context),
-                        child: Text(context.l10n.commonClose),
-                      ),
-                    ],
-                  ),
-                ),
-                child: Text(text.access),
-              ),
-              if (group.removed.isNotEmpty)
-                TextButton(
-                  onPressed: _busy ? null : () => _run(_host.syncComputerGroup),
-                  child: Text(text.sync),
-                ),
-              TextButton(
-                onPressed: _busy
-                    ? null
-                    : () => _run(_host.pauseGroupConnections),
-                child: Text(text.pause),
-              ),
-            ],
           ],
           if (_failed || (_host.groupJoinFailed && group == null))
             Semantics(liveRegion: true, child: Text(text.failed)),
         ];
-        return AlertDialog(
-          title: Text(context.l10n.myComputers),
-          scrollable: true,
-          content: SizedBox(
-            width: 470,
+        final roster =
+            !_host.computerGroupStorageError &&
+            group != null &&
+            group.active.containsKey(_host.id) &&
+            waiting == null &&
+            preview == null &&
+            removing == null &&
+            request == null;
+        final invite = roster && share && group.canAdmit && !_showInviteOptions;
+        return Dialog(
+          backgroundColor: AppColors.surface,
+          insetPadding: const EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: 20,
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: BorderSide(color: AppColors.partBorder),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: SizedBox(
+            width: 520,
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                for (final child in children)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: child,
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 16, 16, 12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          context.l10n.myComputers,
+                          style: TextStyle(
+                            fontSize: 19,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.textPrimary,
+                          ),
+                        ),
+                      ),
+                      if (invite)
+                        TextButton.icon(
+                          icon: const Icon(Icons.add, size: 17),
+                          label: Text(text.createInvite),
+                          onPressed: _busy
+                              ? null
+                              : () => setState(() => _showInviteOptions = true),
+                        ),
+                    ],
                   ),
+                ),
+                Flexible(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        for (final child in children)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            child: child,
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+                Divider(height: 1, color: AppColors.partBorder),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  child: Row(
+                    children: [
+                      if (roster && share)
+                        PopupMenuButton<String>(
+                          tooltip: text.settings,
+                          onSelected: (value) {
+                            if (value == 'access') {
+                              _info(text.access, Text(text.scope));
+                            } else if (value == 'sync') {
+                              unawaited(_run(_host.syncComputerGroup));
+                            } else if (value == 'pause') {
+                              unawaited(_run(_host.pauseGroupConnections));
+                            }
+                          },
+                          itemBuilder: (_) => [
+                            PopupMenuItem(
+                              value: 'access',
+                              child: Text(text.access),
+                            ),
+                            if (group.removed.isNotEmpty)
+                              PopupMenuItem(
+                                value: 'sync',
+                                enabled: !_busy,
+                                child: Text(text.sync),
+                              ),
+                            PopupMenuItem(
+                              value: 'pause',
+                              enabled: !_busy,
+                              child: Text(text.pause),
+                            ),
+                          ],
+                          child: Padding(
+                            padding: const EdgeInsets.all(8),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.tune,
+                                  size: 16,
+                                  color: AppColors.textMuted,
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  text.settings,
+                                  style: TextStyle(color: AppColors.textMuted),
+                                ),
+                                Icon(
+                                  Icons.arrow_drop_down,
+                                  size: 16,
+                                  color: AppColors.textMuted,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      const Spacer(),
+                      TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: Text(
+                          waiting == null
+                              ? context.l10n.commonClose
+                              : text.keepWaiting,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: Text(
-                waiting == null ? context.l10n.commonClose : text.keepWaiting,
-              ),
-            ),
-          ],
         );
       },
     );
@@ -480,6 +558,65 @@ class _GroupDialogState extends State<_GroupDialog> {
     ],
   ];
 
+  void _info(String title, Widget content) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: content,
+        scrollable: true,
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(context.l10n.commonClose),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _roster(_Text text, ComputerGroup group) {
+    final members = [
+      group.active[_host.id]!,
+      ...group.active.values.where((m) => m.id != _host.id),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          text.members(members.length),
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            color: AppColors.textMuted,
+          ),
+        ),
+        const SizedBox(height: 8),
+        DecoratedBox(
+          decoration: BoxDecoration(
+            color: AppColors.code,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: AppColors.partBorder),
+          ),
+          child: Column(
+            children: [
+              for (final member in members) ...[
+                if (member != members.first)
+                  Divider(
+                    indent: 12,
+                    endIndent: 12,
+                    height: 1,
+                    color: AppColors.partBorder,
+                  ),
+                _member(text, group, member),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _member(_Text text, ComputerGroup group, ComputerGroupMember member) {
     final here = member.id == _host.id;
     final canUse = !_busy && _host.permitsGroupWorkspace(member.id);
@@ -498,42 +635,119 @@ class _GroupDialogState extends State<_GroupDialog> {
         text.unreachable,
       _ => text.statusUnknown,
     };
-    return Card.outlined(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              here ? text.thisComputer(member.name) : member.name,
-              style: Theme.of(context).textTheme.titleSmall,
+    final menu = PopupMenuButton<String>(
+      key: ValueKey(('computer-menu', member.id)),
+      tooltip: text.options(member.name),
+      icon: Icon(Icons.more_horiz, color: AppColors.textMuted, size: 18),
+      onSelected: (value) {
+        if (value == 'details') {
+          _info(
+            member.name,
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(text.fingerprint),
+                const SizedBox(height: 8),
+                SelectableText(_fingerprint(member.id)),
+              ],
             ),
-            Text(_fingerprint(member.id)),
-            if (!here) ...[
-              Text(status),
-              Wrap(
-                spacing: 8,
+          );
+        } else if (canUse && !here) {
+          setState(() => _removing = (group.id, member.id));
+        }
+      },
+      itemBuilder: (_) => [
+        PopupMenuItem(value: 'details', child: Text(text.details)),
+        if (!here)
+          PopupMenuItem(
+            value: 'remove',
+            enabled: canUse,
+            child: Text(
+              text.remove(member.name),
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ),
+      ],
+    );
+    final action = here || connection == null
+        ? null
+        : FilledButton(
+            key: ValueKey(('open-computer', member.id)),
+            style: FilledButton.styleFrom(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(6),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+            ),
+            onPressed: canUse && !connection.busy
+                ? () => Navigator.pop(context, member.id)
+                : null,
+            child: Text(text.open),
+          );
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final stacked =
+              constraints.maxWidth < 340 ||
+              MediaQuery.textScalerOf(context).scale(14) > 19;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
                 children: [
-                  if (connection != null)
-                    FilledButton(
-                      key: ValueKey(('open-computer', member.id)),
-                      onPressed: canUse && !connection.busy
-                          ? () => Navigator.pop(context, member.id)
-                          : null,
-                      child: Text(text.open),
-                    ),
-                  TextButton(
-                    onPressed: canUse
-                        ? () =>
-                              setState(() => _removing = (group.id, member.id))
-                        : null,
-                    child: Text(text.remove(member.name)),
+                  Icon(
+                    here
+                        ? Icons.desktop_windows_outlined
+                        : Icons.devices_outlined,
+                    size: 23,
+                    color: AppColors.textMuted,
                   ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Tooltip(
+                          message: member.name,
+                          child: Text(
+                            member.name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: AppColors.textPrimary,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          here ? text.local : status,
+                          style: TextStyle(
+                            color: AppColors.textMuted,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (action != null && !stacked) ...[
+                    const SizedBox(width: 8),
+                    action,
+                  ],
+                  menu,
                 ],
               ),
+              if (action != null && stacked)
+                Padding(
+                  padding: const EdgeInsets.only(left: 35, top: 6),
+                  child: action,
+                ),
             ],
-          ],
-        ),
+          );
+        },
       ),
     );
   }
@@ -612,8 +826,12 @@ class _Text {
   String get open => zh ? '打开工作区' : 'Open workspace';
   String remove(String name) => zh ? '移除 $name' : 'Remove $name';
   String removed(String name) => zh ? '已移除 $name' : 'Removed $name';
-  String thisComputer(String name) =>
-      zh ? '$name（本机）' : '$name (this computer)';
+  String get local => zh ? '本机' : 'This computer';
+  String get settings => zh ? '连接设置' : 'Connection settings';
+  String get details => zh ? '设备详情' : 'Device details';
+  String get fingerprint => zh ? '设备指纹' : 'Device fingerprint';
+  String members(int n) => zh ? '受信任的电脑 · $n' : 'Trusted computers · $n';
+  String options(String name) => zh ? '$name 的更多操作' : 'More actions for $name';
   String joinVia(String name) =>
       zh ? '通过 $name 加入组' : 'Join the group through $name';
   String waiting(String name) =>
