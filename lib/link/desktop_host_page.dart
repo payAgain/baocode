@@ -1240,7 +1240,6 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                   _Notice(connectionError, isError: true),
                 if (_chatBusy) _Progress(text.working),
                 if (error != null) _Notice(error, isError: true),
-                const Divider(height: 1),
                 Expanded(
                   child: chat.kind == 'project' && _chats.projectHistory != null
                       ? DesktopRemoteMessageImages(
@@ -1329,7 +1328,6 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                           },
                         ),
                 ),
-                const Divider(height: 1),
                 if (groupReply != null)
                   _GroupQuoteBanner(
                     label: text.replyingTo(groupReply),

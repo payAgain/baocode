@@ -259,6 +259,19 @@ void main() {
       await tester.tap(find.text('Paired session'));
       await tester.pumpAndSettle();
       expect(find.text('Review host request').hitTestable(), findsOneWidget);
+      final conversation = find.byKey(const ValueKey('host-content'));
+      final cardWidth = tester.getSize(conversation).width;
+      final rules = find.descendant(
+        of: conversation,
+        matching: find.byType(Divider),
+      );
+      expect(
+        rules.evaluate().where(
+          (element) => element.size!.width >= cardWidth * .9,
+        ),
+        isEmpty,
+        reason: 'The title and composer join the transcript without full-width rules.',
+      );
       await tester.tap(find.byTooltip('Host activity'));
       await tester.pumpAndSettle();
       expect(find.text('Fixture task'), findsOneWidget);
