@@ -1,3 +1,4 @@
+import 'package:bao_editor/textmate/textmate_syntax.dart' show TextMateSyntax;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:markdown/markdown.dart' as md;
@@ -7,7 +8,8 @@ import '../../ide/ide_hover.dart';
 import '../../theme/app_theme.dart';
 import '../../theme/codicons.dart';
 import '../../theme/material_file_icons.dart';
-import '../../theme/workbench_theme.dart' show WorkbenchThemeScope, themeColors;
+import '../../theme/workbench_theme.dart'
+    show WorkbenchThemeScope, WorkbenchThemeService, themeColors;
 import '../../workspace/editor_launcher.dart';
 import '../side_panel/file_link.dart';
 import '../side_panel/file_link_menu.dart';
@@ -38,8 +40,12 @@ class MarkdownView extends StatefulWidget {
   /// [baseStyle] when null.
   final TextStyle? style;
 
-  /// Render peer-provided markdown without file, link, or media integrations.
+  /// Render peer-provided markdown without file or media integrations.
   final bool textOnly;
+
+  /// Replace the OS handoff in widget tests without bypassing link hit tests.
+  @visibleForTesting
+  static Future<bool> Function(String) openLink = openExternal;
 
   static TextStyle get baseStyle =>
       TextStyle(color: AppColors.text, fontSize: 13.5, height: 1.6);
@@ -273,8 +279,25 @@ class _MarkdownViewState extends State<MarkdownView> {
       mainAxisSize: MainAxisSize.min,
       children: children,
     );
-    // Code blocks otherwise pick up a local syntax worker from this scope.
-    return _textOnly ? CodeCitationScope(child: content) : content;
+    return _textOnly
+        ? CodeCitationScope.peerMarkdown(
+            colorizeBlock: _colorPeerCode,
+            child: content,
+          )
+        : content;
+  }
+
+  static final _peerSyntax = Expando<TextMateSyntax>();
+
+  // Highlight code by language using the bundled grammars.
+  static Future<List<List<TextSpan>>?> _colorPeerCode(
+    String language,
+    String code,
+  ) {
+    final themes = WorkbenchThemeService.instance;
+    return (_peerSyntax[themes] ??= TextMateSyntax(
+      themes: themes,
+    )).colorize(language, code);
   }
 
   /// Segments parsed lately, by their text, the latest last: a message
@@ -634,7 +657,7 @@ class MarkdownOptions {
   final double gap;
   final double headingGap;
 
-  /// Render links, images, and path-backed blocks as inert content.
+  /// Render non-web links, images, and path-backed blocks as inert content.
   final bool textOnly;
 
   /// What a tap on a link to `href` does; web and mail links open in the
@@ -1156,24 +1179,28 @@ InlineSpan _inline(md.Node node, MarkdownOptions options) {
         style: MarkdownView.codeStyle,
       ),
     },
-    'a' when options.textOnly => TextSpan(
-      children: [
-        ...inner(),
-        if (_unescape(node.attributes['href'] ?? '') case final href
-            when href.isNotEmpty && href != _unescape(node.textContent))
-          TextSpan(
-            text: ' ($href)',
-            style: TextStyle(color: AppColors.textMuted),
-          ),
-      ],
-    ),
-    'a' => switch ((options.link ?? _linkRecognizer)(node.attributes['href'])) {
+    'a' => switch ((options.textOnly
+        ? _peerLinkRecognizer
+        : options.link ?? _linkRecognizer)(node.attributes['href'])) {
       final recognizer? => TextSpan(
         style: TextStyle(color: AppColors.accent),
         children: [
-          if (options.linkIcon?.call(node.attributes['href']) case final icon?)
-            _linkIcon(icon, recognizer, const EdgeInsets.only(right: 3)),
+          if (!options.textOnly)
+            if (options.linkIcon?.call(node.attributes['href'])
+                case final icon?)
+              _linkIcon(icon, recognizer, const EdgeInsets.only(right: 3)),
           for (final span in inner()) _linked(span, recognizer),
+        ],
+      ),
+      null when options.textOnly => TextSpan(
+        children: [
+          ...inner(),
+          if (_unescape(node.attributes['href'] ?? '') case final href
+              when href.isNotEmpty && href != _unescape(node.textContent))
+            TextSpan(
+              text: ' ($href)',
+              style: TextStyle(color: AppColors.textMuted),
+            ),
         ],
       ),
       null => TextSpan(
@@ -1219,8 +1246,40 @@ GestureRecognizer? _linkRecognizer(String? href) {
   if (uri == null || !const {'http', 'https', 'mailto'}.contains(uri.scheme)) {
     return null;
   }
-  return TapGestureRecognizer()..onTap = () => openExternal(uri.toString());
+  return _openLink(uri);
 }
+
+// Accept public-looking DNS names without resolving anything. Keep IP
+// literals (including alternate IPv4 forms) and local names inert.
+final _webHost = RegExp(
+  r'^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?\.?$',
+);
+
+GestureRecognizer? _peerLinkRecognizer(String? href) {
+  final uri = href == null ? null : Uri.tryParse(href.trim());
+  if (uri == null ||
+      !const {'http', 'https'}.contains(uri.scheme) ||
+      uri.authority.contains('@')) {
+    return null;
+  }
+  final host = uri.host;
+  if (!_webHost.hasMatch(host) ||
+      const {
+        'localhost',
+        'local',
+        'localdomain',
+        'internal',
+        'lan',
+        'home',
+        'arpa',
+      }.contains(host.split('.').lastWhere((label) => label.isNotEmpty))) {
+    return null;
+  }
+  return _openLink(uri);
+}
+
+TapGestureRecognizer _openLink(Uri uri) =>
+    TapGestureRecognizer()..onTap = () => MarkdownView.openLink(uri.toString());
 
 /// Whether [text] is HTML comments alone (`<!-- note -->`), which do not
 /// show.

@@ -153,7 +153,20 @@ class CodeCitationScope extends InheritedWidget {
     this.colorizeBlock,
     this.syntax,
     required super.child,
-  });
+  }) : _peerMarkdown = false;
+
+  /// A peer fence can color its code by language, without resolving a path.
+  const CodeCitationScope.peerMarkdown({
+    super.key,
+    required this.colorizeBlock,
+    required super.child,
+  }) : root = null,
+       onOpen = null,
+       colorize = null,
+       syntax = null,
+       _peerMarkdown = true;
+
+  final bool _peerMarkdown;
 
   /// Where the agent works, which relative paths are in. Files outside it
   /// do not open.
@@ -172,13 +185,17 @@ class CodeCitationScope extends InheritedWidget {
   /// asked for: an edit's diff (an editor's) colored by it too.
   final TextMateSyntax Function()? syntax;
 
-  static CodeCitationScope? maybeOf(BuildContext context) =>
-      HostTranscriptScope.of(context)
-      ? null
-      : context.dependOnInheritedWidgetOfExactType<CodeCitationScope>();
+  static CodeCitationScope? maybeOf(BuildContext context) {
+    final scope = context
+        .dependOnInheritedWidgetOfExactType<CodeCitationScope>();
+    return HostTranscriptScope.of(context) && scope?._peerMarkdown != true
+        ? null
+        : scope;
+  }
 
   @override
   bool updateShouldNotify(CodeCitationScope oldWidget) =>
+      _peerMarkdown != oldWidget._peerMarkdown ||
       root != oldWidget.root ||
       onOpen != oldWidget.onOpen ||
       colorize != oldWidget.colorize ||

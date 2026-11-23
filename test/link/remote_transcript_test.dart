@@ -4,6 +4,7 @@ import 'package:bao_link/bao_link.dart';
 import 'package:baocode/chat/chat_history_view.dart';
 import 'package:baocode/chat/side_panel/file_open.dart';
 import 'package:baocode/chat/widgets/code_citation.dart';
+import 'package:baocode/chat/widgets/inline_code.dart';
 import 'package:baocode/chat/widgets/markdown_view.dart';
 import 'package:baocode/chat/widgets/mermaid_code_block.dart';
 import 'package:baocode/chat/widgets/turn_footer.dart';
@@ -11,6 +12,7 @@ import 'package:baocode/chat/widgets/user_message_bubble.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_host_connection.dart';
 import 'package:baocode/link/desktop_host_page.dart';
+import 'package:baocode/theme/app_theme.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -43,7 +45,7 @@ void main() {
     const reply =
         '## Results\n\n'
         '**Passed** with `dart test`.\n\n'
-        '```text\nAll checks passed\n```';
+        '```dart\nfinal result = 42;\n```';
     await _withHost(
       tester,
       [
@@ -63,6 +65,35 @@ void main() {
         expect(find.byType(MarkdownView), findsOneWidget);
         expect(find.text('Results', findRichText: true), findsOneWidget);
         expect(find.byType(MarkdownCodeBlock), findsOneWidget);
+        expect(
+          _spans(tester).any(
+            (span) =>
+                span.style?.fontWeight == FontWeight.w600 &&
+                span.toPlainText() == 'Passed',
+          ),
+          isTrue,
+        );
+        expect(
+          _spans(tester).whereType<InlineCodeSpan>().single.text?.trim(),
+          'dart test',
+        );
+        Set<Color?> codeColors() =>
+            _spans(tester)
+                .where((span) => span.text == 'final' || span.text == '42')
+                .map((span) => span.style?.color)
+                .toSet();
+        // The bundled grammar is read asynchronously; pumpAndSettle can
+        // finish before the platform asset reply schedules another frame.
+        final deadline = Stopwatch()..start();
+        while (codeColors().length < 2 &&
+            deadline.elapsed < const Duration(seconds: 5)) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 20)),
+          );
+          await tester.pump();
+        }
+        expect(codeColors(), hasLength(2));
+        expect(codeColors(), isNot(contains(null)));
         expect(find.text(reply, findRichText: true), findsNothing);
         expect(find.text('Legacy suggestion'), findsNothing);
         final footer = tester.widget<TurnFooter>(find.byType(TurnFooter));
@@ -74,10 +105,83 @@ void main() {
     );
   });
 
-  testWidgets('peer links and media render as inert text inside local scopes', (
-    tester,
-  ) async {
+  for (final kind in ['project', 'bot', 'group']) {
+    testWidgets('$kind styles and opens web links only on click', (
+      tester,
+    ) async {
+      final destination =
+          '${kind == 'bot' ? 'http' : 'https'}://example.invalid'
+          '/docs?q=remote%20markdown&mode=full#intro';
+      final reply = kind == 'group'
+          ? '[documentation]\n\n[documentation]: $destination'
+          : '[documentation]($destination)';
+      final opened = _mockLinkOpener();
+      await _withHost(
+        tester,
+        [
+          if (kind == 'bot') {'t': 'user', 'text': 'Where are the docs?'},
+          {
+            't': 'text',
+            'text': kind == 'bot'
+                ? '<bot_say>[softly] $reply</bot_say>'
+                : reply,
+          },
+        ],
+        () async {
+          final label = find.text('documentation', findRichText: true);
+          expect(label, findsOneWidget);
+          expect(
+            find.textContaining('[softly]', findRichText: true),
+            findsNothing,
+          );
+          expect(
+            find.textContaining(destination, findRichText: true),
+            findsNothing,
+          );
+          final span = _spans(tester).singleWhere(
+            (span) =>
+                span.style?.color == AppColors.accent &&
+                span.toPlainText() == 'documentation',
+          );
+          expect(
+            (span.children?.single as TextSpan).recognizer,
+            isA<TapGestureRecognizer>(),
+          );
+          expect(opened, isEmpty);
+          await _clickText(tester, 'documentation');
+          expect(opened, [destination]);
+        },
+        kind: kind,
+        catalog: kind == 'project'
+            ? null
+            : LinkState(
+                device: _catalog.device,
+                bots: const [
+                  LinkBot(id: 'helper', name: 'Helper', session: _session),
+                ],
+                groups: const [LinkGroup(id: 'room', name: 'Team room')],
+              ),
+        onRequest: (method, _) => switch (method) {
+          LinkMethods.openGroup => {
+            'messages': [
+              {
+                'seq': 1,
+                'from': 'helper',
+                'text': '<bot_say>[softly] $reply</bot_say>',
+              },
+            ],
+            'more': false,
+          },
+          LinkMethods.closeGroup => null,
+          _ => throw StateError('Unexpected host request: $method'),
+        },
+      );
+    });
+  }
+
+  testWidgets('peer files, unsafe links and media stay inert', (tester) async {
     final accessed = <String>[];
+    final opened = _mockLinkOpener();
     final existence = FileExistence((path) async {
       accessed.add('exists: $path');
       return true;
@@ -99,6 +203,10 @@ void main() {
 [Local document](lib/client.dart) [File URI](file:///client/fixture/local.png)
 
 [Website](https://example.invalid) [Email](mailto:peer@example.invalid) <https://example.invalid/auto>
+
+[Script](javascript:alert%281%29) [Protocol relative](//example.invalid)
+[Loopback](http://127.0.0.1:8080) [Private host](https://peer.local.)
+[Private IP](http://192.168.1.1) [IPv6](http://[::1]) [Credentials](https://user@example.invalid)
 
 `lib/client.dart` [Image link](local.png)
 
@@ -127,23 +235,44 @@ graph TD; a-->b;
           );
           expect(rendered, contains('[Attachment]'));
           expect(rendered, contains('Local document (lib/client.dart)'));
-          expect(rendered, contains('Website (https://example.invalid)'));
-          expect(rendered, contains('Email'));
+          expect(
+            rendered,
+            isNot(contains('Website (https://example.invalid)')),
+          );
+          expect(rendered, contains('Email (mailto:peer@example.invalid)'));
+          expect(rendered, contains('Script (javascript:alert%281%29)'));
+          expect(rendered, contains('Protocol relative (//example.invalid)'));
+          expect(rendered, contains('Loopback (http://127.0.0.1:8080)'));
+          expect(rendered, contains('Private host (https://peer.local.)'));
+          expect(rendered, contains('Private IP (http://192.168.1.1)'));
+          expect(rendered, contains('IPv6 (http://%5B::1%5D)'));
+          expect(
+            rendered,
+            contains('Credentials (https://user@example.invalid)'),
+          );
           expect(rendered, contains('https://example.invalid/auto'));
           expect(rendered, contains('[Image: Local picture]'));
           expect(rendered, contains('[Image: Network picture]'));
           expect(rendered, contains('HTML picture'));
           expect(rendered, contains('[Host file: lib/client.dart, Ln 1]'));
-          for (final widget in richText) {
-            widget.text.visitChildren((span) {
-              if (span is TextSpan) expect(span.recognizer, isNull);
-              return true;
-            });
-          }
+          expect(
+            _spans(tester)
+                .where((span) => span.recognizer != null)
+                .map((span) => span.text),
+            [
+              'Website',
+              'https://example.invalid/auto',
+              '[Image: Network picture]',
+            ],
+          );
           expect(find.byType(Image), findsNothing);
           expect(find.byType(CodeCitationCard), findsNothing);
           expect(find.byType(MermaidCodeBlock), findsNothing);
           expect(accessed, isEmpty);
+          expect(opened, isEmpty);
+          await _clickText(tester, 'Loopback');
+          await _clickText(tester, 'Local document');
+          expect(opened, isEmpty);
 
           await tester.tap(find.byType(UserMessageBubble).hitTestable());
           await tester.pumpAndSettle();
@@ -201,10 +330,7 @@ graph TD; a-->b;
         {'t': 'text', 'text': '$label\n\n$label: https://example.invalid'},
       ],
       () async {
-        expect(
-          find.text('fixture-remote-reference (https://example.invalid)'),
-          findsOneWidget,
-        );
+        expect(find.text('fixture-remote-reference'), findsOneWidget);
       },
     );
     await tester.pumpWidget(
@@ -372,6 +498,51 @@ graph TD; a-->b;
   });
 }
 
+List<String> _mockLinkOpener() {
+  final original = MarkdownView.openLink;
+  final opened = <String>[];
+  MarkdownView.openLink = (url) async {
+    opened.add(url);
+    return true;
+  };
+  addTearDown(() => MarkdownView.openLink = original);
+  return opened;
+}
+
+Future<void> _clickText(WidgetTester tester, String text) async {
+  final paragraph = tester.renderObject<RenderParagraph>(
+    find.byWidgetPredicate(
+      (widget) =>
+          widget is RichText && widget.text.toPlainText().contains(text),
+    ),
+  );
+  final start = paragraph.text.toPlainText().indexOf(text);
+  final box = paragraph
+      .getBoxesForSelection(
+        TextSelection(baseOffset: start, extentOffset: start + text.length),
+      )
+      .first;
+  await tester.tapAt(
+    paragraph.localToGlobal(box.toRect().center),
+    kind: PointerDeviceKind.mouse,
+  );
+  await tester.pumpAndSettle();
+}
+
+Iterable<TextSpan> _spans(WidgetTester tester) sync* {
+  for (final widget in tester.widgetList<RichText>(find.byType(RichText))) {
+    Iterable<TextSpan> walk(InlineSpan span) sync* {
+      if (span is! TextSpan) return;
+      yield span;
+      for (final child in span.children ?? const <InlineSpan>[]) {
+        yield* walk(child);
+      }
+    }
+
+    yield* walk(widget.text);
+  }
+}
+
 Future<void> _withHost(
   WidgetTester tester,
   List<Object?> history,
@@ -379,6 +550,7 @@ Future<void> _withHost(
   Widget Function(Widget child)? wrap,
   LinkState? catalog,
   bool? earlier,
+  String? kind,
   LinkRequestHandler? onRequest,
 }) async {
   tester.view.physicalSize = const Size(800, 1100);
@@ -411,7 +583,11 @@ Future<void> _withHost(
   final connection = _Connection(client);
   try {
     await tester.pump();
-    await chats.open(chats.chats.singleWhere((chat) => chat.kind != 'bot'));
+    await chats.open(
+      chats.chats.singleWhere(
+        (chat) => kind == null ? chat.kind != 'bot' : chat.kind == kind,
+      ),
+    );
     final page = DesktopHostPage(
       connection: connection,
       chats: chats,
