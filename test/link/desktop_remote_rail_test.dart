@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:bao_link/bao_link.dart';
 import 'package:baocode/ide/file_service.dart';
@@ -8,6 +9,8 @@ import 'package:baocode/link/desktop_remote_rail.dart';
 import 'package:baocode/link/workspace_bridge.dart';
 import 'package:baocode/workspace/workspace.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
@@ -20,6 +23,135 @@ const _chat = DesktopHostChat(
 );
 
 void main() {
+  testWidgets(
+    'remote download asks for a destination before requesting bytes',
+    (tester) async {
+      final (client, host, calls) = await _pair(
+        (method, params) => switch (method) {
+          LinkMethods.folder => {
+            'folders': [],
+            'files': ['example.bin'],
+          },
+          LinkMethods.read => {'binary': true},
+          LinkMethods.download => {'data': 'AQID'},
+          _ => throw StateError(method),
+        },
+      );
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      const channel = MethodChannel('baocode/window');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      final folder = Directory.systemTemp.createTempSync('bao-rail-test-');
+      final target = File('${folder.path}/local.bin');
+      final dialogs = <MethodCall>[];
+      String? destination;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        dialogs.add(call);
+        return destination;
+      });
+      try {
+        await _mount(tester, client);
+        await _click(
+          tester,
+          find.byKey(const ValueKey('desktop-remote-files-toggle')),
+        );
+        await _click(tester, find.text('example.bin'));
+        expect(calls.map((call) => call.$1), [
+          LinkMethods.folder,
+          LinkMethods.read,
+        ]);
+        final download = find.byKey(const ValueKey('desktop-remote-download'));
+        await _click(tester, download);
+        expect(dialogs.single.method, 'pickSaveFile');
+        expect(dialogs.single.arguments, {'name': 'example.bin'});
+        expect(calls.map((call) => call.$1), [
+          LinkMethods.folder,
+          LinkMethods.read,
+        ]);
+        destination = target.path;
+        await tester.runAsync(() async {
+          await tester.tap(download);
+          for (
+            var i = 0;
+            i < 50 && !(target.existsSync() && target.lengthSync() == 3);
+            i++
+          ) {
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+            await tester.pump();
+          }
+        });
+        await tester.pumpAndSettle();
+        expect(calls.last.$1, LinkMethods.download);
+        expect(calls.last.$2, {'project': _project, 'path': 'example.bin'});
+        expect(target.readAsBytesSync(), [1, 2, 3]);
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        messenger.setMockMethodCallHandler(channel, null);
+        debugDefaultTargetPlatformOverride = null;
+        folder.deleteSync(recursive: true);
+        await client.close();
+        await host.close();
+      }
+    },
+  );
+
+  testWidgets('a download reply after a conversation switch writes nothing', (
+    tester,
+  ) async {
+    final reply = Completer<Object?>();
+    final (client, host, calls) = await _pair(
+      (method, _) => switch (method) {
+        LinkMethods.folder => {
+          'folders': [],
+          'files': ['example.bin'],
+        },
+        LinkMethods.read => {'binary': true},
+        LinkMethods.download => reply.future,
+        _ => throw StateError(method),
+      },
+    );
+    final directory = Directory.systemTemp.createTempSync('bao-rail-switch-');
+    final destination = File('${directory.path}/local.bin')
+      ..writeAsBytesSync([8]);
+    const channel = MethodChannel('baocode/window');
+    final messenger = tester.binding.defaultBinaryMessenger;
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    messenger.setMockMethodCallHandler(channel, (_) async => destination.path);
+    try {
+      await _mount(tester, client);
+      await _click(
+        tester,
+        find.byKey(const ValueKey('desktop-remote-files-toggle')),
+      );
+      await _click(tester, find.text('example.bin'));
+      await _click(
+        tester,
+        find.byKey(const ValueKey('desktop-remote-download')),
+      );
+      expect(calls.last.$1, LinkMethods.download);
+      await _mount(
+        tester,
+        client,
+        chat: const DesktopHostChat(
+          id: 'session-two',
+          title: 'Other project chat',
+          kind: 'project',
+          projectId: _project,
+        ),
+      );
+      reply.complete({'data': 'CQ=='});
+      await tester.pumpAndSettle();
+      expect(destination.readAsBytesSync(), [8]);
+      expect(find.text('File saved.'), findsNothing);
+    } finally {
+      await tester.pumpWidget(const SizedBox());
+      messenger.setMockMethodCallHandler(channel, null);
+      debugDefaultTargetPlatformOverride = null;
+      directory.deleteSync(recursive: true);
+      await client.close();
+      await host.close();
+    }
+  });
+
   testWidgets('remote explorer docks beside a live chat and previews host text', (
     tester,
   ) async {

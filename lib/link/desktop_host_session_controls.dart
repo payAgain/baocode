@@ -37,7 +37,9 @@ class DesktopHostSessionControls {
   Object? _stopRequest;
   bool _stopFailed = false;
   bool get stopFailed => _stopFailed;
-  bool get showStop => _live && !_stopUnsupported;
+  // A Bot session multiplexes private and group turns. The host stop RPC
+  // targets the session rather than a recipient or a specific turn.
+  bool get showStop => kind == 'project' && _live && !_stopUnsupported;
   bool get canStop => showStop && _stopRequest == null;
 
   void apply(Map<String, Object?> update) {

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
@@ -11,20 +12,25 @@ import '../sidebar/sidebar.dart' show SidebarIconButton;
 import '../theme/app_theme.dart' show AppColors;
 import '../theme/codicons.dart';
 import '../theme/material_file_icons.dart' show FileIcon, FolderIcon;
+import '../workspace/window_controls.dart';
 import 'desktop_host_chats.dart';
+import 'desktop_remote_media.dart';
+import 'desktop_remote_media_preview.dart';
 
-/// Docks a read-only host explorer alongside a bounded conversation pane.
+/// Docks a host explorer alongside a bounded conversation pane.
 class DesktopRemoteRail extends StatefulWidget {
   const DesktopRemoteRail({
     super.key,
     required this.peer,
     required this.chat,
     required this.child,
+    this.isCurrent,
   });
 
   final LinkPeer peer;
   final DesktopHostChat chat;
   final Widget child;
+  final bool Function()? isCurrent;
 
   @override
   State<DesktopRemoteRail> createState() => _DesktopRemoteRailState();
@@ -36,6 +42,8 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
   final _folders = <String, _Folder>{};
   _LegacyTree? _legacy;
   (String, Future<_FilePreview>)? _preview;
+  bool _downloading = false;
+  String? _downloadStatus;
   StreamSubscription<LinkEvent>? _connection;
 
   String? get _project => switch (widget.chat) {
@@ -43,6 +51,9 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
       id,
     _ => null,
   };
+
+  bool get _connected =>
+      !widget.peer.isClosed && (widget.isCurrent?.call() ?? true);
 
   @override
   void initState() {
@@ -92,6 +103,8 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
     _legacy = null;
     _expanded.clear();
     _preview = null;
+    _downloading = false;
+    _downloadStatus = null;
   }
 
   void _toggle() => setState(() {
@@ -111,12 +124,13 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
   void _load(String path) => unawaited(_fetchFolder(path));
 
   Future<void> _fetchFolder(String path) async {
+    if (!_connected) return;
     if (_folders[path] case final folder? when !folder.failed) return;
     final request = _folders[path] = _Folder();
     final peer = widget.peer;
     final project = _project!;
     bool current() =>
-        mounted && !peer.isClosed && identical(_folders[path], request);
+        mounted && _connected && identical(_folders[path], request);
     try {
       List<_Entry> entries;
       var legacy = _legacy;
@@ -155,15 +169,61 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
   });
 
   void _read(String path) => setState(() {
-    final result = _readFile(widget.peer, _project!, path);
+    if (!_connected) return;
+    final peer = widget.peer;
+    final project = _project!;
+    late final Future<_FilePreview> result;
+    result = remoteImageType(path) == null
+        ? _readFile(peer, project, path)
+        : previewRemoteFileImage(
+            peer,
+            project,
+            path,
+            isCurrent: () =>
+                mounted && _connected && identical(_preview?.$2, result),
+          ).then((bytes) => _FilePreview(image: bytes));
     // The host can fail before the next frame attaches the FutureBuilder.
     result.ignore();
     _preview = (path, result);
+    _downloading = false;
+    _downloadStatus = null;
   });
+
+  Future<void> _download() async {
+    final preview = _preview;
+    final project = _project;
+    final peer = widget.peer;
+    if (preview == null || project == null || _downloading || !_connected) {
+      return;
+    }
+    final l10n = context.l10n;
+    bool current() => mounted && _connected && identical(_preview, preview);
+    setState(() {
+      _downloading = true;
+      _downloadStatus = null;
+    });
+    try {
+      final saved = await downloadRemoteFile(
+        peer: peer,
+        project: project,
+        path: preview.$1,
+        isCurrent: current,
+      );
+      if (saved && current()) {
+        _downloadStatus = l10n.localeName.startsWith('zh')
+            ? '已保存文件。'
+            : 'File saved.';
+      }
+    } on Object catch (error) {
+      if (current()) _downloadStatus = remoteMediaError(l10n, error);
+    } finally {
+      if (current()) setState(() => _downloading = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final connectedProject = _project != null && !widget.peer.isClosed;
+    final connectedProject = _project != null && _connected;
     final l10n = context.l10n;
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -288,7 +348,14 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
                   key: ValueKey(preview),
                   path: preview.$1,
                   result: preview.$2,
-                  onClose: () => setState(() => _preview = null),
+                  downloading: _downloading,
+                  status: _downloadStatus,
+                  onDownload: WindowControls.canPickFiles ? _download : null,
+                  onClose: () => setState(() {
+                    _preview = null;
+                    _downloadStatus = null;
+                    _downloading = false;
+                  }),
                 ),
               ),
           ],
@@ -415,15 +482,6 @@ class _Folder {
 
 // The link names paths with POSIX separators on all hosts. Only use relative
 // names from the project listing, including on hosts accepting absolute reads.
-final _unsafeName = RegExp(r'[/\\:\x00-\x1f\x7f]');
-bool _isName(String name) {
-  final trimmed = name.trimRight();
-  return trimmed.isNotEmpty &&
-      trimmed != '.' &&
-      trimmed != '..' &&
-      !_unsafeName.hasMatch(name);
-}
-
 int _compareEntries(_Entry a, _Entry b) {
   if (a.directory != b.directory) return a.directory ? -1 : 1;
   final order = a.name.toLowerCase().compareTo(b.name.toLowerCase());
@@ -438,7 +496,7 @@ Future<_LegacyTree> _loadLegacyTree(LinkPeer peer, String project) async {
     final folders = <String, Map<String, _Entry>>{};
     for (final path in paths.whereType<String>().take(LinkLimits.files)) {
       final names = path.split('/');
-      if (!names.every(_isName)) continue;
+      if (!names.every(remoteFileName)) continue;
       var parent = '';
       for (final (index, name) in names.indexed) {
         final path = parent.isEmpty ? name : '$parent/$name';
@@ -478,7 +536,7 @@ Future<List<_Entry>> _loadFolder(
   }) {
     final entries = <String, _Entry>{};
     for (final (names, directory) in [(folders, true), (files, false)]) {
-      for (final name in names.whereType<String>().where(_isName)) {
+      for (final name in names.whereType<String>().where(remoteFileName)) {
         entries.putIfAbsent(
           name,
           () => _Entry(
@@ -497,12 +555,14 @@ Future<List<_Entry>> _loadFolder(
 class _FilePreview {
   const _FilePreview({
     this.text,
+    this.image,
     this.binary = false,
     this.tooLarge = false,
     this.size,
   });
 
   final String? text;
+  final Uint8List? image;
   final bool binary;
   final bool tooLarge;
   final int? size;
@@ -540,11 +600,17 @@ class _FilePreviewPane extends StatelessWidget {
     required this.path,
     required this.result,
     required this.onClose,
+    required this.downloading,
+    this.status,
+    this.onDownload,
   });
 
   final String path;
   final Future<_FilePreview> result;
   final VoidCallback onClose;
+  final bool downloading;
+  final String? status;
+  final VoidCallback? onDownload;
 
   @override
   Widget build(BuildContext context) {
@@ -566,7 +632,15 @@ class _FilePreviewPane extends StatelessWidget {
                 style: TextStyle(fontSize: 11, color: AppColors.textMuted),
               ),
             ),
-            const SizedBox(width: 4),
+            if (onDownload != null)
+              KeyedSubtree(
+                key: const ValueKey('desktop-remote-download'),
+                child: IdePaneAction(
+                  icon: Codicons.cloudDownload,
+                  tooltip: l10n.explorerDownload,
+                  onPressed: downloading ? () {} : onDownload!,
+                ),
+              ),
             IdePaneAction(
               icon: Codicons.close,
               tooltip: l10n.sidePanelCloseTab,
@@ -574,6 +648,7 @@ class _FilePreviewPane extends StatelessWidget {
             ),
           ],
         ),
+        if (status case final message?) _Notice(message),
         Expanded(
           child: FutureBuilder(
             future: result,
@@ -588,6 +663,12 @@ class _FilePreviewPane extends StatelessWidget {
                 AsyncSnapshot(data: _FilePreview(binary: true)) => _Notice(
                   l10n.placeholderBinary,
                 ),
+                AsyncSnapshot(error: final RemoteMediaTooLarge error) =>
+                  _Notice(remoteMediaError(l10n, error)),
+                AsyncSnapshot(error: final RemoteUnsupportedImage error) =>
+                  _Notice(remoteMediaError(l10n, error)),
+                AsyncSnapshot(data: _FilePreview(image: final bytes?)) =>
+                  SizedBox(height: 180, child: DesktopRemoteImagePixels(bytes)),
                 AsyncSnapshot(
                   data: _FilePreview(tooLarge: true, :final size),
                 ) =>

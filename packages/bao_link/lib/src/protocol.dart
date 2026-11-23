@@ -46,25 +46,28 @@ abstract final class LinkMethods {
   static const close = 'close';
 
   /// `{"session"?, "project"?, "bot"?, "text", "images"?, "mentions"?,
-  /// "now"?, "id"?}`: a message to the bot's conversation ([LinkBot.id]),
+  /// "now"?, "id"?, "duringTurn"?, "expectedTurn"?}`: a message to the bot's conversation ([LinkBot.id]),
   /// started if it has none; else to the session; with neither, to a new
   /// one in the project. With `id` (the phone's for it), one sent again
   /// (its answer lost) is answered as before, not taken twice.
   /// Images are `{"data" (base64), "type", "name"?}`; mentions, the
   /// project's files the text names (`@path`), from its root. With `now`,
   /// taken up at once, the turn running stopped for it, rather than queued
-  /// behind it. Answered with `{"session"}`.
+  /// behind it. With `duringTurn`, require an active, queue-capable turn;
+  /// also require the advertised `expectedTurn` if interrupting it. Answered
+  /// with `{"session"}`.
   static const send = 'send';
 
   /// `{"session", "index", "text", "images"?, "mentions"?,
-  /// "revertFiles"?}`: the user's message at `index` (counted from the
+  /// "revertFiles"?, "expectedWindow"?}`: the user's message at `index` (counted from the
   /// phone's first item, as an update's `start` is) sent again as this, as
   /// the desktop's edit of a message: everything after it is discarded,
   /// and the turn runs again from there. With `revertFiles`, what the
   /// agent did to the files from it on is put back first (see
   /// [rewindPlan]); without, the files are left. `notFound` where there is
   /// no message of the user's; `unsupported` where the agent cannot go
-  /// back.
+  /// back. `expectedWindow` guards destructive edits with the digest of the
+  /// presented item window, also usable for [rewindPlan].
   static const edit = 'edit';
 
   /// `{"session", "index"}`: what [edit] with `revertFiles` would put back
@@ -84,9 +87,10 @@ abstract final class LinkMethods {
   /// [LinkSessionUpdate.interaction]).
   static const answer = 'answer';
 
-  /// `{"session"}`: starts the plan the agent put to the user (its
+  /// `{"session", "expectedPlan"?}`: starts the plan the agent put to the user (its
   /// history's plan item awaiting), as the desktop's Start: `notFound`
-  /// when none awaits, `busy` while the turn that put it runs.
+  /// when none awaits, `busy` while the turn that put it runs. `expectedPlan`
+  /// is a digest of the actionable plan item; `stale` if it changed.
   static const startPlan = 'startPlan';
 
   /// `{"session", "kind", "option"}`: picks a model, a mode, a permission
@@ -726,6 +730,7 @@ class LinkState {
     this.sessions = const [],
     this.bots = const [],
     this.groups = const [],
+    this.groupOptions = const [],
   });
 
   factory LinkState.fromJson(Map<String, Object?> json) => LinkState(
@@ -746,6 +751,13 @@ class LinkState {
       for (final group in (json['groups'] as List?) ?? const [])
         LinkGroup.fromJson(_map(group)),
     ],
+    groupOptions: switch (json['groupOptions']) {
+      final List options => [
+        for (final option in options)
+          if (option is String) option,
+      ],
+      _ => const [],
+    },
   );
 
   final DeviceInfo device;
@@ -759,6 +771,10 @@ class LinkState {
   /// The group chats of the user and their [bots].
   final List<LinkGroup> groups;
 
+  /// Optional [LinkMethods.saveGroup] fields the host supports, including
+  /// when every group is using defaults and omits those fields.
+  final List<String> groupOptions;
+
   Map<String, Object?> toJson() => {
     'device': device.toJson(),
     'projects': [for (final project in projects) project.toJson()],
@@ -766,6 +782,7 @@ class LinkState {
     if (bots.isNotEmpty) 'bots': [for (final bot in bots) bot.toJson()],
     if (groups.isNotEmpty)
       'groups': [for (final group in groups) group.toJson()],
+    if (groupOptions.isNotEmpty) 'groupOptions': groupOptions,
   };
 }
 
@@ -852,6 +869,7 @@ class LinkSessionUpdate {
     this.goal,
     this.context,
     this.quota,
+    this.actions,
   });
 
   factory LinkSessionUpdate.fromJson(Map<String, Object?> json) =>
@@ -887,6 +905,10 @@ class LinkSessionUpdate {
           _ => null,
         },
         quota: switch (json['quota']) {
+          final Map<String, Object?> map => map,
+          _ => null,
+        },
+        actions: switch (json['actions']) {
           final Map<String, Object?> map => map,
           _ => null,
         },
@@ -940,6 +962,11 @@ class LinkSessionUpdate {
   /// learned; `left`, a percentage. Times in milliseconds since the epoch.
   final Map<String, Object?>? quota;
 
+  /// Optional host action capabilities: `queue`, `edit`, and `startPlan`
+  /// are true only when the session supports the corresponding action.
+  /// `turn` is a token for the current turn when it can be identified.
+  final Map<String, Object?>? actions;
+
   Map<String, Object?> toJson() => {
     'session': session,
     'start': start,
@@ -954,6 +981,7 @@ class LinkSessionUpdate {
     'goal': ?goal,
     'context': ?context,
     'quota': ?quota,
+    'actions': ?actions,
   };
 }
 

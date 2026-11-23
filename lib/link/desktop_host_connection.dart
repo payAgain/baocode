@@ -8,8 +8,11 @@ import '../models/secret_store.dart';
 import 'desktop_host_connection_stub.dart'
     if (dart.library.io) 'desktop_host_connection_io.dart'
     as platform;
+import 'desktop_remote_discovery_stub.dart'
+    if (dart.library.io) 'desktop_remote_discovery_io.dart'
+    as discovery;
 
-/// An outgoing connection to one BaoCode desktop, using its Mobile Link invite.
+/// An outgoing connection to one BaoCode desktop, using Mobile Link pairing.
 /// The client has its own key and never reads or changes the local LinkHost.
 class DesktopHostConnection extends ChangeNotifier {
   DesktopHostConnection()
@@ -17,6 +20,9 @@ class DesktopHostConnection extends ChangeNotifier {
         SecretStore.instance,
         platform.bindDesktopHostClient,
         platform.desktopHostClientDevice,
+        discovery.desktopRemoteDiscoverySupported
+            ? discovery.discoverDesktopRemoteHosts
+            : null,
       );
 
   @visibleForTesting
@@ -24,9 +30,15 @@ class DesktopHostConnection extends ChangeNotifier {
     required SecretStore store,
     required Future<LinkNode> Function(LinkIdentity, List<String>) bind,
     required Future<DeviceInfo> Function() device,
-  }) : this._(store, bind, device);
+    Stream<List<LinkAdvert>> Function()? discover,
+  }) : this._(store, bind, device, discover);
 
-  DesktopHostConnection._(this._store, this._bind, this._device);
+  DesktopHostConnection._(
+    this._store,
+    this._bind,
+    this._device,
+    this._discover,
+  );
 
   static const _storageId = 'desktop_host_connection.v1';
   static const _revoked =
@@ -35,6 +47,7 @@ class DesktopHostConnection extends ChangeNotifier {
   final SecretStore _store;
   final Future<LinkNode> Function(LinkIdentity, List<String>) _bind;
   final Future<DeviceInfo> Function() _device;
+  final Stream<List<LinkAdvert>> Function()? _discover;
   _SavedHost? _saved;
   bool _loaded = false;
   bool _disposed = false;
@@ -46,11 +59,80 @@ class DesktopHostConnection extends ChangeNotifier {
   Timer? _expiry;
   LinkPeer? _authorized;
   Future<void>? _loss;
+  StreamSubscription<List<LinkAdvert>>? _discovery;
+  List<LinkAdvert> _adverts = const [];
+  List<String>? _lastNearbyRetry;
+  String? _discoveryError;
+  bool _discovering = false;
 
   bool get busy => _busy;
   String? get error => _error;
   String? get pendingCode => _pending?.code;
+  bool get pendingNeedsApproval => _pending?.needsApproval ?? false;
+  bool get waitingForHostApproval => _session?.waitingForHostApproval ?? false;
   String? get hostName => _pending?.host.name ?? _saved?.name;
+
+  /// Nearby computers currently accepting new pairings. Treat their labels
+  /// as unverified until both users have compared the safety code.
+  List<LinkAdvert> get nearbyHosts {
+    final byHost = {for (final advert in _adverts) advert.id: advert};
+    return List.unmodifiable(
+      byHost.values.where(
+        (advert) => advert.pairing && advert.addrs.isNotEmpty,
+      ),
+    );
+  }
+
+  bool get discoverySupported => _discover != null;
+  bool get discovering => _discovering;
+  String? get discoveryError => _discoveryError;
+
+  /// The visible remote-host UI owns this browse. Loading a saved host does
+  /// not start a browse or prompt for local network access.
+  void startDiscovery() {
+    final discover = _discover;
+    if (_disposed || _discovering || discover == null) return;
+    _discovering = true;
+    _discoveryError = null;
+    try {
+      _discovery = discover().listen(
+        (adverts) {
+          _adverts = adverts;
+          _notify();
+          _maybeReconnectNearby();
+        },
+        onError: (Object _) => _discoveryFailed(),
+        onDone: () {
+          if (_discovering) _discoveryFailed();
+        },
+      );
+    } on Object {
+      _discoveryFailed();
+      return;
+    }
+    _notify();
+  }
+
+  /// Stops the visible browse and discards its transient address hints.
+  Future<void> stopDiscovery() => _stopDiscovery();
+
+  Future<void> _stopDiscovery({String? error}) async {
+    final discovery = _discovery;
+    final changed = _discovering || _discoveryError != error;
+    _discovery = null;
+    _discovering = false;
+    _adverts = const [];
+    _lastNearbyRetry = null;
+    _discoveryError = error;
+    if (changed) _notify();
+    await discovery?.cancel().catchError((Object _) {});
+  }
+
+  void _discoveryFailed() => unawaited(
+    _stopDiscovery(
+      error: 'Could not search the local network for nearby computers.',
+    ),
+  );
 
   /// Available only after the host has authorized this connection.
   LinkPeer? get peer {
@@ -70,7 +152,37 @@ class DesktopHostConnection extends ChangeNotifier {
   /// Dials the computer that issued the literal invite and shows the safety
   /// code. Only [confirm] can complete a new pairing.
   Future<void> pair(String invite) =>
-      _run('Could not open the invite.', () async {
+      _startPairing('Could not open the invite.', () async {
+        final offer = _parseOffer(invite);
+        await _beginPairing(
+          offer.name,
+          offer.address,
+          direct: offer.direct,
+          token: encodeKey(offer.token),
+          expires: offer.expires,
+        );
+      });
+
+  /// Dials only a currently visible, explicitly selected pairing advert.
+  Future<void> pairNearby(String id) => _startPairing(
+    'Could not pair with the nearby computer.',
+    () async {
+      final advert = nearbyHosts.where((advert) => advert.id == id).firstOrNull;
+      if (advert == null) {
+        throw const _HostError('This computer is no longer available to pair.');
+      }
+      await _beginPairing(
+        advert.name,
+        LinkAddress(advert.id, addrs: advert.addrs),
+        // The advert carries LAN addresses only. Learn relay policy from
+        // the authenticated host for future connections.
+        direct: true,
+      );
+    },
+  );
+
+  Future<void> _startPairing(String fallback, Future<void> Function() begin) =>
+      _run(fallback, () async {
         _readingForPair = true;
         try {
           await _readSaved();
@@ -83,42 +195,62 @@ class DesktopHostConnection extends ChangeNotifier {
             'Forget the saved computer before pairing another.',
           );
         }
-        if (_session != null) return;
-        final offer = _parseOffer(invite);
-        final host = _SavedHost(
-          LinkIdentity.generate(),
-          offer.name.isEmpty ? 'BaoCode' : offer.name,
-          offer.address,
-          direct: offer.direct,
-        );
-        await _connect(host, pairing: true, (session, peer) async {
-          final answer = await _hello(
-            session,
-            peer,
-            token: encodeKey(offer.token),
-          );
-          if (answer is! Map ||
-              answer['pairing'] != true ||
-              answer['approval'] == true) {
-            throw const _HostError('The computer did not accept the invite.');
-          }
-          final details = host.updated(_deviceFrom(answer));
-          _checkSession(session);
-          final timeLeft = offer.expires.difference(DateTime.now());
-          if (timeLeft <= Duration.zero) {
-            throw const _HostError('This invite has expired.');
-          }
-          _pending = _PendingHost(
-            details,
-            safetyCode(offer.key, host.identity.publicKey).join('  '),
-            offer.expires,
-          );
-          _expiry = Timer(
-            timeLeft,
-            () => unawaited(_endPending(session, expired: true)),
-          );
-        });
+        if (_session == null) await begin();
       });
+
+  Future<void> _beginPairing(
+    String name,
+    LinkAddress address, {
+    required bool direct,
+    String? token,
+    DateTime? expires,
+  }) async {
+    final needsApproval = token == null;
+    final host = _SavedHost(
+      LinkIdentity.generate(),
+      name.isEmpty ? 'BaoCode' : name,
+      address,
+      direct: direct,
+    );
+    await _connect(host, pairing: true, (session, peer) async {
+      final answer = await _hello(
+        session,
+        peer,
+        token: token,
+        request: needsApproval,
+      );
+      if (answer is! Map ||
+          answer['pairing'] != true ||
+          (answer['approval'] == true) != needsApproval) {
+        throw _HostError(
+          needsApproval
+              ? 'The computer did not accept the nearby pairing request.'
+              : 'The computer did not accept the invite.',
+        );
+      }
+      final details = host.updated(_deviceFrom(answer));
+      _checkSession(session);
+      if (expires != null) {
+        final timeLeft = expires.difference(DateTime.now());
+        if (timeLeft <= Duration.zero) {
+          throw const _HostError('This invite has expired.');
+        }
+        _expiry = Timer(
+          timeLeft,
+          () => unawaited(_endPending(session, expired: true)),
+        );
+      }
+      _pending = _PendingHost(
+        details,
+        safetyCode(
+          keyOfDeviceId(address.id)!,
+          host.identity.publicKey,
+        ).join('  '),
+        expires,
+        needsApproval: needsApproval,
+      );
+    });
+  }
 
   /// The user has compared the code with the host's and says they match.
   Future<void> confirm() => _run('Could not confirm pairing.', () async {
@@ -129,11 +261,23 @@ class DesktopHostConnection extends ChangeNotifier {
     _expiry?.cancel();
     _expiry = null;
     try {
-      if (!DateTime.now().isBefore(pending.expires)) {
+      if (pending.expires case final expires?
+          when !DateTime.now().isBefore(expires)) {
         throw const _HostError('This invite has expired.');
       }
       final peer = session.peer!;
-      final reply = await peer.call(LinkMethods.confirm);
+      session.waitingForHostApproval = pending.needsApproval;
+      final confirmation = peer.call(
+        LinkMethods.confirm,
+        const {},
+        pending.needsApproval
+            ? const Duration(minutes: 2)
+            : const Duration(seconds: 30),
+      );
+      if (session.waitingForHostApproval) _notify();
+      final reply = await confirmation;
+      if (session.cancelled) return;
+      session.waitingForHostApproval = false;
       if (reply case {'pairing': true}) {
         throw const _HostError('The computer did not confirm pairing.');
       }
@@ -156,7 +300,7 @@ class DesktopHostConnection extends ChangeNotifier {
         _authorized = peer;
       }
     } on Object {
-      if (session.revoked) return; // _run removes the record on revocation.
+      if (_session != session || session.revoked || session.cancelled) return;
       await _drop(session);
       rethrow;
     }
@@ -165,7 +309,19 @@ class DesktopHostConnection extends ChangeNotifier {
   Future<void> cancelPairing() async {
     _readingForPair = false;
     final session = _session;
-    if (session == null || !session.pairing) return;
+    if (session == null ||
+        !(session.pairing || session.waitingForHostApproval)) {
+      return;
+    }
+    if (session.waitingForHostApproval) {
+      session.cancelled = true;
+      session.waitingForHostApproval = false;
+      _clearPending();
+      _notify();
+      // The host may have accepted our confirmation while its reply was in
+      // flight. Clear that authorization before closing the pending peer.
+      await _unpair(session.peer!);
+    }
     await _endPending(session);
   }
 
@@ -192,6 +348,8 @@ class DesktopHostConnection extends ChangeNotifier {
   Future<void> _reconnect() async {
     final host = _saved;
     if (host == null || _session != null || _disposed) return;
+    final nearby = _nearbyAddresses(host.address.id);
+    _lastNearbyRetry = nearby.isEmpty ? null : nearby;
     try {
       await _connect(host, (session, peer) async {
         final answer = await _hello(session, peer);
@@ -209,15 +367,35 @@ class DesktopHostConnection extends ChangeNotifier {
         }
         if (_session == session && !session.revoked) {
           _authorized = peer;
+          _lastNearbyRetry = null;
           _error = null;
         }
-      });
+      }, nearby: nearby);
     } on LinkRemoteException catch (error) {
       if (error.code != LinkErrors.unpaired) rethrow;
       await _removeSaved();
       throw const _HostError(_revoked);
     } on LinkClosedException {
       throw const _HostError('Could not reach the saved computer.');
+    }
+  }
+
+  List<String> _nearbyAddresses(String id) => {
+    for (final advert in _adverts)
+      if (advert.id == id) ...advert.addrs,
+  }.toList();
+
+  void _maybeReconnectNearby() {
+    final host = _saved;
+    if (_disposed || !_discovering || host == null || peer != null) return;
+    final nearby = _nearbyAddresses(host.address.id);
+    if (nearby.isEmpty) {
+      _lastNearbyRetry = null;
+    } else if (!_busy &&
+        _session == null &&
+        !listEquals(nearby, _lastNearbyRetry)) {
+      // Bursts of unchanged Bonjour updates must not spin a retry loop.
+      unawaited(_run('Could not connect to the saved computer.', _reconnect));
     }
   }
 
@@ -237,6 +415,7 @@ class DesktopHostConnection extends ChangeNotifier {
     _SavedHost host,
     Future<void> Function(_ClientSession, LinkPeer) authenticate, {
     bool pairing = false,
+    List<String> nearby = const [],
   }) async {
     if (_disposed) return;
     final session = _session = _ClientSession()..pairing = pairing;
@@ -247,7 +426,14 @@ class DesktopHostConnection extends ChangeNotifier {
         return;
       }
       session.node = node;
-      final link = await node.connect(host.address);
+      final link = await node.connect(
+        host.address.copyWith(
+          relays: host.direct
+              ? const []
+              : {...host.address.relays, ...defaultLinkRelays}.toList(),
+          addrs: {...nearby, ...host.address.addrs}.toList(),
+        ),
+      );
       session.link = link;
       if (_session != session) {
         link.close();
@@ -288,6 +474,7 @@ class DesktopHostConnection extends ChangeNotifier {
     _ClientSession session,
     LinkPeer peer, {
     String? token,
+    bool request = false,
   }) async {
     final device = await _device();
     _checkSession(session);
@@ -295,6 +482,7 @@ class DesktopHostConnection extends ChangeNotifier {
       'name': device.name,
       'system': device.system,
       'token': ?token,
+      if (request) 'request': true,
     });
   }
 
@@ -386,8 +574,10 @@ class DesktopHostConnection extends ChangeNotifier {
       _error = error.message;
     } on LinkRemoteException catch (error) {
       _error = switch (error.code) {
-        LinkErrors.badToken || LinkErrors.notPairing =>
+        LinkErrors.badToken =>
           'The invite is no longer valid. Ask the computer for a new one.',
+        LinkErrors.notPairing =>
+          'The computer is no longer accepting nearby pairing requests.',
         LinkErrors.busy => 'The computer is pairing with another device.',
         LinkErrors.rejected => 'The computer rejected the pairing.',
         _ => fallback,
@@ -403,6 +593,7 @@ class DesktopHostConnection extends ChangeNotifier {
       }
       _busy = false;
       _notify();
+      _maybeReconnectNearby();
     }
   }
 
@@ -466,6 +657,7 @@ class DesktopHostConnection extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    unawaited(stopDiscovery());
     if (_session case final session?) unawaited(_drop(session));
     super.dispose();
   }
@@ -526,11 +718,17 @@ class _SavedHost {
 }
 
 class _PendingHost {
-  const _PendingHost(this.host, this.code, this.expires);
+  const _PendingHost(
+    this.host,
+    this.code,
+    this.expires, {
+    required this.needsApproval,
+  });
 
   final _SavedHost host;
   final String code;
-  final DateTime expires;
+  final DateTime? expires;
+  final bool needsApproval;
 }
 
 class _ClientSession {
@@ -540,6 +738,8 @@ class _ClientSession {
   StreamSubscription<LinkEvent>? events;
   final eventsFinished = Completer<void>();
   bool pairing = false;
+  bool waitingForHostApproval = false;
+  bool cancelled = false;
   bool revoked = false;
 
   void finishEvents() {

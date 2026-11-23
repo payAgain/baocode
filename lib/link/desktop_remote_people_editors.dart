@@ -1,0 +1,618 @@
+part of 'desktop_remote_people.dart';
+
+class _PeopleEditors {
+  _PeopleEditors(this.state);
+
+  final _DesktopRemotePeopleManagerState state;
+  bool get _busy => state._busy;
+  String _tr(String en, String zh) => state._tr(en, zh);
+  bool _can(String method) => !_busy && !state._unsupported.contains(method);
+  void _run(Future<void> Function(LinkPeer) action) =>
+      unawaited(state._run(action));
+  void _edit(VoidCallback change) => state._edit(change);
+
+  Widget list(_PeopleCatalog catalog) => _section([
+    if (!catalog.hasBots)
+      Text(_tr('This host does not advertise Bots.', '此主机未提供机器人目录。')),
+    _heading(_tr('Bots', '机器人')),
+    for (final bot in catalog.bots)
+      ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: Icon(
+          bot['assistant'] == true ? Icons.assistant : Icons.smart_toy_outlined,
+        ),
+        title: Text(bot['name'] as String),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: _busy
+            ? null
+            : () => _run(
+                (peer) => state._openBot(
+                  peer,
+                  _PeopleDraft.bot(catalog, bot['id'] as String),
+                ),
+              ),
+      ),
+    OutlinedButton.icon(
+      onPressed: !catalog.hasBots || !_can(LinkMethods.saveBot)
+          ? null
+          : () => state._changeView(
+              () => state._draft = _PeopleDraft.bot(catalog),
+            ),
+      icon: const Icon(Icons.add),
+      label: Text(_tr('New Bot', '新建机器人')),
+    ),
+    const Divider(),
+    _heading(_tr('Groups', '群聊')),
+    for (final group in catalog.groups)
+      ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: const Icon(Icons.groups_outlined),
+        title: Text(group['name'] as String),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: _busy
+            ? null
+            : () => state._changeView(
+                () => state._draft = _PeopleDraft.group(
+                  catalog,
+                  group['id'] as String,
+                ),
+              ),
+      ),
+    OutlinedButton.icon(
+      onPressed: !catalog.hasBots || !_can(LinkMethods.saveGroup)
+          ? null
+          : () => state._changeView(
+              () => state._draft = _PeopleDraft.group(catalog),
+            ),
+      icon: const Icon(Icons.add),
+      label: Text(_tr('New group', '新建群聊')),
+    ),
+    const Divider(),
+    OutlinedButton.icon(
+      onPressed: !catalog.hasBots || !_can(LinkMethods.setMe)
+          ? null
+          : () => state._changeView(
+              () => state._draft = _PeopleDraft(_PeopleKind.profile),
+            ),
+      icon: const Icon(Icons.person_outline),
+      label: Text(_tr('My host profile', '我的主机资料')),
+    ),
+    TextButton.icon(
+      onPressed: _busy
+          ? null
+          : () => _run((peer) async {
+              await state._readCatalog(peer);
+            }),
+      icon: const Icon(Icons.refresh),
+      label: Text(_tr('Refresh', '刷新')),
+    ),
+  ]);
+
+  Widget buildDraft(_PeopleDraft draft, _PeopleCatalog catalog) =>
+      switch (draft.kind) {
+        _PeopleKind.bot => _bot(draft),
+        _PeopleKind.group => _group(draft, catalog),
+        _PeopleKind.profile => _profile(draft),
+        _PeopleKind.memory => _memory(draft),
+      };
+
+  Widget _back() => Align(
+    alignment: AlignmentDirectional.centerStart,
+    child: TextButton.icon(
+      onPressed: _busy ? null : state._back,
+      icon: const Icon(Icons.arrow_back),
+      label: Text(_tr('Back', '返回')),
+    ),
+  );
+
+  Widget _field(
+    _PeopleDraft draft,
+    String key,
+    String label, {
+    int lines = 1,
+    bool numeric = false,
+    bool editable = true,
+    String? hint,
+    Object? version,
+    void Function(String)? onChanged,
+  }) => TextFormField(
+    key: ValueKey((key, version)),
+    initialValue: draft.text[key] ?? '',
+    decoration: InputDecoration(
+      labelText: label,
+      helperText: hint,
+      helperMaxLines: 3,
+    ),
+    minLines: lines,
+    maxLines: lines == 1 ? 1 : lines + 2,
+    keyboardType: numeric ? TextInputType.number : null,
+    enabled: editable && !_busy,
+    onChanged: (value) => _edit(() {
+      draft.text[key] = value;
+      onChanged?.call(value);
+    }),
+  );
+
+  Widget _name(_PeopleDraft draft, {bool editable = true}) =>
+      _field(draft, 'name', _tr('Name', '名称'), editable: editable);
+
+  Widget _gender(_PeopleDraft draft, {bool editable = true}) =>
+      _field(draft, 'gender', _tr('Gender', '性别'), editable: editable);
+
+  Widget _signature(_PeopleDraft draft, {bool editable = true}) =>
+      _field(draft, 'signature', _tr('Signature', '签名'), editable: editable);
+
+  Widget _bot(_PeopleDraft draft) {
+    final editable = draft.canEditBot && _can(LinkMethods.saveBot);
+    final id = draft.id;
+    final hasSettings = draft.canEditBot;
+    return _section([
+      _back(),
+      _heading(
+        id == null ? _tr('New Bot', '新建机器人') : _tr('Bot settings', '机器人设置'),
+      ),
+      if (!hasSettings)
+        Text(
+          _tr(
+            'This host did not provide the full Bot settings.',
+            '此主机未提供完整的机器人设置。',
+          ),
+        ),
+      _name(draft, editable: editable),
+      _gender(draft, editable: editable),
+      _signature(draft, editable: editable),
+      if (hasSettings) ...[
+        _picture(draft, editable: editable),
+        _field(
+          draft,
+          'avatar',
+          _tr('Avatar emoji', '头像表情'),
+          editable: editable,
+          version: draft.avatarFieldVersion,
+          onChanged: (_) {
+            draft.replaceAvatar = true;
+            draft.pickedPicture = null;
+          },
+        ),
+        _field(
+          draft,
+          'identity',
+          _tr('Identity', '身份设定'),
+          lines: 3,
+          editable: editable,
+        ),
+        _field(
+          draft,
+          'style',
+          _tr('Speaking style', '说话风格'),
+          lines: 2,
+          editable: editable,
+        ),
+        _heading(_tr('Abilities', '能力')),
+        for (final ability in BotAbility.values)
+          CheckboxListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(switch (ability) {
+              BotAbility.agents => _tr('Manage agents', '管理智能体'),
+              BotAbility.browser => _tr('Use browser', '使用浏览器'),
+              BotAbility.proactive => _tr('React to agent activity', '响应智能体活动'),
+            }),
+            value: draft.abilities.contains(ability.name),
+            onChanged: !editable
+                ? null
+                : (on) => _edit(() {
+                    if (on == true) {
+                      draft.abilities.add(ability.name);
+                    } else {
+                      draft.abilities.remove(ability.name);
+                    }
+                  }),
+          ),
+        for (final entry in draft.flags.entries)
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(
+              entry.key == 'chatOnly'
+                  ? _tr('Chat only', '仅聊天')
+                  : _tr('May write first', '可以主动发消息'),
+            ),
+            value: entry.value,
+            onChanged: !editable
+                ? null
+                : (value) => _edit(() => draft.flags[entry.key] = value),
+          ),
+        if (draft.abilities.contains(BotAbility.proactive.name)) ...[
+          _field(
+            draft,
+            'perDay',
+            _tr('Proactive messages per day', '每日主动消息上限'),
+            numeric: true,
+            editable: editable,
+          ),
+          _field(
+            draft,
+            'quietFrom',
+            _tr('Quiet hours start', '免打扰开始'),
+            numeric: true,
+            editable: editable,
+            hint: _tr(
+              'Minutes since midnight on the host (0–1439)',
+              '主机当地时间从午夜起的分钟数（0–1439）',
+            ),
+          ),
+          _field(
+            draft,
+            'quietTo',
+            _tr('Quiet hours end', '免打扰结束'),
+            numeric: true,
+            editable: editable,
+            hint: _tr('Same as start disables quiet hours', '与开始时间相同即关闭免打扰'),
+          ),
+        ],
+        FilledButton(
+          onPressed: !editable || !draft.changedBot
+              ? null
+              : () {
+                  if (draft.replaceAvatar &&
+                      isAvatarImage(_text(draft.base, 'avatar'))) {
+                    _confirm(
+                      _tr('Change the Bot’s picture?', '要更换机器人头像吗？'),
+                      _tr(
+                        'Saving will remove the current picture from this Bot on the host.',
+                        '保存后，主机将移除此机器人当前的头像。',
+                      ),
+                      (peer) => state._saveEntry(peer, draft),
+                    );
+                  } else {
+                    _run((peer) => state._saveEntry(peer, draft));
+                  }
+                },
+          child: Text(_tr('Save', '保存')),
+        ),
+      ],
+      if (id != null) ...[
+        const Divider(),
+        OutlinedButton(
+          onPressed: !_can(LinkMethods.botMemory)
+              ? null
+              : () => _run((peer) => state._openMemory(peer, draft)),
+          child: Text(_tr('Memory & self notes', '记忆和自我笔记')),
+        ),
+        OutlinedButton(
+          onPressed:
+              !_can(LinkMethods.clearBotChat) ||
+                  draft.base['session'] is! String
+              ? null
+              : () => _remove(draft, clearChat: true),
+          child: Text(_tr('Clear chat', '清空聊天')),
+        ),
+        if (!draft.assistant)
+          OutlinedButton(
+            onPressed: !_can(LinkMethods.deleteBot)
+                ? null
+                : () => _remove(draft),
+            child: Text(_tr('Delete Bot', '删除机器人')),
+          ),
+      ],
+    ]);
+  }
+
+  Widget _group(_PeopleDraft draft, _PeopleCatalog catalog) {
+    final editable = draft.canEditGroup && _can(LinkMethods.saveGroup);
+    return _section([
+      _back(),
+      _heading(
+        draft.id == null
+            ? _tr('Create group', '创建群聊')
+            : _tr('Group settings', '群聊设置'),
+      ),
+      _name(draft, editable: editable),
+      if (draft.canEditGroup) ...[
+        _heading(_tr('Members', '成员')),
+        for (final bot in catalog.bots)
+          CheckboxListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(bot['name'] as String),
+            value: draft.members.contains(bot['id']),
+            onChanged: !editable
+                ? null
+                : (on) => _edit(() {
+                    final id = bot['id'] as String;
+                    if (on == true) {
+                      draft.members.add(id);
+                    } else {
+                      draft.members.remove(id);
+                      if (draft.canEditLead && draft.lead == id) {
+                        draft.lead = null;
+                      }
+                    }
+                  }),
+          ),
+        if (draft.groupOptions.contains('passes'))
+          _field(
+            draft,
+            'passes',
+            _tr('Conversation passes', '转交次数上限'),
+            numeric: true,
+            editable: editable,
+            hint: _tr('0 for unlimited, or at least 2', '0 表示不限，否则至少为 2'),
+          ),
+        if (draft.groupOptions.contains('rules'))
+          _field(
+            draft,
+            'rules',
+            _tr('Rules', '规则'),
+            lines: 2,
+            editable: editable,
+          ),
+        if (draft.groupOptions.contains('gap'))
+          _field(
+            draft,
+            'gap',
+            _tr('Reply delay (seconds)', '回复间隔（秒）'),
+            numeric: true,
+            editable: editable,
+            hint: _tr(
+              'Time between Bot replies. 0 for no delay.',
+              '机器人回复之间的间隔，0 表示立即回复。',
+            ),
+          ),
+        if (draft.canEditLead) _groupLeadPicker(draft, catalog, editable),
+        if (draft.groupOptions.length < _groupOptions.length)
+          Text(
+            _tr(
+              'Additional group settings appear when the host advertises them.',
+              '主机提供更多群聊设置时，这里会显示相应选项。',
+            ),
+          ),
+        FilledButton(
+          onPressed: !editable || !draft.changedGroup
+              ? null
+              : () => _run((peer) => state._saveEntry(peer, draft)),
+          child: Text(_tr('Save', '保存')),
+        ),
+      ] else
+        Text(
+          _tr('This host did not provide group membership.', '此主机未提供群成员信息。'),
+        ),
+      if (draft.id != null)
+        OutlinedButton(
+          onPressed: !_can(LinkMethods.deleteGroup)
+              ? null
+              : () => _remove(draft),
+          child: Text(_tr('Delete group', '删除群聊')),
+        ),
+    ]);
+  }
+
+  Widget _groupLeadPicker(
+    _PeopleDraft draft,
+    _PeopleCatalog catalog,
+    bool editable,
+  ) {
+    final choices = catalog.bots
+        .where((bot) => draft.members.contains(bot['id']))
+        .toList();
+    return InputDecorator(
+      decoration: InputDecoration(labelText: _tr('Default lead', '默认领队')),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          key: const ValueKey('remote-group-lead'),
+          isExpanded: true,
+          value: choices.any((bot) => bot['id'] == draft.lead)
+              ? draft.lead
+              : '',
+          items: [
+            DropdownMenuItem(value: '', child: Text(_tr('Automatic', '自动'))),
+            for (final bot in choices)
+              DropdownMenuItem(
+                value: bot['id'] as String,
+                child: Text(
+                  bot['name'] as String,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+          ],
+          onChanged: editable
+              ? (id) => _edit(() => draft.lead = id == '' ? null : id)
+              : null,
+        ),
+      ),
+    );
+  }
+
+  Widget _memory(_PeopleDraft draft) => _section([
+    _back(),
+    _heading(_tr('Memory & self notes', '记忆和自我笔记')),
+    for (final key in ['text', if (draft.selfAdvertised) 'self']) ...[
+      _field(
+        draft,
+        key,
+        key == 'text' ? _tr('Memory', '记忆') : _tr('Self notes', '自我笔记'),
+        lines: 4,
+        editable: _can(
+          key == 'text' ? LinkMethods.setBotMemory : LinkMethods.setBotSelf,
+        ),
+      ),
+      FilledButton(
+        onPressed:
+            !_can(
+                  key == 'text'
+                      ? LinkMethods.setBotMemory
+                      : LinkMethods.setBotSelf,
+                ) ||
+                draft.text[key] == draft.base[key]
+            ? null
+            : () {
+                if (draft.text[key]!.trim().isNotEmpty) {
+                  _run((peer) => state._saveMemory(peer, draft, key));
+                } else {
+                  _confirm(
+                    key == 'text'
+                        ? _tr('Clear memory?', '要清空记忆吗？')
+                        : _tr('Clear self notes?', '要清空自我笔记吗？'),
+                    key == 'text'
+                        ? _tr(
+                            'This removes the Bot’s memory and saved impressions of you on the host.',
+                            '这会删除主机上此机器人对你的记忆和已保存的印象。',
+                          )
+                        : _tr(
+                            'This removes the Bot’s self notes on the host.',
+                            '这会删除主机上此机器人的自我笔记。',
+                          ),
+                    (peer) => state._saveMemory(peer, draft, key),
+                  );
+                }
+              },
+        child: Text(
+          key == 'text'
+              ? _tr('Save memory', '保存记忆')
+              : _tr('Save self notes', '保存自我笔记'),
+        ),
+      ),
+    ],
+  ]);
+
+  Widget _profile(_PeopleDraft draft) => _section([
+    _back(),
+    _heading(_tr('My host profile', '我的主机资料')),
+    Text(
+      _tr(
+        'The host does not share your current profile. Enter the complete replacement that its Bots should see.',
+        '主机不会共享你当前的资料。请填写要让主机机器人看到的完整新资料。',
+      ),
+    ),
+    _name(draft, editable: _can(LinkMethods.setMe)),
+    _gender(draft, editable: _can(LinkMethods.setMe)),
+    _signature(draft, editable: _can(LinkMethods.setMe)),
+    _picture(draft, editable: _can(LinkMethods.setMe)),
+    FilledButton(
+      onPressed: !_can(LinkMethods.setMe)
+          ? null
+          : () => _confirm(
+              _tr('Replace the host profile?', '要替换主机上的个人资料吗？'),
+              draft.pickedPicture == null
+                  ? _tr(
+                      'This replaces all profile fields and will remove the existing picture, if any. Empty fields are cleared.',
+                      '这会替换全部个人资料字段并删除已有头像（如有）。留空的字段将被清除。',
+                    )
+                  : _tr(
+                      'This replaces all profile fields and the picture. Empty fields are cleared.',
+                      '这会替换全部个人资料字段及头像。留空的字段将被清除。',
+                    ),
+              (peer) => state._replaceProfile(peer, draft),
+            ),
+      child: Text(_tr('Review replacement', '检查替换内容')),
+    ),
+  ]);
+
+  Widget _picture(_PeopleDraft draft, {required bool editable}) {
+    final image =
+        draft.pickedPicture ?? (draft.replaceAvatar ? null : draft.hostPicture);
+    final hostPicture =
+        !draft.replaceAvatar &&
+        draft.base['avatar'] is String &&
+        isAvatarImage(draft.base['avatar'] as String);
+    final clear =
+        draft.pickedPicture != null ||
+        hostPicture ||
+        (draft.text['avatar'] ?? '').isNotEmpty;
+    return Wrap(
+      spacing: 8,
+      runSpacing: 6,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        if (image != null)
+          ClipOval(
+            child: Image.memory(
+              image.bytes,
+              width: 42,
+              height: 42,
+              fit: BoxFit.cover,
+              cacheWidth: 84,
+              errorBuilder: (_, _, _) =>
+                  const Icon(Icons.broken_image_outlined, size: 42),
+              semanticLabel: _tr('Avatar', '头像'),
+            ),
+          )
+        else if (hostPicture)
+          Tooltip(
+            message: _tr('Host picture kept', '保留主机头像'),
+            child: const Icon(Icons.image_outlined),
+          ),
+        OutlinedButton(
+          onPressed:
+              editable &&
+                  (state.widget.options.pickImage != null ||
+                      WindowControls.canPickFiles)
+              ? () => _run((peer) => state._pick(peer, draft))
+              : null,
+          child: Text(_tr('Choose picture', '选择图片')),
+        ),
+        if (clear)
+          TextButton(
+            onPressed: !editable
+                ? null
+                : () => _edit(() {
+                    draft.replaceAvatar = true;
+                    draft.pickedPicture = null;
+                    draft.text['avatar'] = '';
+                    draft.avatarFieldVersion++;
+                  }),
+            child: Text(_tr('Remove avatar', '移除头像')),
+          ),
+        if (draft.kind == _PeopleKind.bot &&
+            draft.replaceAvatar &&
+            draft.id != null)
+          TextButton(
+            onPressed: !editable
+                ? null
+                : () => _edit(() {
+                    final value = draft.base['avatar'];
+                    draft.replaceAvatar = false;
+                    draft.pickedPicture = null;
+                    draft.text['avatar'] =
+                        value is String && !isAvatarImage(value) ? value : '';
+                    draft.avatarFieldVersion++;
+                  }),
+            child: Text(_tr('Keep original avatar', '保留原有头像')),
+          ),
+      ],
+    );
+  }
+
+  void _confirm(
+    String title,
+    String detail,
+    Future<void> Function(LinkPeer) run,
+  ) => state._changeView(
+    () => state._confirm = (title: title, detail: detail, run: run),
+  );
+
+  void _remove(_PeopleDraft draft, {bool clearChat = false}) {
+    final bot = draft.kind == _PeopleKind.bot;
+    final name = draft.name;
+    final title = clearChat
+        ? _tr('Clear the chat with $name?', '要清空与 $name 的聊天吗？')
+        : _tr('Delete $name?', '要删除 $name 吗？');
+    final detail = clearChat
+        ? _tr(
+            'The host will delete this private conversation. The Bot’s settings and memory stay.',
+            '主机会删除这段私聊。机器人的设置和记忆将保留。',
+          )
+        : bot
+        ? _tr(
+            'The host will delete this Bot, its private chat and its memory.',
+            '主机会删除此机器人、它的私聊和记忆。',
+          )
+        : _tr(
+            'The host will delete this group and its messages.',
+            '主机会删除此群聊及其消息。',
+          );
+    _confirm(
+      title,
+      detail,
+      (peer) => state._remove(peer, draft, clearChat: clearChat),
+    );
+  }
+}

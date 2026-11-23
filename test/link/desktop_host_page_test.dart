@@ -8,12 +8,288 @@ import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_host_composer.dart';
 import 'package:baocode/link/desktop_host_connection.dart';
 import 'package:baocode/link/desktop_host_page.dart';
+import 'package:baocode/link/desktop_remote_media.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('host options read the connected transport route and RTT', (
+    tester,
+  ) async {
+    final (a, b) = MemoryLinkConnection.pair(
+      a: 'desktop',
+      b: 'fixture-host',
+      path: const LinkPath(LinkPathKind.lan, rtt: Duration(milliseconds: 42)),
+    );
+    final accepting = LinkPeer.accept(b);
+    final peer = await LinkPeer.connect(a);
+    final host = await accepting;
+    final connection = _Connection()
+      ..hostName = 'Fixture host'
+      ..peer = peer;
+    await _pumpPage(tester, connection);
+    await tester.tap(find.byTooltip('Host options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Connection info'));
+    await tester.pumpAndSettle();
+    expect(find.text('Local network'), findsOneWidget);
+    expect(find.text('Round-trip time: 42 ms'), findsOneWidget);
+
+    await tester.tap(find.text('Close'));
+    await tester.pumpAndSettle();
+    a.setPath(const LinkPath(LinkPathKind.relay));
+    await tester.tap(find.byTooltip('Host options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Connection info'));
+    await tester.pumpAndSettle();
+    expect(find.text('Relay'), findsOneWidget);
+    expect(find.textContaining('Round-trip time'), findsNothing);
+
+    await tester.tap(find.text('Close'));
+    await tester.pumpAndSettle();
+    a.setPath(LinkPath.none);
+    await tester.tap(find.byTooltip('Host options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Connection info'));
+    await tester.pumpAndSettle();
+    expect(find.text('Route unavailable'), findsOneWidget);
+    expect(find.text('Relay'), findsNothing);
+
+    connection.disconnect();
+    await tester.pumpAndSettle();
+    expect(find.text('Route unavailable'), findsNothing);
+    await tester.tap(find.text('Close'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Host options'));
+    await tester.pumpAndSettle();
+    expect(find.text('Connection info'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await peer.close();
+    await host.close();
+  });
+
+  testWidgets('project goal details follow the selected host snapshot', (
+    tester,
+  ) async {
+    const goal = {
+      'condition': 'Verify the synthetic project tests',
+      'state': 'active',
+      'checks': 2,
+      'reason': 'One fixture still needs checking',
+      'setAt': 1780000000000,
+    };
+    final fixture = await _InspectionHost.show(tester, goal: goal);
+    expect(find.text('Host goal'), findsNothing);
+    await tester.tap(find.text('Fixture first chat'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Host goal').hitTestable());
+    await tester.pumpAndSettle();
+    expect(find.text(goal['condition']! as String), findsOneWidget);
+    expect(find.text(goal['reason']! as String), findsOneWidget);
+    expect(find.textContaining('2 times'), findsOneWidget);
+    expect(find.textContaining('Set at'), findsOneWidget);
+
+    fixture.push({
+      'goal': {
+        ...goal,
+        'state': 'met',
+        'reason': 'All fixtures checked',
+        'duration': 12000,
+        'tokens': 400,
+      },
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('Met'), findsOneWidget);
+    expect(find.text('All fixtures checked'), findsOneWidget);
+    expect(find.textContaining('12s'), findsOneWidget);
+    expect(find.textContaining('400'), findsOneWidget);
+
+    fixture.push({'goal': null});
+    await tester.pumpAndSettle();
+    expect(find.text('All fixtures checked'), findsNothing);
+    await tester.tap(find.text('Close'));
+    await tester.pumpAndSettle();
+    expect(find.text('Host goal'), findsNothing);
+    expect(fixture.calls, [LinkMethods.state, LinkMethods.open]);
+    await tester.tap(find.text('Fixture second chat').hitTestable());
+    await tester.pumpAndSettle();
+    fixture.push({'goal': goal});
+    await tester.pumpAndSettle();
+    expect(find.text('Host goal'), findsNothing);
+    await fixture.close(tester);
+  });
+
+  testWidgets('host quota details show the advertised accounts and windows', (
+    tester,
+  ) async {
+    final fixture = await _InspectionHost.show(
+      tester,
+      quota: {
+        'provider': 'Fixture provider',
+        'back': 1780100000000,
+        'accounts': [
+          {
+            'name': 'Fixture primary',
+            'plan': 'Fixture plan',
+            'current': true,
+            'at': 1780000000000,
+            'windows': [
+              {'minutes': 300, 'left': 42, 'resets': 1780020000000},
+              {'name': 'Fixture window', 'minutes': 10080, 'left': 78},
+              {'left': 999, 'resets': 9000000000000000},
+            ],
+          },
+          {
+            'name': 'Fixture secondary',
+            'off': true,
+            'until': 1780100000000,
+            'error': 'Fixture account error',
+          },
+        ],
+      },
+    );
+    expect(find.text('Host quota details'), findsNothing);
+    await tester.tap(find.text('Fixture first chat'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Host quota details').hitTestable());
+    await tester.pumpAndSettle();
+    final dialog = find.byType(AlertDialog);
+    Finder detail(String text) =>
+        find.descendant(of: dialog, matching: find.textContaining(text));
+    for (final text in [
+      'Fixture provider',
+      'back ',
+      'Fixture primary',
+      'Fixture plan',
+      'This chat',
+      'Last updated',
+      '42% left',
+      'resets ',
+      'Fixture window',
+      '78% left',
+      'Fixture secondary',
+      'Unavailable',
+      'Limited until',
+      'Fixture account error',
+    ]) {
+      expect(detail(text), findsOneWidget);
+    }
+    expect(detail('999%'), findsNothing);
+    expect(fixture.calls, [LinkMethods.state, LinkMethods.open]);
+
+    fixture.push({'quota': null});
+    await tester.pumpAndSettle();
+    expect(detail('Fixture secondary'), findsNothing);
+    await tester.tap(find.text('Close'));
+    await tester.pumpAndSettle();
+    expect(find.text('Host quota details'), findsNothing);
+    expect(find.text('Refresh host quota'), findsNothing);
+    await fixture.close(tester);
+  });
+
+  testWidgets(
+    'paired project header opens host tasks and shows pending question',
+    (tester) async {
+      tester.view.physicalSize = const Size(1440, 960);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final (a, b) = MemoryLinkConnection.pair(a: 'desktop', b: 'pc');
+      final accepting = LinkPeer.accept(b);
+      final peer = await LinkPeer.connect(a);
+      final host = await accepting;
+      final chats = DesktopHostChats();
+      final calls = <String>[];
+      host.onRequest = (method, params) {
+        calls.add(method);
+        if (method == LinkMethods.state) {
+          return LinkState(
+            device: const DeviceInfo(
+              name: 'PC',
+              kind: 'desktop',
+              system: 'windows',
+            ),
+            projects: const [
+              ProjectInfo(id: 'pr', name: 'Folder', path: 'D:/fixture'),
+            ],
+            sessions: [
+              SessionSummary(
+                id: 's',
+                project: 'pr',
+                title: 'Paired session',
+                updatedAt: DateTime(2026),
+              ),
+            ],
+          ).toJson();
+        }
+        if (method == LinkMethods.open) {
+          return {
+            'session': 's',
+            'start': 0,
+            'items': [],
+            'count': 0,
+            'interaction': {
+              't': 'question',
+              'id': 'q1',
+              'questions': [
+                {
+                  'prompt': 'A fixture question?',
+                  'options': [
+                    {'label': 'Yes'},
+                  ],
+                },
+              ],
+            },
+            'tasks': [
+              {
+                'id': 'task',
+                'kind': 'command',
+                'description': 'Fixture task',
+                'status': 'running',
+              },
+            ],
+          };
+        }
+        return null;
+      };
+      chats.bind(peer);
+      await tester.idle();
+      await _pumpPage(tester, _Connection()..peer = peer, chats: chats);
+      await tester.tap(find.text('Paired session'));
+      await tester.pumpAndSettle();
+      expect(find.text('Review host request').hitTestable(), findsOneWidget);
+      await tester.tap(find.byTooltip('Host activity'));
+      await tester.pumpAndSettle();
+      expect(find.text('Fixture task'), findsOneWidget);
+      expect(calls.where((m) => m == LinkMethods.open), hasLength(1));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+      peer.close();
+      await host.done;
+    },
+  );
+  testWidgets(
+    'nearby browse requires selection and can cancel while the other computer confirms',
+    (tester) async {
+      final c = _Connection();
+      await _pumpPage(tester, c);
+      await tester.tap(find.text('Nearby computers'));
+      await tester.pumpAndSettle();
+      expect(c.invites, isEmpty);
+      await tester.tap(find.text('Fixture PC'));
+      await tester.pumpAndSettle();
+      expect(find.text('123 456 789 012'), findsOneWidget);
+      await tester.tap(find.text('Codes match, pair'));
+      await tester.pump();
+      expect(c.waitingForHostApproval, isTrue);
+      await tester.tap(find.text('Cancel pairing'));
+      await tester.pumpAndSettle();
+      expect(c.cancellations, 1);
+      expect(c.peer, isNull);
+    },
+  );
+
   testWidgets('paste invite, compare codes, then explicitly pair', (
     tester,
   ) async {
@@ -168,6 +444,19 @@ void main() {
     expect(find.text('Project chat'), findsNothing);
   });
 
+  testWidgets(
+    'host catalog shows which project needs an answer and counts unread bot messages',
+    (tester) async {
+      final chats = _Chats()
+        ..chats = [
+          _Chat('waiting', 'Waiting chat', 'project'),
+          _Chat('new-bot', 'Helper', 'bot'),
+        ];
+      await _pumpPage(tester, _Connection()..peer = _Peer(), chats: chats);
+      expect(find.byTooltip('Needs input'), findsOneWidget);
+      expect(find.text('3'), findsOneWidget);
+    },
+  );
   testWidgets('remote folders contain their sessions and keep empty projects', (
     tester,
   ) async {
@@ -692,7 +981,7 @@ Future<void> _enterDraft(WidgetTester tester, String text) async {
 Future<void> _pumpPage(
   WidgetTester tester,
   _Connection connection, {
-  _Chats? chats,
+  DesktopHostChats? chats,
   VoidCallback? onBack,
   DesktopHostLastChatStore? lastChatStore,
   Locale locale = const Locale('en'),
@@ -729,6 +1018,96 @@ Future<void> _pumpPage(
   );
 }
 
+class _InspectionHost {
+  _InspectionHost(this.peer, this.host, this.calls);
+
+  final LinkPeer peer;
+  final LinkPeer host;
+  final List<String> calls;
+
+  static Future<_InspectionHost> show(
+    WidgetTester tester, {
+    Map<String, Object?>? goal,
+    Map<String, Object?>? quota,
+  }) async {
+    tester.view.physicalSize = const Size(1440, 960);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final (a, b) = MemoryLinkConnection.pair();
+    final calls = <String>[];
+    final accepting = LinkPeer.accept(
+      b,
+      onRequest: (method, params) {
+        calls.add(method);
+        return switch (method) {
+          LinkMethods.state => LinkState(
+            device: const DeviceInfo(
+              name: 'Fixture host',
+              kind: 'desktop',
+              system: 'windows',
+            ),
+            projects: const [
+              ProjectInfo(
+                id: 'fixture',
+                name: 'Fixture project',
+                path: 'D:/fixture',
+              ),
+            ],
+            sessions: [
+              for (final id in ['first', 'second'])
+                SessionSummary(
+                  id: id,
+                  project: 'fixture',
+                  title: 'Fixture $id chat',
+                  updatedAt: DateTime(2026),
+                ),
+            ],
+          ).toJson(),
+          LinkMethods.open => LinkSessionUpdate(
+            session: params['session']! as String,
+            start: 0,
+            count: 0,
+            items: const [],
+            goal: params['session'] == 'first' ? goal : null,
+            quota: params['session'] == 'first' ? quota : null,
+          ).toJson(),
+          _ => null,
+        };
+      },
+    );
+    final peer = await LinkPeer.connect(a, mirror: LinkSessionMirror());
+    final host = await accepting;
+    final chats = DesktopHostChats()..bind(peer);
+    await tester.idle();
+    await _pumpPage(
+      tester,
+      _Connection()..peer = peer,
+      chats: chats,
+      lastChatStore: _LastChats(),
+    );
+    await tester.pumpAndSettle();
+    return _InspectionHost(peer, host, calls);
+  }
+
+  void push(Map<String, Object?> fields) {
+    host.emit(LinkEvents.session, {
+      'session': 'first',
+      'partial': true,
+      'start': 0,
+      'count': 0,
+      'items': const [],
+      ...fields,
+    });
+  }
+
+  Future<void> close(WidgetTester tester) async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+    await peer.close();
+    await host.close();
+  }
+}
+
 class _LastChats implements DesktopHostLastChatStore {
   final saved = <String, ({String kind, String id})>{};
   Future<DesktopHostChatKey?>? pendingRead;
@@ -754,6 +1133,44 @@ class _Connection extends ChangeNotifier implements DesktopHostConnection {
   bool busy = false;
   @override
   LinkPeer? peer;
+
+  @override
+  bool get discoverySupported => true;
+  @override
+  bool discovering = false;
+  @override
+  String? get discoveryError => null;
+  @override
+  List<LinkAdvert> get nearbyHosts => [
+    LinkAdvert(
+      name: 'Fixture PC',
+      key: Uint8List(32),
+      port: 12345,
+      pairing: true,
+      addresses: const ['127.0.0.1'],
+    ),
+  ];
+  @override
+  void startDiscovery() {
+    discovering = true;
+    notifyListeners();
+  }
+
+  @override
+  Future<void> stopDiscovery() async {
+    discovering = false;
+  }
+
+  @override
+  bool pendingNeedsApproval = false;
+  @override
+  bool waitingForHostApproval = false;
+  Completer<void>? hostConfirm;
+  @override
+  Future<void> pairNearby(String id) async {
+    pendingNeedsApproval = true;
+    await pair(id);
+  }
 
   final invites = <String>[];
   int confirmations = 0;
@@ -785,6 +1202,13 @@ class _Connection extends ChangeNotifier implements DesktopHostConnection {
   @override
   Future<void> confirm() async {
     confirmations++;
+    if (pendingNeedsApproval) {
+      waitingForHostApproval = true;
+      hostConfirm = Completer<void>();
+      notifyListeners();
+      await hostConfirm!.future;
+      return;
+    }
     pendingCode = null;
     hostName = 'Development Host';
     peer = _Peer();
@@ -794,6 +1218,9 @@ class _Connection extends ChangeNotifier implements DesktopHostConnection {
   @override
   Future<void> cancelPairing() async {
     cancellations++;
+    waitingForHostApproval = false;
+    pendingNeedsApproval = false;
+    hostConfirm?.complete();
     _pairCancelled = true;
     pendingCode = null;
     notifyListeners();
@@ -850,6 +1277,11 @@ class _Peer extends Fake implements LinkPeer {
 class _Chat extends Fake implements DesktopHostChat {
   _Chat(this.id, this.title, this.kind);
   @override
+  LinkSessionStatus get status =>
+      id == 'waiting' ? LinkSessionStatus.needsInput : LinkSessionStatus.idle;
+  @override
+  int get unread => id == 'new-bot' ? 3 : 0;
+  @override
   bool get pinned => false;
   @override
   bool get provisional => false;
@@ -868,18 +1300,15 @@ class _Chat extends Fake implements DesktopHostChat {
   final String kind;
 }
 
-class _Message extends Fake implements DesktopHostMessage {
-  _Message(this.text, this.sender, this.mine);
-
-  @override
-  final String text;
-  @override
-  final String sender;
-  @override
-  final bool mine;
+class _Message extends DesktopHostMessage {
+  const _Message(String text, String sender, bool mine)
+    : super(text: text, sender: sender, mine: mine);
 }
 
 class _Chats extends ChangeNotifier implements DesktopHostChats {
+  @override
+  Null remoteActionSnapshot(LinkPeer? peer, DesktopHostChat chat) => null;
+
   @override
   Null get sessionControls => null;
 
@@ -893,6 +1322,11 @@ class _Chats extends ChangeNotifier implements DesktopHostChats {
   DesktopHostChat? selected;
   @override
   List<DesktopHostMessage> messages = [];
+  @override
+  DesktopHostGroupQuote? get groupReply => null;
+  @override
+  bool isCurrentConversation(LinkPeer? peer, DesktopHostChat chat) =>
+      peer?.isClosed == false && identical(selected, chat);
   @override
   bool busy = false;
   @override
@@ -953,6 +1387,15 @@ class _Chats extends ChangeNotifier implements DesktopHostChats {
       error = failure.message;
     }
     notifyListeners();
+  }
+
+  @override
+  Future<bool> sendWithAttachments(
+    String text,
+    DesktopRemoteAttachments attachments,
+  ) async {
+    await send(text.trim());
+    return error == null;
   }
 
   void append(DesktopHostMessage message) {

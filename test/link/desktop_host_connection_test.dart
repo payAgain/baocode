@@ -18,14 +18,24 @@ void main() {
   late DesktopHostConnection client;
   late List<MemoryLinkNode> clientNodes;
   late Future<void> Function()? beforeBind;
+  late StreamController<List<LinkAdvert>> discovery;
+  late List<LinkAddress> dials;
+  late bool Function(LinkAddress)? canDial;
 
   DesktopHostConnection newClient() => DesktopHostConnection.withDependencies(
     store: store,
+    discover: () => discovery.stream,
     bind: (identity, relays) async {
       await beforeBind?.call();
       final node = platform.network.node(identity.id, relays: relays);
       clientNodes.add(node);
-      return node;
+      return _DialNode(node, (address) async {
+        dials.add(address);
+        if (canDial?.call(address) == false) {
+          throw const LinkClosedException('unreachable');
+        }
+        return node.connect(address);
+      });
     },
     device: () async => const DeviceInfo(
       name: 'Client Desktop',
@@ -43,14 +53,125 @@ void main() {
     store = _ClientStore();
     clientNodes = [];
     beforeBind = null;
+    discovery = StreamController<List<LinkAdvert>>.broadcast();
+    dials = [];
+    canDial = null;
     client = newClient();
   });
 
   tearDown(() async {
     client.dispose();
+    await discovery.close();
     await host.setEnabled(false);
     host.dispose();
     workspace.dispose();
+  });
+
+  Future<LinkAdvert> showNearbyHost() async {
+    final offer = (await host.beginPairing())!;
+    final advert = LinkAdvert(
+      name: 'Advertised Mac',
+      key: offer.key,
+      port: 47100,
+      pairing: true,
+      addresses: const ['192.168.1.5'],
+    );
+    client.startDiscovery();
+    discovery.add([advert]);
+    await Future<void>.delayed(Duration.zero);
+    return advert;
+  }
+
+  test('selecting a nearby host requires both users to approve', () async {
+    await client.load();
+    expect(discovery.hasListener, isFalse);
+    final advert = await showNearbyHost();
+    expect(client.nearbyHosts.map((host) => host.id), [advert.id]);
+    expect(clientNodes, isEmpty);
+    await client.pairNearby(advert.id);
+
+    expect(client.pendingNeedsApproval, isTrue);
+    expect(host.pending?.needsApproval, isTrue);
+    expect(client.pendingCode, host.pending!.code.join('  '));
+    expect(client.peer, isNull);
+    expect(store.records, isEmpty);
+    final confirmation = client.confirm();
+    await Future<void>.delayed(Duration.zero);
+    expect(client.waitingForHostApproval, isTrue);
+    expect(host.phones, isEmpty);
+    expect(client.peer, isNull);
+    expect(store.records, isEmpty);
+
+    host.approvePending();
+    await confirmation.timeout(const Duration(seconds: 2));
+    expect(client.waitingForHostApproval, isFalse);
+    expect(client.pendingCode, isNull);
+    expect(client.peer?.remote, advert.id);
+    expect(host.phones.single.id, clientNodes.single.id);
+    expect(await client.peer!.call(LinkMethods.state), isA<Map>());
+  });
+
+  test(
+    'cancelling a nearby pairing rolls back a racing host approval',
+    () async {
+      final advert = await showNearbyHost();
+      await client.pairNearby(advert.id);
+      final confirmation = client.confirm();
+      await Future<void>.delayed(Duration.zero);
+      expect(client.waitingForHostApproval, isTrue);
+      host.approvePending();
+      expect(host.phones, hasLength(1));
+      await client.cancelPairing();
+      await confirmation;
+      expect(client.pendingCode, isNull);
+      expect(client.peer, isNull);
+      expect(store.records, isEmpty);
+      expect(host.phones, isEmpty);
+    },
+  );
+
+  test(
+    'stopping discovery invalidates stale selections without dialing',
+    () async {
+      final advert = await showNearbyHost();
+      await client.stopDiscovery();
+      expect(discovery.hasListener, isFalse);
+      expect(client.nearbyHosts, isEmpty);
+      await client.pairNearby(advert.id);
+      expect(client.error, contains('no longer available'));
+      expect(dials, isEmpty);
+    },
+  );
+
+  test(
+    'rejected nearby pairing never authorizes or saves the client',
+    () async {
+      final advert = await showNearbyHost();
+      await client.pairNearby(advert.id);
+      final confirmation = client.confirm();
+      await Future<void>.delayed(Duration.zero);
+      host.rejectPending();
+      await confirmation;
+      expect(client.error, contains('rejected'));
+      expect(client.pendingCode, isNull);
+      expect(client.peer, isNull);
+      expect(host.phones, isEmpty);
+      expect(store.records, isEmpty);
+    },
+  );
+
+  test('a discovery failure leaves the literal invite usable', () async {
+    final advert = await showNearbyHost();
+    expect(client.nearbyHosts.single.id, advert.id);
+    discovery.addError(StateError('private platform details'));
+    await Future<void>.delayed(Duration.zero);
+    expect(client.discoveryError, isNot(contains('private')));
+    expect(client.discoveryError, isNotNull);
+    expect(client.discovering, isFalse);
+    expect(client.nearbyHosts, isEmpty);
+    await client.pair(host.offer!.uri);
+    await client.confirm();
+    expect(client.peer?.remote, advert.id);
   });
 
   test(
@@ -116,11 +237,63 @@ void main() {
     expect(await client.peer!.call(LinkMethods.state), isA<Map>());
   });
 
+  test('a matching LAN advert retries an offline saved identity', () async {
+    await pairAndConfirm();
+    final savedId = clientNodes.single.id;
+    final oldPeer = client.peer!;
+    client.dispose();
+    await oldPeer.done;
+
+    const moved = '192.168.2.70:47222';
+    canDial = (address) => address.addrs.firstOrNull == moved;
+    client = newClient();
+    await client.load();
+    expect(client.peer, isNull);
+    expect(discovery.hasListener, isFalse);
+    final failedDials = dials.length;
+    client.startDiscovery();
+
+    discovery.add([
+      LinkAdvert(
+        name: 'Test Mac',
+        key: LinkIdentity.generate().publicKey,
+        port: 47222,
+        pairing: true,
+        addresses: const ['192.168.2.70'],
+      ),
+    ]);
+    await Future<void>.delayed(Duration.zero);
+    expect(dials, hasLength(failedDials));
+
+    final reconnected = Completer<void>();
+    client.addListener(() {
+      if (client.peer != null && !reconnected.isCompleted) {
+        reconnected.complete();
+      }
+    });
+    discovery.add([
+      LinkAdvert(
+        name: 'Unverified update',
+        key: keyOfDeviceId(host.id)!,
+        port: 47222,
+        addresses: const ['192.168.2.70'],
+      ),
+    ]);
+    await reconnected.future.timeout(const Duration(seconds: 2));
+    expect(dials, hasLength(failedDials + 1));
+    expect(dials.last.id, host.id);
+    expect(dials.last.relays, isEmpty);
+    expect(client.hostName, 'Test Mac');
+    expect(clientNodes.last.id, savedId);
+    expect(host.phones.single.id, savedId);
+  });
+
   test('the invite relay is retained for reconnect', () async {
     const relay = 'https://relay.invalid';
     await host.pinRelay(relay);
     await pairAndConfirm();
     expect(clientNodes.single.relays, [relay]);
+    expect(dials.single.relays, [relay, ...defaultLinkRelays]);
 
     final connected = client.peer!;
     client.dispose();
@@ -128,6 +301,7 @@ void main() {
     client = newClient();
     await client.load();
     expect(clientNodes.last.relays, [relay]);
+    expect(dials.last.relays, [relay, ...defaultLinkRelays]);
     expect(client.peer?.remote, host.id);
   });
 
@@ -382,6 +556,37 @@ void main() {
     final record = jsonDecode(store.records.values.single) as Map;
     expect(record.keys.toSet(), {'identity', 'name', 'address', 'direct'});
   });
+}
+
+class _DialNode implements LinkNode {
+  _DialNode(this.node, this.dial);
+
+  final MemoryLinkNode node;
+  final Future<LinkConnection> Function(LinkAddress) dial;
+
+  @override
+  String get id => node.id;
+
+  @override
+  Stream<LinkConnection> get incoming => node.incoming;
+
+  @override
+  Future<LinkConnection> connect(
+    LinkAddress address, {
+    Duration timeout = const Duration(seconds: 15),
+  }) => dial(address);
+
+  @override
+  Future<LinkNodeInfo> info() => node.info();
+
+  @override
+  Stream<LinkNodeInfo> get changes => node.changes;
+
+  @override
+  void networkChanged() => node.networkChanged();
+
+  @override
+  Future<void> close() => node.close();
 }
 
 class _ClientStore implements SecretStore {

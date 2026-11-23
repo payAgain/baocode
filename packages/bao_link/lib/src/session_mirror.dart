@@ -6,7 +6,7 @@ import 'protocol.dart';
 /// against what it sent before:
 ///
 /// - `"partial": true`: of `live`, `interaction`, `choices`, `changes`,
-///   `tasks`, `earlier`, `goal`, `context`, `quota`, only those that
+///   `tasks`, `earlier`, `goal`, `context`, `quota`, `actions`, only those that
 ///   changed are there (null: gone);
 /// - `"append": {"index", "path", "text"}`: the item at `index` (the one
 ///   before `start`) is as before but for `text` added at the end of the
@@ -26,6 +26,7 @@ abstract final class LinkSessionWire {
     'goal',
     'context',
     'quota',
+    'actions',
   ];
 }
 

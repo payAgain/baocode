@@ -1,6 +1,13 @@
 import 'dart:async';
 
-import 'package:bao_link/bao_link.dart' show LinkMethods, LinkPeer, ProjectInfo;
+import 'package:bao_link/bao_link.dart'
+    show
+        LinkMethods,
+        LinkPath,
+        LinkPathKind,
+        LinkPeer,
+        LinkSessionStatus,
+        ProjectInfo;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -27,8 +34,14 @@ import 'desktop_host_composer.dart';
 import 'desktop_host_connection.dart';
 import 'desktop_host_controls.dart';
 import 'desktop_host_project_history.dart';
+import 'desktop_remote_activity.dart';
+import 'desktop_remote_session_actions.dart';
 import 'desktop_host_session_controls.dart';
+import 'desktop_remote_people.dart';
+import 'desktop_remote_media.dart';
+import 'desktop_remote_media_preview.dart';
 import 'desktop_remote_rail.dart';
+import 'desktop_remote_project_tools.dart';
 
 typedef DesktopHostChatKey = ({String kind, String id});
 
@@ -91,7 +104,9 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   final _inviteFocus = FocusNode();
   bool _working = false;
   bool _sidebarHidden = false;
+  ({LinkPeer peer, DesktopHostChatKey? editor})? _peopleDock;
   bool _openingInvite = false;
+  bool _browsing = false;
   bool _leaving = false;
   bool _confirmingForget = false;
   String? _confirmingCode;
@@ -113,8 +128,97 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   bool get _showInvite => _connection.pendingCode == null && !_stored;
   bool get _chatBusy => _chatRequest != null || _chats.busy;
 
+  void _openPeople(LinkPeer peer, {DesktopHostChatKey? editor}) {
+    if (!_online || peer.isClosed || !identical(_connection.peer, peer)) return;
+    if (editor != null &&
+        (_chats.selected?.kind != editor.kind ||
+            _chats.selected?.id != editor.id)) {
+      return;
+    }
+    setState(() => _peopleDock = (peer: peer, editor: editor));
+  }
+
+  Widget _withPeopleDock({
+    required double width,
+    required bool wide,
+    required LinkPeer? peer,
+    required Widget child,
+  }) {
+    final dock = switch (_peopleDock) {
+      final dock? when identical(dock.peer, peer) && !dock.peer.isClosed =>
+        dock,
+      _ => null,
+    };
+    // Leave room for the conversation when the sidebar is also open.
+    final panelWidth = width < 1050 ? 300.0 : 360.0;
+    final sideBySide = dock != null && wide;
+    final compact = dock != null && !sideBySide;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        PositionedDirectional(
+          start: 0,
+          end: sideBySide ? panelWidth + 1 : 0,
+          top: 0,
+          bottom: 0,
+          child: Offstage(
+            offstage: compact,
+            child: ExcludeFocus(
+              excluding: compact,
+              child: TickerMode(enabled: !compact, child: child),
+            ),
+          ),
+        ),
+        if (dock != null)
+          PositionedDirectional(
+            top: 0,
+            bottom: 0,
+            end: 0,
+            width: sideBySide ? panelWidth + 1 : width,
+            child: Row(
+              children: [
+                SizedBox(
+                  width: sideBySide ? 1 : 0,
+                  child: sideBySide ? const VerticalDivider(width: 1) : null,
+                ),
+                Expanded(
+                  child: DesktopRemotePeopleManager(
+                    peer: dock.peer,
+                    initialBotId: dock.editor?.kind == 'bot'
+                        ? dock.editor?.id
+                        : null,
+                    initialGroupId: dock.editor?.kind == 'group'
+                        ? dock.editor?.id
+                        : null,
+                    compact: compact,
+                    onCatalog: _chats.acceptCatalogReply,
+                    isCurrentPeer: (expected) =>
+                        mounted &&
+                        !_leaving &&
+                        _peopleDock == dock &&
+                        identical(_connection.peer, expected),
+                    onClose: () {
+                      if (_peopleDock == dock) {
+                        setState(() => _peopleDock = null);
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
   @override
   void dispose() {
+    if (_browsing) {
+      final connection = _connection;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(connection.stopDiscovery());
+      });
+    }
     final chats = _chats;
     final selected = chats.selected;
     if (selected != null || _chatRequest != null) {
@@ -257,6 +361,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     if (_leaving) return;
     _leaving = true;
     if (_openingInvite ||
+        (_confirmingCode != null && _connection.waitingForHostApproval) ||
         (_connection.pendingCode != null && _confirmingCode == null)) {
       unawaited(_connection.cancelPairing().onError<Exception>((_, _) {}));
     }
@@ -490,15 +595,34 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     _chats.closeChat();
   }
 
-  Future<bool> _send((String, String, String) chatKey, String draft) async {
-    final chat = _chats.selected;
-    final message = draft.trim();
-    if (message.isEmpty ||
-        chat == null ||
-        chatKey != (_connection.peer?.remote, chat.kind, chat.id)) {
-      return false;
-    }
-    return _runChat((chats) => chats.send(message));
+  bool Function() _conversationGuard(LinkPeer? peer, DesktopHostChat chat) {
+    final connection = _connection;
+    final chats = _chats;
+    return () =>
+        mounted &&
+        !_leaving &&
+        _online &&
+        _confirmingCode == null &&
+        identical(_connection, connection) &&
+        identical(connection.peer, peer) &&
+        identical(_chats, chats) &&
+        chats.isCurrentConversation(peer, chat);
+  }
+
+  Future<bool> _send(
+    bool Function() isCurrent,
+    String draft,
+    DesktopRemoteAttachments attachments,
+  ) async {
+    if (!isCurrent()) return false;
+    var confirmed = false;
+    await _runChat((chats) async {
+      if (!isCurrent()) return;
+      final request = _chatRequest;
+      final sent = await chats.sendWithAttachments(draft, attachments);
+      confirmed = sent && identical(_chatRequest, request);
+    });
+    return confirmed && isCurrent();
   }
 
   @override
@@ -517,6 +641,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
               final host = code == null ? _connection.peer?.remote : null;
               final selected = host == null ? null : _chats.selected;
               final wide = host != null && constraints.maxWidth >= 880;
+              final showSidebar = wide && (!_sidebarHidden || selected == null);
               final catalog = _catalog(
                 text,
                 code,
@@ -529,12 +654,22 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                   ? DesktopRemoteRail(
                       peer: _connection.peer!,
                       chat: selected,
-                      child: _conversation(
-                        text,
-                        host,
-                        selected,
-                        error,
-                        wide: wide,
+                      isCurrent: _conversationGuard(_connection.peer, selected),
+                      child: DesktopRemoteActivity(
+                        session: DesktopRemoteActivitySession.fromChats(
+                          _chats,
+                          _connection.peer,
+                          selected,
+                        ),
+                        hostName: _connection.hostName ?? text.host,
+                        builder: (_, button) => _conversation(
+                          text,
+                          host,
+                          selected,
+                          error,
+                          wide: wide,
+                          activityButton: button,
+                        ),
                       ),
                     )
                   : _conversation(text, host, selected, error, wide: wide);
@@ -571,34 +706,40 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                   if (!wide) switcher,
                   if (!wide) const Divider(height: 1),
                   Expanded(
-                    child: Row(
-                      children: [
-                        if (wide && (!_sidebarHidden || selected == null)) ...[
-                          SizedBox(
-                            width: 280,
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  switcher,
-                                  Expanded(child: catalog),
-                                ],
+                    child: _withPeopleDock(
+                      width: constraints.maxWidth,
+                      wide: wide,
+                      peer: host == null ? null : _connection.peer,
+                      child: Row(
+                        children: [
+                          if (showSidebar) ...[
+                            SizedBox(
+                              width: 280,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    switcher,
+                                    Expanded(child: catalog),
+                                  ],
+                                ),
                               ),
                             ),
+                            const VerticalDivider(width: 1),
+                          ],
+                          Expanded(
+                            key: const ValueKey('host-content'),
+                            child: _contentPane(
+                              wide || selected != null ? conversation : catalog,
+                              session: selected != null,
+                            ),
                           ),
-                          const VerticalDivider(width: 1),
                         ],
-                        Expanded(
-                          key: const ValueKey('host-content'),
-                          child: _contentPane(
-                            wide || selected != null ? conversation : catalog,
-                            session: selected != null,
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
                   ),
                 ],
@@ -630,6 +771,12 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
       child: pane,
     ),
   );
+
+  bool _currentProject(LinkPeer expected, String id) =>
+      mounted &&
+      _online &&
+      identical(_connection.peer, expected) &&
+      _chats.projects.any((p) => p.id == id);
 
   Widget _catalog(
     _HostText text,
@@ -673,6 +820,21 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 _pairing(text)
               else if (_stored)
                 _host(text),
+              if (_connection.peer case final peer?
+                  when code == null && !peer.isClosed)
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: TextButton.icon(
+                    onPressed: _busy ? null : () => _openPeople(peer),
+                    icon: const Icon(Icons.people_outline, size: 16),
+                    label: Text(text.managePeople),
+                  ),
+                ),
+              if (_stored &&
+                  !_online &&
+                  code == null &&
+                  _connection.discoverySupported)
+                _nearby(text),
               if (_online && showChatStatus) ...[
                 const SizedBox(height: 16),
                 if (_chatBusy) _Progress(text.loadingChats),
@@ -708,18 +870,43 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                   child: _CatalogRow(
                     key: ValueKey(('folder', folder.id)),
                     label: folder.name,
-                    action: IconButton(
-                      key: ValueKey(('new-session', folder.id)),
-                      tooltip: text.newSession,
-                      constraints: const BoxConstraints.tightFor(
-                        width: 28,
-                        height: 28,
-                      ),
-                      padding: EdgeInsets.zero,
-                      icon: const Icon(Icons.add, size: 16),
-                      onPressed: _busy || _chatBusy
-                          ? null
-                          : () => _createSession(folder),
+                    leading: DesktopRemoteProjectIcon(
+                      peer: _connection.peer,
+                      project: folder,
+                      size: 16,
+                      isCurrent: _currentProject,
+                      color: AppColors.textFaint,
+                      fallback: _collapsedFolders.contains((host, folder.id))
+                          ? Codicons.folder
+                          : Codicons.folderOpened,
+                    ),
+                    action: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          key: ValueKey(('new-session', folder.id)),
+                          tooltip: text.newSession,
+                          constraints: const BoxConstraints.tightFor(
+                            width: 28,
+                            height: 28,
+                          ),
+                          padding: EdgeInsets.zero,
+                          icon: const Icon(Icons.add, size: 16),
+                          onPressed: _busy || _chatBusy
+                              ? null
+                              : () => _createSession(folder),
+                        ),
+                        if (_connection.peer case final peer?)
+                          DesktopRemoteProjectActions(
+                            peer: peer,
+                            project: folder,
+                            hostName: _connection.hostName ?? text.host,
+                            isCurrent: _currentProject,
+                            enabled: !_busy && !_chatBusy,
+                            onError: (message) =>
+                                setState(() => _localChatError = message),
+                          ),
+                      ],
                     ),
                     icon: _collapsedFolders.contains((host, folder.id))
                         ? Codicons.folder
@@ -805,6 +992,18 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
           'bot' => Icons.smart_toy_outlined,
           _ => Icons.groups_outlined,
         },
+        activity: switch (chat.status) {
+          LinkSessionStatus.needsInput => Tooltip(
+            message: strings.sidebarNeedsInput,
+            child: const Icon(Icons.pending_actions, size: 14),
+          ),
+          LinkSessionStatus.running => Tooltip(
+            message: strings.sidebarRunning,
+            child: const Icon(Icons.play_arrow, size: 14),
+          ),
+          _ => null,
+        },
+        unread: chat.unread,
         label: chat.title,
         updatedAt: chat.updatedAt,
       );
@@ -846,13 +1045,81 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
           enabled: !_busy,
           iconSize: 16,
           itemBuilder: (_) => [
+            if (_online)
+              PopupMenuItem(
+                value: 'connectionInfo',
+                child: Text(text.connectionInfo),
+              ),
             PopupMenuItem(value: 'forget', child: Text(text.forget)),
           ],
-          onSelected: (_) => _forget(text),
+          onSelected: (action) {
+            if (action == 'connectionInfo') {
+              _showConnectionInfo(text);
+            } else if (action == 'forget') {
+              _forget(text);
+            }
+          },
         ),
       ],
     ),
   );
+
+  void _showConnectionInfo(_HostText text) {
+    final connection = _connection;
+    final peer = connection.peer;
+    if (!_online || peer == null || peer.isClosed || _leaving) return;
+
+    Future<LinkPath> readPath() async {
+      try {
+        return await peer.connection.path();
+      } on Object {
+        return LinkPath.none;
+      }
+    }
+
+    final path = readPath();
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(text.connectionInfo),
+        content: ListenableBuilder(
+          listenable: connection,
+          builder: (context, _) => FutureBuilder<LinkPath>(
+            future: path,
+            builder: (context, result) {
+              if (!mounted ||
+                  _leaving ||
+                  !identical(_connection, connection) ||
+                  !identical(connection.peer, peer) ||
+                  peer.isClosed) {
+                return Text(text.offline);
+              }
+              final path = result.data;
+              if (path == null) return Text(text.working);
+              if (path.kind == LinkPathKind.none) {
+                return Text(text.routeUnavailable);
+              }
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(text.route(path.kind)),
+                  if (path.rtt case final rtt? when !rtt.isNegative)
+                    Text(text.latency(rtt.inMilliseconds)),
+                ],
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(MaterialLocalizations.of(context).closeButtonLabel),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _conversation(
     _HostText text,
@@ -860,6 +1127,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     DesktopHostChat chat,
     String? connectionError, {
     required bool wide,
+    Widget? activityButton,
   }) {
     final history = chat.kind == 'project' ? _chats.projectHistory : null;
     // The native history lays out its own text column and paints the minimap
@@ -871,8 +1139,33 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     final hasEarlier = _chats.hasEarlier;
     final error = _localChatError ?? _chats.error;
     final connection = _connection;
+    final peer = connection.peer;
+    final isCurrent = _conversationGuard(peer, chat);
+    final groupReply = chat.kind == 'group' ? _chats.groupReply : null;
+    final canQuote =
+        chat.kind == 'group' && !_busy && !_chatBusy && isCurrent();
+    void selectReply(DesktopHostGroupQuote reply, {bool cancel = false}) {
+      if (!_busy && !_chatBusy && isCurrent()) {
+        _chats.selectGroupReply(peer, chat, reply, cancel: cancel);
+      }
+    }
+
     final chatKey = (host, chat.kind, chat.id);
     final drafts = _drafts[connection] ??= {};
+    Future<bool> send(String draft, [DesktopRemoteAttachments? attachments]) {
+      if (peer == null) return Future.value(false);
+      return _send(
+        isCurrent,
+        draft,
+        attachments ??
+            DesktopRemoteAttachments(
+              (peer, chat.kind, chat.id, chat.projectId),
+              const [],
+              const [],
+            ),
+      );
+    }
+
     return Column(
       key: ValueKey(chatKey),
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -901,6 +1194,21 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                   },
           ),
           trailing: [
+            ?activityButton,
+            if ((chat.kind == 'bot' || chat.kind == 'group') && peer != null)
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                tooltip: chat.kind == 'bot'
+                    ? text.botSettings
+                    : text.groupSettings,
+                icon: const Icon(Icons.settings_outlined, size: 16),
+                onPressed: _busy || _chatBusy
+                    ? null
+                    : () => _openPeople(
+                        peer,
+                        editor: (kind: chat.kind, id: chat.id),
+                      ),
+              ),
             if (wide) ...[
               if (_sidebarHidden)
                 IconButton(
@@ -941,23 +1249,30 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 const Divider(height: 1),
                 Expanded(
                   child: history != null
-                      ? DesktopHostProjectHistory(
-                          feed: history,
-                          earlierEnabled: !_busy && !_chatBusy,
-                          emptyLabel: !_chatBusy && error == null
-                              ? text.emptyChat
-                              : null,
-                          onPickReply: _busy || _chatBusy
-                              ? null
-                              : (reply) {
-                                  if (_busy ||
-                                      _chatBusy ||
-                                      (drafts[chatKey]?.trim().isNotEmpty ??
-                                          false)) {
-                                    return;
-                                  }
-                                  setState(() => drafts[chatKey] = reply);
-                                },
+                      ? DesktopRemoteMessageImages(
+                          peer: peer,
+                          chat: chat,
+                          images: _chats.projectImages(peer, chat),
+                          expandChild: true,
+                          isCurrent: isCurrent,
+                          child: DesktopHostProjectHistory(
+                            feed: history,
+                            earlierEnabled: !_busy && !_chatBusy,
+                            emptyLabel: !_chatBusy && error == null
+                                ? text.emptyChat
+                                : null,
+                            onPickReply: _busy || _chatBusy
+                                ? null
+                                : (reply) {
+                                    if (_busy ||
+                                        _chatBusy ||
+                                        (drafts[chatKey]?.trim().isNotEmpty ??
+                                            false)) {
+                                      return;
+                                    }
+                                    setState(() => drafts[chatKey] = reply);
+                                  },
+                          ),
                         )
                       : messages.isEmpty && !hasEarlier
                       ? Center(
@@ -984,21 +1299,71 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                             }
                             final message =
                                 messages[messages.length - 1 - index];
-                            return _MessageBubble(
-                              message: message,
-                              sender: message.mine ? text.you : message.sender,
-                              group: chat.kind == 'group',
+                            final reference = message.groupReference;
+                            final replyTarget = message.groupReplyTarget;
+                            return DesktopRemoteMessageImages(
+                              peer: peer,
+                              chat: chat,
+                              images: message.images,
+                              isCurrent: isCurrent,
+                              child: _MessageBubble(
+                                message: message,
+                                sender: message.mine
+                                    ? text.you
+                                    : message.sender,
+                                group: chat.kind == 'group',
+                                quote: reference == null
+                                    ? null
+                                    : _GroupQuoteBanner(
+                                        label: text.quotedMessage(
+                                          reference.sequence,
+                                          reference.target,
+                                        ),
+                                        preview: switch (reference.target) {
+                                          final target? => text.quotePreview(
+                                            target,
+                                          ),
+                                          null => '',
+                                        },
+                                      ),
+                                replyTooltip: text.replyToMessage,
+                                onReply: canQuote && replyTarget != null
+                                    ? () => selectReply(replyTarget)
+                                    : null,
+                              ),
                             );
                           },
                         ),
                 ),
                 const Divider(height: 1),
+                if (groupReply != null)
+                  _GroupQuoteBanner(
+                    label: text.replyingTo(groupReply),
+                    preview: text.quotePreview(groupReply),
+                    trailing: IconButton(
+                      tooltip: text.cancelReply,
+                      onPressed: canQuote
+                          ? () => selectReply(groupReply, cancel: true)
+                          : null,
+                      icon: const Icon(Icons.close, size: 16),
+                    ),
+                  ),
+                if (chat.kind == 'project')
+                  DesktopRemoteSessionActions(
+                    peer: connection.peer,
+                    chat: chat,
+                    chats: _chats,
+                    enabled: !_busy && !_chatBusy,
+                  ),
                 composerColumn(
                   _HostComposer(
                     key: ObjectKey(connection),
                     initialDraft: drafts[chatKey] ?? '',
                     busy: _busy || _chatBusy,
                     controls: _chats.sessionControls,
+                    peer: peer,
+                    chat: chat,
+                    isMediaCurrent: isCurrent,
                     project: chat.kind == 'project'
                         ? _chats.projects
                               .where((p) => p.id == chat.projectId)
@@ -1011,7 +1376,8 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                         drafts[chatKey] = draft;
                       }
                     },
-                    onSend: (draft) => _send(chatKey, draft),
+                    onSend: send,
+                    onSendWithAttachments: send,
                   ),
                 ),
               ],
@@ -1022,6 +1388,52 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     );
   }
 
+  Widget _nearby(_HostText text) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      TextButton.icon(
+        icon: const Icon(Icons.radar, size: 16),
+        label: Text(text.nearby),
+        onPressed: _busy
+            ? null
+            : () {
+                setState(() => _browsing = !_browsing);
+                if (_browsing) {
+                  _connection.startDiscovery();
+                } else {
+                  unawaited(_connection.stopDiscovery());
+                }
+              },
+      ),
+      if (_browsing && _connection.discoveryError != null)
+        Text(text.discoveryFailed),
+      if (_browsing &&
+          _connection.discovering &&
+          _connection.nearbyHosts.isEmpty)
+        Text(text.searching, style: SettingsText.description),
+      if (_browsing && !_stored)
+        for (final advert in _connection.nearbyHosts)
+          TextButton.icon(
+            icon: const Icon(Codicons.deviceDesktop, size: 16),
+            label: Text(
+              advert.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            onPressed: _busy
+                ? null
+                : () => _runConnection((connection) async {
+                    _openingInvite = true;
+                    try {
+                      await connection.pairNearby(advert.id);
+                    } finally {
+                      _openingInvite = false;
+                    }
+                  }),
+          ),
+    ],
+  );
+
   Widget _pairing(_HostText text) => _HostCard(
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1029,6 +1441,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
         Text(text.pairTitle, style: SettingsText.title),
         const SizedBox(height: 6),
         Text(text.pairDescription, style: SettingsText.description),
+        if (_connection.discoverySupported) _nearby(text),
         const SizedBox(height: 16),
         TextField(
           controller: _invite,
@@ -1074,6 +1487,9 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
         Text(text.codeTitle, style: SettingsText.title),
         const SizedBox(height: 6),
         Text(text.compare, style: SettingsText.description),
+        if (_connection.pendingNeedsApproval ||
+            _connection.waitingForHostApproval)
+          Text(text.bothApprove, style: SettingsText.description),
         const SizedBox(height: 14),
         Semantics(
           liveRegion: true,
@@ -1092,7 +1508,9 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
               child: Text(text.confirm),
             ),
             OutlinedButton(
-              onPressed: _busy
+              onPressed: _connection.waitingForHostApproval
+                  ? () => _connection.cancelPairing()
+                  : _busy
                   ? null
                   : () => _runConnection(
                       (connection) => connection.cancelPairing(),
@@ -1113,6 +1531,10 @@ class _HostComposer extends StatelessWidget {
     required this.busy,
     required this.onChanged,
     required this.onSend,
+    required this.onSendWithAttachments,
+    required this.peer,
+    required this.chat,
+    required this.isMediaCurrent,
     this.controls,
     this.project,
   });
@@ -1121,6 +1543,11 @@ class _HostComposer extends StatelessWidget {
   final bool busy;
   final ValueChanged<String> onChanged;
   final Future<bool> Function(String) onSend;
+  final Future<bool> Function(String, DesktopRemoteAttachments)
+  onSendWithAttachments;
+  final LinkPeer? peer;
+  final DesktopHostChat chat;
+  final bool Function() isMediaCurrent;
   final DesktopHostSessionControls? controls;
   final ProjectInfo? project;
 
@@ -1138,6 +1565,10 @@ class _HostComposer extends StatelessWidget {
           sendLabel: text.send,
           onChanged: onChanged,
           onSend: onSend,
+          onSendWithAttachments: onSendWithAttachments,
+          peer: peer,
+          chat: chat,
+          isMediaCurrent: isMediaCurrent,
           controls: controls,
         ),
         DesktopHostSessionFooter(project: project, controls: controls),
@@ -1197,6 +1628,9 @@ class _CatalogRow extends StatelessWidget {
     required this.icon,
     this.trailing,
     this.action,
+    this.leading,
+    this.activity,
+    this.unread = 0,
     this.updatedAt,
     this.selected = false,
     this.indent = 0,
@@ -1206,6 +1640,9 @@ class _CatalogRow extends StatelessWidget {
   final IconData icon;
   final IconData? trailing;
   final Widget? action;
+  final Widget? leading;
+  final Widget? activity;
+  final int unread;
   final DateTime? updatedAt;
   final bool selected;
   final double indent;
@@ -1225,7 +1662,7 @@ class _CatalogRow extends StatelessWidget {
         padding: EdgeInsets.only(left: 8 + indent, right: 8),
         child: Row(
           children: [
-            Icon(icon, size: 15, color: AppColors.textFaint),
+            leading ?? Icon(icon, size: 15, color: AppColors.textFaint),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -1235,6 +1672,21 @@ class _CatalogRow extends StatelessWidget {
                 style: TextStyle(fontSize: 13, color: AppColors.textPrimary),
               ),
             ),
+            ?activity,
+            if (unread > 0)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Tooltip(
+                  message: context.l10n.sidebarUnread,
+                  child: Text(
+                    '$unread',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                ),
+              ),
             if (updatedAt != null)
               ValueListenableBuilder<bool>(
                 valueListenable: SidebarTimes.shown,
@@ -1263,11 +1715,17 @@ class _MessageBubble extends StatelessWidget {
     required this.message,
     required this.sender,
     required this.group,
+    required this.replyTooltip,
+    this.quote,
+    this.onReply,
   });
 
   final DesktopHostMessage message;
   final String sender;
   final bool group;
+  final String replyTooltip;
+  final Widget? quote;
+  final VoidCallback? onReply;
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -1277,19 +1735,79 @@ class _MessageBubble extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (group && sender.isNotEmpty) ...[
-            Text(
-              sender,
-              style: SettingsText.heading,
-              textAlign: message.mine ? TextAlign.end : TextAlign.start,
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    sender,
+                    style: SettingsText.heading,
+                    textAlign: message.mine ? TextAlign.end : TextAlign.start,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (message.groupReplyTarget != null)
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: replyTooltip,
+                    onPressed: onReply,
+                    icon: const Icon(Icons.reply, size: 16),
+                  ),
+              ],
             ),
             const SizedBox(height: 4),
           ],
+          ?quote,
           if (message.mine)
             UserMessageBubble(text: message.text, textOnly: true)
           else
             MarkdownView(message.text, textOnly: true),
         ],
       ),
+    ),
+  );
+}
+
+class _GroupQuoteBanner extends StatelessWidget {
+  const _GroupQuoteBanner({
+    required this.label,
+    required this.preview,
+    this.trailing,
+  });
+
+  final String label;
+  final String preview;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 8, 4),
+    child: Row(
+      children: [
+        const Icon(Icons.format_quote, size: 16),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: SettingsText.heading,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              if (preview.isNotEmpty)
+                Text(
+                  preview,
+                  style: SettingsText.description,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+            ],
+          ),
+        ),
+        ?trailing,
+      ],
     ),
   );
 }
@@ -1360,6 +1878,36 @@ class _HostText {
   final bool _zh;
   String get title => _zh ? '远程工作区' : 'Remote workspace';
   String get switchToLocal => _zh ? '切回本地' : 'Switch to local';
+  String get managePeople =>
+      _zh ? '管理机器人、群聊和资料' : 'Manage bots, groups & profile';
+  String get botSettings => _zh ? '机器人设置' : 'Bot settings';
+  String get groupSettings => _zh ? '群聊设置' : 'Group settings';
+  String get replyToMessage => _zh ? '引用回复' : 'Reply to message';
+  String get cancelReply => _zh ? '取消引用' : 'Cancel reply';
+  String replyingTo(DesktopHostGroupQuote reply) {
+    final target = '#${reply.sequence} · ${reply.mine ? you : reply.sender}';
+    return _zh ? '正在回复 $target' : 'Replying to $target';
+  }
+
+  String quotedMessage(int sequence, DesktopHostGroupQuote? quote) {
+    final sender = quote == null ? '' : ' · ${quote.mine ? you : quote.sender}';
+    return _zh ? '引用 #$sequence$sender' : 'Quoted #$sequence$sender';
+  }
+
+  String quotePreview(DesktopHostGroupQuote quote) => quote.preview.isNotEmpty
+      ? quote.preview
+      : quote.hasImage
+      ? (_zh ? '图片' : 'Image')
+      : '';
+  String get nearby => _zh ? '附近的电脑' : 'Nearby computers';
+  String get bothApprove => _zh
+      ? '请在两台电脑上核对安全码并确认配对。'
+      : 'Compare the code and confirm pairing on both computers.';
+  String get searching =>
+      _zh ? '正在查找局域网中的配对主机…' : 'Searching for pairing hosts on this network…';
+  String get discoveryFailed => _zh
+      ? '局域网搜索失败，可使用配对链接。'
+      : 'Could not search the local network. Use a pairing link.';
   String get pairTitle => _zh ? '配对一台电脑' : 'Pair a Host';
   String get pairDescription => _zh
       ? '在要连接的电脑上打开 BaoCode 的「设置 → 手机」，显示配对二维码并复制链接。'
@@ -1395,6 +1943,15 @@ class _HostText {
   String get manage => _zh ? '管理会话' : 'Manage chat';
   String get newSession => _zh ? '新建会话' : 'New chat';
   String get hostOptions => _zh ? '主机选项' : 'Host options';
+  String get connectionInfo => _zh ? '连接信息' : 'Connection info';
+  String get routeUnavailable => _zh ? '暂无连接路径信息' : 'Route unavailable';
+  String route(LinkPathKind kind) => switch (kind) {
+    LinkPathKind.lan => _zh ? '局域网' : 'Local network',
+    LinkPathKind.direct => _zh ? '直连' : 'Direct',
+    LinkPathKind.relay => _zh ? '中继' : 'Relay',
+    LinkPathKind.none => routeUnavailable,
+  };
+  String latency(int ms) => _zh ? '往返时延：$ms 毫秒' : 'Round-trip time: $ms ms';
   String get sidebar => _zh ? '显示或隐藏侧栏' : 'Toggle sidebar';
   String get backToChats => _zh ? '返回主机会话列表' : 'Back to host chats';
   String get closeChat => _zh ? '关闭会话' : 'Close chat';

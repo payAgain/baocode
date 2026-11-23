@@ -9,6 +9,9 @@ import '../chat/chat_models.dart';
 import 'chat_codec.dart';
 import 'desktop_host_project_history_feed.dart';
 import 'desktop_host_session_controls.dart';
+import 'desktop_remote_media.dart';
+import 'desktop_remote_media_preview.dart';
+import 'desktop_remote_session_actions_snapshot.dart';
 
 class DesktopHostChat {
   const DesktopHostChat({
@@ -19,6 +22,8 @@ class DesktopHostChat {
     this.updatedAt,
     this.pinned = false,
     this.provisional = false,
+    this.status = LinkSessionStatus.idle,
+    this.unread = 0,
   });
 
   final String id;
@@ -28,6 +33,8 @@ class DesktopHostChat {
   final DateTime? updatedAt;
   final bool pinned;
   final bool provisional;
+  final LinkSessionStatus status;
+  final int unread;
 
   (String, String) get _key => (kind, id);
 }
@@ -37,17 +44,43 @@ class DesktopHostMessage {
     required this.text,
     required this.sender,
     required this.mine,
+    this.images = const [],
+    this.groupReplyTarget,
+    this.groupReference,
   });
 
   final String text;
   final String sender;
   final bool mine;
+  final List<DesktopRemoteImage> images;
+  final DesktopHostGroupQuote? groupReplyTarget;
+  final ({int sequence, DesktopHostGroupQuote? target})? groupReference;
+}
+
+class DesktopHostGroupQuote {
+  const DesktopHostGroupQuote._(
+    this._follow, {
+    required this.sequence,
+    required this.sender,
+    required this.mine,
+    required this.preview,
+    required this.hasImage,
+  });
+
+  final Object _follow;
+  final int sequence;
+  final String sender;
+  final bool mine;
+  final String preview;
+  final bool hasImage;
 }
 
 /// The paired desktop's catalog and one open chat, over its existing link.
 /// The caller owns the peer. A new peer with the same authenticated identity
 /// restores selection, and [reset] also forgets the selection and catalog.
 class DesktopHostChats extends ChangeNotifier {
+  DesktopHostChats({this.onCatalog});
+  final void Function(LinkPeer, LinkState)? onCatalog;
   static const _pageSize = 50;
   static const _uncertain =
       'The host did not confirm delivery. Check the conversation before sending again.';
@@ -89,6 +122,56 @@ class DesktopHostChats extends ChangeNotifier {
     _ => null,
   };
   List<DesktopHostMessage> get messages => _view?.messages ?? const [];
+
+  DesktopHostGroupQuote? get groupReply => _view?.groupReply;
+
+  void selectGroupReply(
+    LinkPeer? peer,
+    DesktopHostChat chat,
+    DesktopHostGroupQuote reply, {
+    bool cancel = false,
+  }) {
+    if (busy || !isCurrentConversation(peer, chat)) return;
+    final view = _view!;
+    if (!view.group ||
+        !identical(reply._follow, view.groupIdentity) ||
+        (cancel && !identical(view.groupReply, reply))) {
+      return;
+    }
+    view.groupReply = cancel ? null : reply;
+    notifyListeners();
+  }
+
+  /// Match a captured authenticated conversation, even between UI rebuilds.
+  bool isCurrentConversation(LinkPeer? peer, DesktopHostChat chat) {
+    final view = _view;
+    final selected = _selected;
+    return peer != null &&
+        !peer.isClosed &&
+        identical(_peer, peer) &&
+        view != null &&
+        identical(view.peer, peer) &&
+        view.ready &&
+        !view.opening &&
+        selected?.kind == chat.kind &&
+        selected?.id == chat.id &&
+        selected?.projectId == chat.projectId;
+  }
+
+  List<DesktopRemoteImage> projectImages(LinkPeer? peer, DesktopHostChat chat) {
+    if (chat.kind != 'project' || !isCurrentConversation(peer, chat)) {
+      return const [];
+    }
+    final recent = _view!.sessionItems.reversed.take(100).toList();
+    return DesktopRemoteImage.projectItems([
+      for (final item in recent.reversed)
+        if (item case {'t': 'text', 'text': final String text})
+          {'t': 'text', 'text': _visibleText(text)}
+        else
+          item,
+    ]);
+  }
+
   bool get hasEarlier => _view?.hasEarlier ?? false;
   bool get busy =>
       _loadingState ||
@@ -99,7 +182,12 @@ class DesktopHostChats extends ChangeNotifier {
       _sendErrors[_selected?._key] ??
       _view?.error ??
       _stateError ??
-      (_view?.interaction == true ? _approval : null) ??
+      (_view?.interaction == true &&
+              !(_selected?.kind == 'project' &&
+                  decodeRemoteInteraction(_view?.actionState['interaction']) !=
+                      null)
+          ? _approval
+          : null) ??
       (_selected != null && _view == null && _peer != null && !_loadingState
           ? 'The conversation is not currently available on the host.'
           : null);
@@ -190,11 +278,24 @@ class DesktopHostChats extends ChangeNotifier {
     }
   }
 
+  /// Explicit state reads also advance the host's push deduplication, so a
+  /// child of the remote workspace must forward the reply to the catalog.
+  void acceptCatalogReply(LinkPeer peer, Map<String, Object?> state) {
+    if (_disposed || !identical(_peer, peer) || peer.isClosed) return;
+    try {
+      // Like a state event, this supersedes the initial bind request.
+      _applyState(peer, state, pushed: true);
+    } on Object {
+      // Leave the last usable catalog in place after a malformed reply.
+    }
+  }
+
   void _applyState(LinkPeer peer, Object? data, {bool pushed = false}) {
     if (data is! Map<String, Object?> || !data.containsKey('device')) {
       throw const FormatException('Invalid host state');
     }
     final state = LinkState.fromJson(data);
+    onCatalog?.call(peer, state);
     if (pushed) _stateEventSeen = true;
     final oldBotSessions = _botSessions;
     _botSessions = {for (final bot in state.bots) bot.id: bot.session};
@@ -210,6 +311,8 @@ class DesktopHostChats extends ChangeNotifier {
       String? projectId,
       DateTime? updatedAt,
       bool pinned = false,
+      LinkSessionStatus status = LinkSessionStatus.idle,
+      int unread = 0,
     }) {
       if (id.isEmpty) return;
       entries[(kind, id)] = DesktopHostChat(
@@ -219,6 +322,8 @@ class DesktopHostChats extends ChangeNotifier {
         projectId: projectId,
         updatedAt: updatedAt,
         pinned: pinned,
+        status: status,
+        unread: unread,
       );
     }
 
@@ -230,6 +335,8 @@ class DesktopHostChats extends ChangeNotifier {
           session.title,
           projectId: session.project,
           pinned: session.pinned,
+          status: session.status,
+          unread: session.unread ? 1 : 0,
           updatedAt: session.updatedAt.millisecondsSinceEpoch > 0
               ? session.updatedAt
               : null,
@@ -237,10 +344,28 @@ class DesktopHostChats extends ChangeNotifier {
       }
     }
     for (final bot in state.bots) {
-      add('bot', bot.id, bot.name);
+      add(
+        'bot',
+        bot.id,
+        bot.name,
+        status: bot.status == BotStatus.typing
+            ? LinkSessionStatus.running
+            : LinkSessionStatus.idle,
+        unread: bot.unread,
+        updatedAt: bot.updatedAt,
+      );
     }
     for (final group in state.groups) {
-      add('group', group.id, group.name);
+      add(
+        'group',
+        group.id,
+        group.name,
+        status: group.typing.isNotEmpty
+            ? LinkSessionStatus.running
+            : LinkSessionStatus.idle,
+        unread: group.unread,
+        updatedAt: group.updatedAt,
+      );
     }
     // The host deliberately omits an untouched draft until the first send.
     if (_unlistedDraft case final draft?) {
@@ -481,25 +606,53 @@ class DesktopHostChats extends ChangeNotifier {
   }
 
   Future<void> send(String text) async {
+    await _send(text);
+  }
+
+  Future<bool> sendWithAttachments(
+    String text,
+    DesktopRemoteAttachments attachments,
+  ) => _send(text, attachments);
+
+  Future<bool> _send(
+    String text, [
+    DesktopRemoteAttachments? attachments,
+  ]) async {
     text = text.trim();
     final chat = _selected;
     final view = _view;
-    if (text.isEmpty ||
+    if ((text.isEmpty && (attachments?.images.isEmpty ?? true)) ||
         busy ||
         chat == null ||
         view == null ||
         view.peer.isClosed ||
         !view.ready ||
         view.interaction) {
-      return;
+      return false;
     }
+    final target = (view.peer, chat.kind, chat.id, chat.projectId);
+    final images = attachments?.images ?? const <DesktopRemotePickedImage>[];
+    final approved = attachments?.mentions ?? const <DesktopRemoteMention>[];
+    if ((attachments != null && attachments.target != target) ||
+        approved.any((mention) => mention.target != target) ||
+        (view.group && approved.isNotEmpty) ||
+        images.any((image) => image.target != target) ||
+        images.length > remoteAttachmentCount ||
+        images.fold<int>(0, (sum, image) => sum + image.size) >
+            remoteAttachmentLimit) {
+      return false;
+    }
+    final mentions = remoteMentionsIn(text, target, approved);
+    final reply = view.groupReply;
     final pending = _sending = _PendingSend(chat._key);
     final coldBot = view.target == null;
     _sendErrors.remove(chat._key);
     view.error = null;
     notifyListeners();
     try {
-      if (!identical(_sending, pending) || !identical(_view, view)) return;
+      if (!identical(_sending, pending) || !identical(_view, view)) {
+        return false;
+      }
       pending.submitted = true;
       final result = await view.peer.call(
         view.group ? LinkMethods.sendGroup : LinkMethods.send,
@@ -507,11 +660,21 @@ class DesktopHostChats extends ChangeNotifier {
           if (coldBot) 'bot': chat.id else ...view.params,
           'text': text,
           'id': base64Url.encode(randomBytes(16)),
+          if (reply != null) 'ref': reply.sequence,
+          if (images.isNotEmpty)
+            'images': [for (final image in images) image.toWire()],
+          if (mentions.isNotEmpty)
+            'mentions': [for (final mention in mentions) mention.path],
         },
       );
-      if (!identical(_sending, pending)) return;
+      if (!identical(_sending, pending)) return false;
       if (view.group) {
-        if (result case {'seq': final int seq} when seq > 0) return;
+        if (result case {'seq': final int seq}
+            when seq > (reply?.sequence ?? 0)) {
+          if (!identical(_view, view)) return false;
+          view.groupReply = null;
+          return true;
+        }
       } else if (result case {'session': final String id} when id.isNotEmpty) {
         if (coldBot) {
           if (identical(_view, view)) {
@@ -519,10 +682,11 @@ class DesktopHostChats extends ChangeNotifier {
             // subsequently fails or the link drops while loading it.
             _sending = null;
             await _openView(view.peer, _selected!, id);
+            return identical(view.peer, _peer) && _selected?._key == chat._key;
           }
-          return;
+          return false;
         }
-        if (id == view.target) return;
+        if (id == view.target) return identical(_view, view);
       }
       _sendErrors[chat._key] = _uncertain;
     } on LinkRemoteException catch (exception) {
@@ -541,6 +705,7 @@ class DesktopHostChats extends ChangeNotifier {
         notifyListeners();
       }
     }
+    return false;
   }
 
   void _onEvent(LinkPeer peer, LinkEvent event) {
@@ -613,6 +778,15 @@ class DesktopHostChats extends ChangeNotifier {
       };
       view.hasEarlier = update['earlier'] == true;
       view.interaction = update['interaction'] != null;
+      view.actionState = {
+        'session': update['session'],
+        'tasks': update['tasks'],
+        'changes': update['changes'],
+        'interaction': update['interaction'],
+        'goal': update['goal'],
+        'quota': update['quota'],
+        'actions': update['actions'],
+      };
       final controls = _controls[view] ??= DesktopHostSessionControls(
         peer: view.peer,
         session: view.target!,
@@ -688,18 +862,67 @@ class DesktopHostChats extends ChangeNotifier {
   }
 
   Iterable<DesktopHostMessage> _groupMessages(_HostView view) sync* {
+    final partsBySequence = <int, List<({String text, int? ref})>>{};
+    List<({String text, int? ref})> partsOf(LinkGroupMessage item) =>
+        partsBySequence.putIfAbsent(item.seq, () => _groupParts(item).toList());
+    final summaries = <int, DesktopHostGroupQuote>{};
+    DesktopHostGroupQuote summarize(LinkGroupMessage item) =>
+        summaries.putIfAbsent(
+          item.seq,
+          () => DesktopHostGroupQuote._(
+            view.groupIdentity,
+            sequence: item.seq,
+            sender: item.mine ? 'You' : _botNames[item.from] ?? item.from,
+            mine: item.mine,
+            preview: _quotePreview(
+              partsOf(item).map((part) => part.text).join(' '),
+            ),
+            hasImage: item.images.isNotEmpty,
+          ),
+        );
     for (final item in view.groupItems.values) {
       if (item.notice) continue;
-      final sender = item.mine ? 'You' : _botNames[item.from] ?? item.from;
-      final lines = item.mine
-          ? [_visibleText(item.text)]
-          : _botLines(item.text);
-      yield* _lines(
-        lines,
-        sender,
-        mine: item.mine,
-        attachment: item.images.isNotEmpty,
-      );
+      final target = summarize(item);
+      final parts = partsOf(item);
+      final images = DesktopRemoteImage.group(item.images);
+      final rows = parts.length + (item.images.isNotEmpty ? 1 : 0);
+      for (var index = 0; index < rows; index++) {
+        final attachment = index == parts.length;
+        final (:text, :ref) = attachment
+            ? (text: _attachment, ref: parts.isEmpty ? item.ref : null)
+            : parts[index];
+        final quoted = ref == null ? null : view.groupItems[ref];
+        yield DesktopHostMessage(
+          text: text,
+          sender: target.sender,
+          mine: item.mine,
+          images: attachment ? images : const [],
+          groupReplyTarget: index == 0 ? target : null,
+          groupReference: ref != null && ref > 0 && ref < item.seq
+              ? (
+                  sequence: ref,
+                  target: quoted != null && !quoted.notice
+                      ? summarize(quoted)
+                      : null,
+                )
+              : null,
+        );
+      }
+    }
+  }
+
+  static Iterable<({String text, int? ref})> _groupParts(
+    LinkGroupMessage item,
+  ) sync* {
+    final visible = _visibleText(item.text);
+    if (item.mine) {
+      if (visible.isNotEmpty) yield (text: visible, ref: item.ref);
+      return;
+    }
+    for (final (:tag, :text, :ref) in ChatCodec.botPartsOf(visible)) {
+      if (tag != ChatCodec.botSayTag) continue;
+      final shown = ChatCodec.withoutVoiceCues(text);
+      if (shown.isNotEmpty) yield (text: shown, ref: ref ?? item.ref);
     }
   }
 
@@ -738,14 +961,33 @@ class DesktopHostChats extends ChangeNotifier {
           if (item['queued'] != true) showReply = !groupNote && !system;
           if (group || system) continue;
           final from = item['agent'];
+          // The visible words can survive a merged or queued private prompt,
+          // but its media cannot be attributed to the private turn.
+          final showImages = !bot || (showReply && !groupNote);
           yield* _lines(
             [text],
             from is String && from.isNotEmpty ? from : 'You',
             mine: from == null,
-            attachment: hasImage,
+            attachment: showImages && hasImage,
+            images: showImages
+                ? DesktopRemoteImage.message(images: images, markdown: text)
+                : const [],
           );
         case {'t': 'text', 'text': final String text} when showReply:
-          yield* _lines(bot ? _botLines(text) : [_visibleText(text)], sender);
+          if (bot) {
+            // Markdown image alt text can resemble a voice cue. Extract
+            // references from the admitted bot_say body before stripping cues.
+            for (final (tag, words) in ChatCodec.botParts(_visibleText(text))) {
+              if (tag != ChatCodec.botSayTag) continue;
+              yield* _lines(
+                [ChatCodec.withoutVoiceCues(words)],
+                sender,
+                images: DesktopRemoteImage.message(markdown: words),
+              );
+            }
+          } else {
+            yield* _lines([_visibleText(text)], sender);
+          }
         case {
               't': 'tool',
               'tool': ChatCodec.botSendTool,
@@ -754,7 +996,15 @@ class DesktopHostChats extends ChangeNotifier {
             }
             when bot:
           // The host sets `sent` exclusively for a successful private send.
-          yield* _lines([_visibleText(text)], sender, attachment: hasImage);
+          final visible = _visibleText(text);
+          yield* _lines(
+            [visible],
+            sender,
+            attachment: showReply && hasImage,
+            images: showReply
+                ? DesktopRemoteImage.message(images: images, markdown: visible)
+                : const [],
+          );
         case {
               't': 'tool',
               'tool': ChatCodec.botImageTool,
@@ -762,7 +1012,15 @@ class DesktopHostChats extends ChangeNotifier {
             }
             when bot && showReply:
           if (hasImage || item['url'] is String) {
-            yield* _lines(const [], sender, attachment: true);
+            yield* _lines(
+              const [],
+              sender,
+              attachment: true,
+              images: DesktopRemoteImage.message(
+                images: images,
+                toolImage: item['url'] is String ? item['url'] as String : null,
+              ),
+            );
           }
       }
     }
@@ -773,23 +1031,60 @@ class DesktopHostChats extends ChangeNotifier {
       .replaceAll(imageReferencePattern, '')
       .trim();
 
-  static Iterable<String> _botLines(String text) =>
-      ChatCodec.botSays(_visibleText(text));
+  static String _quotePreview(String text) {
+    final line = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final head = String.fromCharCodes(line.runes.take(120));
+    return head.length < line.length ? '$head…' : head;
+  }
 
   static Iterable<DesktopHostMessage> _lines(
     Iterable<String> lines,
     String sender, {
     bool mine = false,
     bool attachment = false,
+    List<DesktopRemoteImage> images = const [],
   }) sync* {
     for (final text in lines) {
       if (text.isNotEmpty) {
         yield DesktopHostMessage(text: text, sender: sender, mine: mine);
       }
     }
-    if (attachment) {
-      yield DesktopHostMessage(text: _attachment, sender: sender, mine: mine);
+    if (attachment || images.isNotEmpty) {
+      yield DesktopHostMessage(
+        text: _attachment,
+        sender: sender,
+        mine: mine,
+        images: List.unmodifiable(images),
+      );
     }
+  }
+
+  /// Only a currently open project follow backs the session actions. Private
+  /// bots share a transcript with their group turns, which are not editable
+  /// or answerable from either of those views.
+  DesktopRemoteSessionSnapshot? remoteActionSnapshot(
+    LinkPeer? peer,
+    DesktopHostChat chat,
+  ) {
+    final view = _view;
+    if (view == null ||
+        chat.kind != 'project' ||
+        _selected?._key != chat._key ||
+        _selected?.projectId != chat.projectId ||
+        view.target != chat.id ||
+        !identical(view.peer, peer) ||
+        view.peer.isClosed ||
+        view.opening ||
+        !view.ready) {
+      return null;
+    }
+    return DesktopRemoteSessionSnapshot(
+      follow: view,
+      state: view.actionState,
+      items: view.sessionItems,
+      live: view.live,
+      busy: busy,
+    );
   }
 }
 
@@ -816,10 +1111,13 @@ class _HostView {
   bool hasEarlier = false;
   bool interaction = false;
   bool live = false;
+  Map<String, Object?> actionState = const {};
   DesktopHostProjectHistoryFeed? history;
   String? error;
   List<Object?> sessionItems = const [];
   final groupItems = SplayTreeMap<int, LinkGroupMessage>();
+  final groupIdentity = Object();
+  DesktopHostGroupQuote? groupReply;
   List<DesktopHostMessage> messages = const [];
 }
 
