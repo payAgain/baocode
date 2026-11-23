@@ -8,6 +8,7 @@ import '../../ide/ide_button.dart';
 import '../../ide/ide_hover.dart';
 import '../../ide/ide_menu.dart';
 import '../../l10n/l10n.dart';
+import '../../link/computer_group_dialog.dart';
 import '../../link/desktop_mutual_text.dart';
 import '../../link/link_host.dart';
 import '../../link/phone_downloads.dart';
@@ -141,6 +142,7 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
       description: l10n.mobileSettingsDescription,
       children: [
         if (pinDesktopPairing) pairing,
+        if (host.supported) ComputerGroupButton(host: host),
         // The app first: no phone pairs without it.
         SettingsGroup(
           title: l10n.mobileGetApp,

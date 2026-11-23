@@ -46,7 +46,9 @@ class DesktopHostConnection extends ChangeNotifier {
     this._device,
     this._discover,
     this.localHost,
-  );
+  ) {
+    localHost?.addListener(_groupChanged);
+  }
 
   static const _legacyStorageId = 'desktop_host_connection.v1';
   static const _storageId = 'desktop_host_connection.v2';
@@ -70,6 +72,7 @@ class DesktopHostConnection extends ChangeNotifier {
   _PendingHost? _pending;
   Timer? _expiry;
   LinkPeer? _authorized;
+  String? _groupMemberId;
   Future<void>? _loss;
   StreamSubscription<List<LinkAdvert>>? _discovery;
   List<LinkAdvert> _adverts = const [];
@@ -84,8 +87,13 @@ class DesktopHostConnection extends ChangeNotifier {
   Object? get pendingMutualAttempt => _pending?.binding;
   bool get pendingNeedsApproval => _pending?.needsApproval ?? false;
   bool get waitingForHostApproval => _session?.waitingForHostApproval ?? false;
-  String? get hostName => _pending?.host.name ?? _selected?.name;
-  String? get selectedHostId => _saved.selectedId;
+  String? get hostName =>
+      _pending?.host.name ??
+      (_groupMemberId == null
+          ? _selected?.name
+          : localHost?.computerGroup?.known[_groupMemberId]?.name);
+  String? get selectedHostId => _groupMemberId ?? _saved.selectedId;
+  bool get groupSelected => _groupMemberId != null;
   List<DesktopSavedHost> get savedHosts => List.unmodifiable(
     _saved.hosts.values.map((host) => (id: host.address.id, name: host.name)),
   );
@@ -389,6 +397,7 @@ class DesktopHostConnection extends ChangeNotifier {
             session.confirming = false;
             session.waitingForHostApproval = false;
             _pausedHostId = null;
+            _groupMemberId = null;
             _clearPending();
             _authorized = peer;
           },
@@ -497,6 +506,7 @@ class DesktopHostConnection extends ChangeNotifier {
     session.confirming = false;
     session.waitingForHostApproval = false;
     _pausedHostId = null;
+    _groupMemberId = null;
     _clearPending();
     _authorized = peer;
   }
@@ -660,7 +670,7 @@ class DesktopHostConnection extends ChangeNotifier {
 
   Future<void> reconnect() async {
     await _loss;
-    if (_loaded && _selected == null) return;
+    if (_loaded && _selected == null && _groupMemberId == null) return;
     await _run('Could not connect to the saved computer.', () async {
       await _readSaved();
       if (_session case final session?) await _settle(session);
@@ -669,6 +679,10 @@ class DesktopHostConnection extends ChangeNotifier {
   }
 
   Future<void> _reconnect() async {
+    if (_groupMemberId case final id?) {
+      if (_session == null) await _connectGroup(id);
+      return;
+    }
     final host = _selected;
     if (host == null || _session != null || _disposed) return;
     try {
@@ -708,7 +722,13 @@ class DesktopHostConnection extends ChangeNotifier {
 
   void _maybeReconnectNearby() {
     final host = _selected;
-    if (_disposed || !discovering || host == null || peer != null) return;
+    if (_disposed ||
+        !discovering ||
+        host == null ||
+        peer != null ||
+        groupSelected) {
+      return;
+    }
     final nearby = _nearbyAddresses(host.address.id);
     if (nearby.isEmpty) {
       _lastNearbyRetry = null;
@@ -729,17 +749,70 @@ class DesktopHostConnection extends ChangeNotifier {
       if (!_saved.hosts.containsKey(id)) return;
       if (_session case final session?) {
         if (!session.pairing) await _settle(session);
-        if (_session == session && id == selectedHostId && !session.pairing) {
+        if (_session == session &&
+            id == selectedHostId &&
+            !session.pairing &&
+            !session.group) {
           return;
         }
         await _drop(session);
       }
       if (!_saved.hosts.containsKey(id)) return;
+      _groupMemberId = null;
       if (id != selectedHostId) {
         await _save(_SavedHosts(_saved.hosts, id));
       }
       await _reconnect();
     });
+  }
+
+  /// Group authorization does not install a legacy saved-host record.
+  Future<void> selectGroupMember(String id) async {
+    await _loss;
+    await _run('Could not reach the group computer.', () async {
+      await _readSaved();
+      if (localHost?.permitsGroupWorkspace(id) != true) return;
+      if (_groupMemberId == id && peer != null) return;
+      if (_session case final previous?) await _drop(previous);
+      _groupMemberId = id;
+      await _connectGroup(id);
+    });
+  }
+
+  Future<void> _connectGroup(String id) async {
+    final host = localHost;
+    if (_disposed || host == null || !host.permitsGroupWorkspace(id)) return;
+    final session = _session = _ClientSession(id)..group = true;
+    try {
+      final connected = await host.openGroupWorkspace(
+        id,
+        nearby: _nearbyAddresses(id),
+      );
+      session.peer = connected;
+      if (_session != session || !host.permitsGroupWorkspace(id)) {
+        await connected.close();
+        return;
+      }
+      session.events = connected.events.listen(
+        (_) {},
+        onDone: () {
+          session.finishEvents();
+          _connectionEnded(session);
+        },
+      );
+      _authorized = connected;
+    } on Object {
+      await _drop(session);
+      throw const _HostError('Could not reach the group computer.');
+    }
+  }
+
+  void _groupChanged() {
+    if (_session case final session?
+        when session.group &&
+            localHost?.permitsGroupWorkspace(session.hostId) != true) {
+      unawaited(_drop(session));
+    }
   }
 
   /// Compatibility shortcut for forgetting the selected computer.
@@ -1115,6 +1188,7 @@ class DesktopHostConnection extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    localHost?.removeListener(_groupChanged);
     unawaited(stopDiscovery());
     if (_session case final session?) unawaited(_drop(session));
     super.dispose();
@@ -1261,6 +1335,7 @@ class _ClientSession {
   StreamSubscription<LinkEvent>? events;
   final eventsFinished = Completer<void>();
   bool pairing = false;
+  bool group = false;
   bool confirming = false;
   bool waitingForHostApproval = false;
   bool cancelled = false;

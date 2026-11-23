@@ -31,6 +31,7 @@ import '../settings/user_settings.dart' show GlobalStorage;
 import '../theme/app_theme.dart' show AppColors;
 import '../chat/widgets/markdown_view.dart';
 import '../chat/widgets/user_message_bubble.dart';
+import 'computer_group_dialog.dart';
 import 'desktop_host_chats.dart';
 import 'desktop_host_composer.dart';
 import 'desktop_host_connection.dart';
@@ -140,6 +141,8 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   bool get _showInvite =>
       _connection.pendingCode == null && (_addingComputer || !_stored);
   bool get _chatBusy => _chatRequest != null || _chats.busy;
+  bool get _groupSelected =>
+      widget.localHost != null && _connection.groupSelected;
 
   void _openPeople(LinkPeer peer, {DesktopHostChatKey? editor}) {
     if (!_online || peer.isClosed || !identical(_connection.peer, peer)) return;
@@ -887,6 +890,11 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                         )
                       else
                         ..._computerActions(text, compact: false),
+                    if ((!wide && code == null, widget.localHost) case (
+                      true,
+                      final local?,
+                    ))
+                      ComputerGroupButton(host: local, open: _openGroupMember),
                   ],
                 ),
               );
@@ -1218,7 +1226,11 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 overflow: TextOverflow.ellipsis,
               ),
               Text(
-                _online ? text.online : text.offline,
+                _online
+                    ? text.online
+                    : _groupSelected
+                    ? text.groupDisconnected
+                    : text.offline,
                 style: SettingsText.description,
               ),
             ],
@@ -1231,26 +1243,28 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 : () => _runConnection((c) => c.reconnect()),
             child: Text(text.reconnect),
           ),
-        PopupMenuButton<String>(
-          tooltip: text.hostOptions,
-          enabled: !_busy,
-          iconSize: 16,
-          itemBuilder: (_) => [
-            if (_online)
-              PopupMenuItem(
-                value: 'connectionInfo',
-                child: Text(text.connectionInfo),
-              ),
-            PopupMenuItem(value: 'forget', child: Text(text.forget)),
-          ],
-          onSelected: (action) {
-            if (action == 'connectionInfo') {
-              _showConnectionInfo(text);
-            } else if (action == 'forget') {
-              _forget(text);
-            }
-          },
-        ),
+        if (_online || !_groupSelected)
+          PopupMenuButton<String>(
+            tooltip: text.hostOptions,
+            enabled: !_busy,
+            iconSize: 16,
+            itemBuilder: (_) => [
+              if (_online)
+                PopupMenuItem(
+                  value: 'connectionInfo',
+                  child: Text(text.connectionInfo),
+                ),
+              if (!_groupSelected)
+                PopupMenuItem(value: 'forget', child: Text(text.forget)),
+            ],
+            onSelected: (action) {
+              if (action == 'connectionInfo') {
+                _showConnectionInfo(text);
+              } else if (action == 'forget') {
+                _forget(text);
+              }
+            },
+          ),
       ],
     ),
   );
@@ -1574,6 +1588,8 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   }
 
   List<Widget> _computerActions(_HostText text, {required bool compact}) => [
+    if ((compact, widget.localHost) case (true, final local?))
+      ComputerGroupButton(host: local, open: _openGroupMember, compact: true),
     for (final (label, icon, action) in [
       (text.computers, Codicons.deviceDesktop, () => _chooseComputer(text)),
       (text.addComputer, Icons.add, _showAddComputer),
@@ -1592,6 +1608,24 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
           label: Text(label),
         ),
   ];
+
+  void _openGroupMember(String id) {
+    if (!mounted || _busy || _leaving) return;
+    unawaited(
+      _runConnection((connection) async {
+        _switchingComputer = true;
+        try {
+          _peopleDock = null;
+          _closeChat();
+          _restoreHandled.remove(id);
+          _addingComputer = false;
+          await connection.selectGroupMember(id);
+        } finally {
+          _switchingComputer = false;
+        }
+      }),
+    );
+  }
 
   Widget _nearby(_HostText text) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
@@ -2187,6 +2221,8 @@ class _HostText {
   String get working => _zh ? '正在处理…' : 'Working…';
   String get online => _zh ? '已连接' : 'Connected';
   String get offline => _zh ? '主机离线' : 'Host offline';
+  String get groupDisconnected =>
+      _zh ? '未连接组成员' : 'Group computer not connected';
   String get host => _zh ? '主机' : 'Host';
   String get reconnect => _zh ? '重新连接' : 'Reconnect';
   String get forget => _zh ? '忘记主机' : 'Forget host';

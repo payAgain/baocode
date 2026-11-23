@@ -22,6 +22,10 @@ abstract interface class LinkPlatform {
   /// Kept readable only by the user: it holds the desktop's private key.
   Future<void> write(Map<String, Object?> json);
 
+  /// The separate signed computer group history for this installation.
+  Future<Object?> readComputerGroup();
+  Future<void> writeComputerGroup(Object json);
+
   /// This desktop on the network as [identity], keeping to [relays],
   /// taking the phones' connections; on [port] (UDP) if it is free, or
   /// only on it when [strictPort].
