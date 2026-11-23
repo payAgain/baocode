@@ -12,8 +12,11 @@ import 'desktop_remote_discovery_stub.dart'
     if (dart.library.io) 'desktop_remote_discovery_io.dart'
     as discovery;
 
-/// An outgoing connection to one BaoCode desktop, using Mobile Link pairing.
-/// The client has its own key and never reads or changes the local LinkHost.
+/// A saved desktop's authenticated ID and display name, without its secrets.
+typedef DesktopSavedHost = ({String id, String name});
+
+/// Saved BaoCode desktops, with one outgoing Mobile Link connection at a time.
+/// Each pairing has its own client key, independent of the local LinkHost.
 class DesktopHostConnection extends ChangeNotifier {
   DesktopHostConnection()
     : this._(
@@ -40,7 +43,8 @@ class DesktopHostConnection extends ChangeNotifier {
     this._discover,
   );
 
-  static const _storageId = 'desktop_host_connection.v1';
+  static const _legacyStorageId = 'desktop_host_connection.v1';
+  static const _storageId = 'desktop_host_connection.v2';
   static const _revoked =
       'This computer removed your access. Pair again to reconnect.';
 
@@ -48,11 +52,13 @@ class DesktopHostConnection extends ChangeNotifier {
   final Future<LinkNode> Function(LinkIdentity, List<String>) _bind;
   final Future<DeviceInfo> Function() _device;
   final Stream<List<LinkAdvert>> Function()? _discover;
-  _SavedHost? _saved;
+  _SavedHosts _saved = const _SavedHosts({}, null);
+  _SavedHost? get _selected => _saved.hosts[_saved.selectedId];
   bool _loaded = false;
   bool _disposed = false;
   bool _busy = false;
-  bool _readingForPair = false;
+  bool _preparingPair = false;
+  String? _pausedHostId;
   String? _error;
   _ClientSession? _session;
   _PendingHost? _pending;
@@ -61,16 +67,20 @@ class DesktopHostConnection extends ChangeNotifier {
   Future<void>? _loss;
   StreamSubscription<List<LinkAdvert>>? _discovery;
   List<LinkAdvert> _adverts = const [];
-  List<String>? _lastNearbyRetry;
+  ({String id, List<String> addresses})? _lastNearbyRetry;
   String? _discoveryError;
-  bool _discovering = false;
+  Object? _browse;
 
   bool get busy => _busy;
   String? get error => _error;
   String? get pendingCode => _pending?.code;
   bool get pendingNeedsApproval => _pending?.needsApproval ?? false;
   bool get waitingForHostApproval => _session?.waitingForHostApproval ?? false;
-  String? get hostName => _pending?.host.name ?? _saved?.name;
+  String? get hostName => _pending?.host.name ?? _selected?.name;
+  String? get selectedHostId => _saved.selectedId;
+  List<DesktopSavedHost> get savedHosts => List.unmodifiable(
+    _saved.hosts.values.map((host) => (id: host.address.id, name: host.name)),
+  );
 
   /// Nearby computers currently accepting new pairings. Treat their labels
   /// as unverified until both users have compared the safety code.
@@ -84,26 +94,29 @@ class DesktopHostConnection extends ChangeNotifier {
   }
 
   bool get discoverySupported => _discover != null;
-  bool get discovering => _discovering;
+  bool get discovering => _browse != null;
   String? get discoveryError => _discoveryError;
 
   /// The visible remote-host UI owns this browse. Loading a saved host does
   /// not start a browse or prompt for local network access.
   void startDiscovery() {
     final discover = _discover;
-    if (_disposed || _discovering || discover == null) return;
-    _discovering = true;
+    if (_disposed || discovering || discover == null) return;
+    final browse = _browse = Object();
     _discoveryError = null;
     try {
       _discovery = discover().listen(
         (adverts) {
+          if (_browse != browse) return;
           _adverts = adverts;
           _notify();
           _maybeReconnectNearby();
         },
-        onError: (Object _) => _discoveryFailed(),
+        onError: (Object _) {
+          if (_browse == browse) _discoveryFailed();
+        },
         onDone: () {
-          if (_discovering) _discoveryFailed();
+          if (_browse == browse) _discoveryFailed();
         },
       );
     } on Object {
@@ -118,9 +131,9 @@ class DesktopHostConnection extends ChangeNotifier {
 
   Future<void> _stopDiscovery({String? error}) async {
     final discovery = _discovery;
-    final changed = _discovering || _discoveryError != error;
+    final changed = discovering || _discoveryError != error;
     _discovery = null;
-    _discovering = false;
+    _browse = null;
     _adverts = const [];
     _lastNearbyRetry = null;
     _discoveryError = error;
@@ -137,7 +150,11 @@ class DesktopHostConnection extends ChangeNotifier {
   /// Available only after the host has authorized this connection.
   LinkPeer? get peer {
     final peer = _authorized;
-    return peer != null && !peer.isClosed && _session?.revoked == false
+    final session = _session;
+    return peer != null &&
+            session != null &&
+            session.hostId == selectedHostId &&
+            !session.ended
         ? peer
         : null;
   }
@@ -164,38 +181,38 @@ class DesktopHostConnection extends ChangeNotifier {
       });
 
   /// Dials only a currently visible, explicitly selected pairing advert.
-  Future<void> pairNearby(String id) => _startPairing(
-    'Could not pair with the nearby computer.',
-    () async {
+  Future<void> pairNearby(String id) {
+    final browse = _browse;
+    LinkAdvert currentAdvert() {
       final advert = nearbyHosts.where((advert) => advert.id == id).firstOrNull;
-      if (advert == null) {
+      if (_browse != browse || advert == null) {
         throw const _HostError('This computer is no longer available to pair.');
       }
+      return advert;
+    }
+
+    return _startPairing('Could not pair with the nearby computer.', () async {
+      final advert = currentAdvert();
       await _beginPairing(
         advert.name,
-        LinkAddress(advert.id, addrs: advert.addrs),
-        // The advert carries LAN addresses only. Learn relay policy from
-        // the authenticated host for future connections.
+        LinkAddress(advert.id),
+        // Discover the route for this dial only. Learn saved addresses and
+        // relay policy from the authenticated host.
         direct: true,
+        pairingAddresses: () => currentAdvert().addrs,
       );
-    },
-  );
+    });
+  }
 
   Future<void> _startPairing(String fallback, Future<void> Function() begin) =>
       _run(fallback, () async {
-        _readingForPair = true;
+        _preparingPair = true;
         try {
           await _readSaved();
-          if (!_readingForPair) return;
+          if (_preparingPair && _session?.pairing != true) await begin();
         } finally {
-          _readingForPair = false;
+          _preparingPair = false;
         }
-        if (_saved != null) {
-          throw const _HostError(
-            'Forget the saved computer before pairing another.',
-          );
-        }
-        if (_session == null) await begin();
       });
 
   Future<void> _beginPairing(
@@ -204,15 +221,29 @@ class DesktopHostConnection extends ChangeNotifier {
     required bool direct,
     String? token,
     DateTime? expires,
+    List<String> Function()? pairingAddresses,
   }) async {
     final needsApproval = token == null;
+    if (_saved.hosts.containsKey(address.id)) {
+      throw const _HostError('This computer is already saved.');
+    }
+    if (_session case final session?) {
+      await _settle(session);
+      if (!_preparingPair) return;
+      if (peer != null) _pausedHostId = session.hostId;
+      await _drop(session);
+      if (!_preparingPair) return;
+    }
     final host = _SavedHost(
       LinkIdentity.generate(),
       name.isEmpty ? 'BaoCode' : name,
       address,
       direct: direct,
     );
-    await _connect(host, pairing: true, (session, peer) async {
+    await _connect(host, pairing: true, pairingAddresses: pairingAddresses, (
+      session,
+      peer,
+    ) async {
       final answer = await _hello(
         session,
         peer,
@@ -257,7 +288,7 @@ class DesktopHostConnection extends ChangeNotifier {
     final pending = _pending;
     final session = _session;
     if (pending == null || session == null) return;
-    session.pairing = false;
+    session.confirming = true;
     _expiry?.cancel();
     _expiry = null;
     try {
@@ -276,52 +307,63 @@ class DesktopHostConnection extends ChangeNotifier {
       );
       if (session.waitingForHostApproval) _notify();
       final reply = await confirmation;
-      if (session.cancelled) return;
-      session.waitingForHostApproval = false;
+      _checkSession(session);
       if (reply case {'pairing': true}) {
         throw const _HostError('The computer did not confirm pairing.');
       }
-      final host = pending.host.updated(_deviceFrom(reply));
-      _checkSession(session);
       try {
-        await _save(host);
+        final host = pending.host.updated(_deviceFrom(reply));
+        await _save(
+          _saved.withHost(host, select: true),
+          validate: () => _checkSession(session),
+          onCommit: () {
+            session.pairing = false;
+            session.confirming = false;
+            session.waitingForHostApproval = false;
+            _pausedHostId = null;
+            _clearPending();
+            _authorized = peer;
+          },
+        );
+      } on LinkClosedException {
+        rethrow;
       } on Object {
-        await _unpair(peer);
-        // A failing backend may have written an entry before reporting failure.
-        try {
-          await _removeSaved();
-        } on Object {
-          // Still fail closed and report the storage error below.
-        }
+        if (!session.cancelled) await _unpair(peer);
         throw const _HostError('Could not save the computer securely.');
       }
-      if (_session == session && !session.revoked) {
-        _clearPending();
-        _authorized = peer;
-      }
     } on Object {
-      if (_session != session || session.revoked || session.cancelled) return;
+      if (session.cancelled) {
+        await session.cancellation;
+        return;
+      }
+      if (_session != session || session.revoked) return;
       await _drop(session);
       rethrow;
     }
   });
 
   Future<void> cancelPairing() async {
-    _readingForPair = false;
+    _preparingPair = false;
     final session = _session;
-    if (session == null ||
-        !(session.pairing || session.waitingForHostApproval)) {
-      return;
-    }
-    if (session.waitingForHostApproval) {
+    if (session == null || !session.pairing) return;
+    if (session.confirming) {
       session.cancelled = true;
       session.waitingForHostApproval = false;
       _clearPending();
+      final cancellation = session.cancellation ??= _cancelConfirmation(
+        session,
+      );
       _notify();
-      // The host may have accepted our confirmation while its reply was in
-      // flight. Clear that authorization before closing the pending peer.
-      await _unpair(session.peer!);
+      await cancellation;
+    } else {
+      await _endPending(session);
     }
+  }
+
+  Future<void> _cancelConfirmation(_ClientSession session) async {
+    // The host may already have accepted the confirmation. Clear that
+    // authorization before closing the still-private pending peer.
+    await _unpair(session.peer!);
     await _endPending(session);
   }
 
@@ -329,15 +371,22 @@ class DesktopHostConnection extends ChangeNotifier {
     _ClientSession session, {
     bool expired = false,
   }) async {
-    if (_session != session || _disposed) return;
-    _error = expired ? 'This invite has expired.' : null;
-    await _drop(session);
-    _notify();
+    Future<void> end() async {
+      if (_session != session || _disposed) return;
+      _error = expired ? 'This invite has expired.' : null;
+      await _drop(session);
+    }
+
+    if (_busy) {
+      await end();
+    } else {
+      await _run('Could not cancel pairing.', end);
+    }
   }
 
   Future<void> reconnect() async {
     await _loss;
-    if (_loaded && _saved == null) return;
+    if (_loaded && _selected == null) return;
     await _run('Could not connect to the saved computer.', () async {
       await _readSaved();
       if (_session case final session?) await _settle(session);
@@ -346,10 +395,8 @@ class DesktopHostConnection extends ChangeNotifier {
   }
 
   Future<void> _reconnect() async {
-    final host = _saved;
+    final host = _selected;
     if (host == null || _session != null || _disposed) return;
-    final nearby = _nearbyAddresses(host.address.id);
-    _lastNearbyRetry = nearby.isEmpty ? null : nearby;
     try {
       await _connect(host, (session, peer) async {
         final answer = await _hello(session, peer);
@@ -363,17 +410,17 @@ class DesktopHostConnection extends ChangeNotifier {
         if (updated.name != host.name ||
             updated.address != host.address ||
             updated.direct != host.direct) {
-          await _save(updated);
+          await _save(_saved.withHost(updated));
         }
         if (_session == session && !session.revoked) {
           _authorized = peer;
           _lastNearbyRetry = null;
           _error = null;
         }
-      }, nearby: nearby);
+      });
     } on LinkRemoteException catch (error) {
       if (error.code != LinkErrors.unpaired) rethrow;
-      await _removeSaved();
+      await _removeSaved(host.address.id);
       throw const _HostError(_revoked);
     } on LinkClosedException {
       throw const _HostError('Could not reach the saved computer.');
@@ -386,52 +433,98 @@ class DesktopHostConnection extends ChangeNotifier {
   }.toList();
 
   void _maybeReconnectNearby() {
-    final host = _saved;
-    if (_disposed || !_discovering || host == null || peer != null) return;
+    final host = _selected;
+    if (_disposed || !discovering || host == null || peer != null) return;
     final nearby = _nearbyAddresses(host.address.id);
     if (nearby.isEmpty) {
       _lastNearbyRetry = null;
     } else if (!_busy &&
         _session == null &&
-        !listEquals(nearby, _lastNearbyRetry)) {
+        (_lastNearbyRetry?.id != host.address.id ||
+            !listEquals(nearby, _lastNearbyRetry?.addresses))) {
       // Bursts of unchanged Bonjour updates must not spin a retry loop.
       unawaited(_run('Could not connect to the saved computer.', _reconnect));
     }
   }
 
-  /// Removes the saved computer and key, asking the host to unpair when online.
-  Future<void> forget() =>
+  /// Selects a saved computer by authenticated ID, even if it is offline.
+  Future<void> selectHost(String id) async {
+    if (_loss case final loss?) await loss;
+    await _run('Could not select the saved computer.', () async {
+      await _readSaved();
+      if (!_saved.hosts.containsKey(id)) return;
+      if (_session case final session?) {
+        if (!session.pairing) await _settle(session);
+        if (_session == session && id == selectedHostId && !session.pairing) {
+          return;
+        }
+        await _drop(session);
+      }
+      if (!_saved.hosts.containsKey(id)) return;
+      if (id != selectedHostId) {
+        await _save(_SavedHosts(_saved.hosts, id));
+      }
+      await _reconnect();
+    });
+  }
+
+  /// Compatibility shortcut for forgetting the selected computer.
+  Future<void> forget() => _forget();
+
+  /// Removes only [id] and its key. An active peer is also asked to unpair.
+  /// Inactive hosts are removed locally without dialing or switching to them.
+  Future<void> forgetHost(String id) => _forget(id);
+
+  Future<void> _forget([String? id]) =>
       _run('Could not remove the saved computer.', () async {
-        final session = _session;
-        final connected = peer;
-        _authorized = null;
-        if (connected != null) await _unpair(connected);
-        if (session != null) await _drop(session);
-        await _removeSaved();
-        _loaded = true;
+        await _readSaved();
+        final target = id ?? selectedHostId;
+        if (target == null || !_saved.hosts.containsKey(target)) return;
+        if (_session case final session? when session.hostId == target) {
+          final connected = peer;
+          _authorized = null;
+          _notify();
+          if (connected != null) await _unpair(connected);
+          await _drop(session);
+        }
+        await _removeSaved(target);
       });
 
   Future<void> _connect(
     _SavedHost host,
     Future<void> Function(_ClientSession, LinkPeer) authenticate, {
     bool pairing = false,
-    List<String> nearby = const [],
+    List<String> Function()? pairingAddresses,
   }) async {
     if (_disposed) return;
-    final session = _session = _ClientSession()..pairing = pairing;
+    final session = _session = _ClientSession(host.address.id)
+      ..pairing = pairing;
     try {
+      if (!pairing) {
+        // A bind can fail before the available addresses are used.
+        _lastNearbyRetry = (
+          id: session.hostId,
+          addresses: _nearbyAddresses(session.hostId),
+        );
+      }
       final node = await _bind(host.identity, host.address.relays);
       if (_session != session) {
         await node.close();
         return;
       }
       session.node = node;
+      final nearby = pairing
+          ? const <String>[]
+          : _nearbyAddresses(session.hostId);
+      if (!pairing) _lastNearbyRetry = (id: session.hostId, addresses: nearby);
       final link = await node.connect(
         host.address.copyWith(
           relays: host.direct
               ? const []
               : {...host.address.relays, ...defaultLinkRelays}.toList(),
-          addrs: {...nearby, ...host.address.addrs}.toList(),
+          addrs:
+              pairingAddresses?.call() ??
+              {...nearby, ...host.address.addrs}.toList(),
         ),
       );
       session.link = link;
@@ -452,7 +545,7 @@ class DesktopHostConnection extends ChangeNotifier {
       }
       session.events = peer.events.listen(
         (event) {
-          if (event.name != LinkEvents.unpaired) return;
+          if (_session != session || event.name != LinkEvents.unpaired) return;
           session.revoked = true;
           _connectionEnded(session);
         },
@@ -523,6 +616,7 @@ class DesktopHostConnection extends ChangeNotifier {
 
   void _checkSession(_ClientSession session) {
     if (_session != session ||
+        session.cancelled ||
         session.revoked ||
         session.peer?.isClosed == true) {
       throw const LinkClosedException();
@@ -532,27 +626,78 @@ class DesktopHostConnection extends ChangeNotifier {
   Future<void> _readSaved() async {
     if (_loaded) return;
     final text = await _store.read(_storageId);
+    final legacy = text == null ? await _store.read(_legacyStorageId) : null;
     if (_disposed) return;
-    _saved = text == null ? null : _SavedHost.decode(text);
+    if (text != null) {
+      _saved = _SavedHosts.decode(text);
+    } else if (legacy != null) {
+      final host = _SavedHost.decode(jsonDecode(legacy));
+      _saved = _saved.withHost(host, select: true);
+    }
+    if (text != null || legacy != null) {
+      try {
+        // A readable v2 snapshot is authoritative even if an earlier
+        // migration could not delete the legacy copy.
+        if (text == null) await _save(_saved);
+        await _deleteLegacy();
+      } on Object {
+        // The legacy copy is left untouched if writing v2 failed.
+      }
+    }
     _loaded = true;
   }
 
-  Future<void> _save(_SavedHost host) async {
-    final text = jsonEncode(host.toJson());
-    await _store.write(_storageId, text);
+  Future<void> _save(
+    _SavedHosts next, {
+    void Function()? validate,
+    void Function()? onCommit,
+  }) async {
+    final previous = await _store.read(_storageId);
+    final text = next.hosts.isEmpty ? null : jsonEncode(next.toJson());
+    try {
+      if (text == null) await _deleteLegacy();
+      validate?.call();
+      await _writeSaved(text);
+      validate?.call();
+    } on Object {
+      // A backend may have written before throwing or failing verification.
+      // Restore the previous snapshot, never delete other saved pairings.
+      try {
+        if (await _store.read(_storageId) != previous) {
+          await _writeSaved(previous);
+        }
+      } on Object {
+        // Report the original failure; do not publish the new selection.
+      }
+      rethrow;
+    }
+    if (!_disposed) {
+      _saved = next;
+      onCommit?.call();
+    }
+  }
+
+  Future<void> _writeSaved(String? text) async {
+    if (text == null) {
+      await _store.delete(_storageId);
+    } else {
+      await _store.write(_storageId, text);
+    }
     if (await _store.read(_storageId) != text) {
       throw const _HostError('Could not save the computer securely.');
     }
-    if (!_disposed) _saved = host;
   }
 
-  Future<void> _removeSaved() async {
-    await _store.delete(_storageId);
-    // The existing store can fall back if its primary is unavailable.
-    if (await _store.read(_storageId) != null) {
+  Future<void> _deleteLegacy() async {
+    if (await _store.read(_legacyStorageId) == null) return;
+    await _store.delete(_legacyStorageId);
+    if (await _store.read(_legacyStorageId) != null) {
       throw const _HostError('Could not remove the saved computer.');
     }
-    _saved = null;
+  }
+
+  Future<void> _removeSaved(String id) async {
+    if (_saved.hosts.containsKey(id)) await _save(_saved.withoutHost(id));
   }
 
   static Future<void> _unpair(LinkPeer peer) async {
@@ -586,15 +731,34 @@ class DesktopHostConnection extends ChangeNotifier {
       // Exceptions can contain an invite, a key, or arbitrary remote text.
       _error = fallback;
     } finally {
-      final session = _session;
-      if (session != null &&
-          (session.revoked || session.peer?.isClosed == true)) {
+      if (_session case final session? when session.ended) {
         await _settle(session);
+      }
+      if (_pausedHostId != null && _session == null) {
+        await _resumePausedHost();
+        if (_session case final session? when session.ended) {
+          await _settle(session);
+        }
       }
       _busy = false;
       _notify();
       _maybeReconnectNearby();
     }
+  }
+
+  Future<void> _resumePausedHost() async {
+    final id = _pausedHostId;
+    _pausedHostId = null;
+    if (id != selectedHostId || _disposed) return;
+    final pairingError = _error;
+    try {
+      await _reconnect();
+    } on _HostError catch (error) {
+      _error = error.message;
+    } on Object {
+      _error = 'Could not reconnect to the saved computer.';
+    }
+    _error = pairingError ?? _error;
   }
 
   void _connectionEnded(_ClientSession session) {
@@ -608,9 +772,8 @@ class DesktopHostConnection extends ChangeNotifier {
   }
 
   Future<void> _settle(_ClientSession session) async {
-    if (_session != session) return;
+    if (_session != session || !session.ended) return;
     if (!session.revoked) {
-      if (session.peer?.isClosed != true) return;
       // LinkPeer can already be closed while its last event is still queued.
       await session.eventsFinished.future;
       if (_session != session) return;
@@ -618,7 +781,7 @@ class DesktopHostConnection extends ChangeNotifier {
     await _drop(session);
     if (session.revoked) {
       try {
-        await _removeSaved();
+        await _removeSaved(session.hostId);
         _error = _revoked;
       } on Object {
         _error = 'The computer removed your access. Could not remove the saved computer.';
@@ -640,8 +803,12 @@ class DesktopHostConnection extends ChangeNotifier {
     _authorized = null;
     _clearPending();
     session.finishEvents();
-    await session.events?.cancel().catchError((Object _) {});
-    await session.peer?.close().catchError((Object _) {});
+    // Session callbacks are already invalidated. Broadcast subscription
+    // cleanup does not own the transport and need not delay the next dial.
+    unawaited(session.events?.cancel().catchError((Object _) {}));
+    final peerClosed = session.peer?.close().catchError((Object _) {});
+    _notify();
+    await peerClosed;
     try {
       session.link?.close();
     } on Object {
@@ -675,8 +842,7 @@ class _SavedHost {
              : (address.relays.isEmpty ? linkRelays() : address.relays),
        );
 
-  static _SavedHost decode(String text) {
-    final json = jsonDecode(text);
+  static _SavedHost decode(Object? json) {
     if (json case {
       'identity': final Map<String, Object?> identityJson,
       'name': final String name,
@@ -717,6 +883,49 @@ class _SavedHost {
   };
 }
 
+class _SavedHosts {
+  const _SavedHosts(this.hosts, this.selectedId);
+
+  final Map<String, _SavedHost> hosts;
+  final String? selectedId;
+
+  static _SavedHosts decode(String text) {
+    if (jsonDecode(text) case {
+      'hosts': final List<Object?> entries,
+      'selected': final String selected,
+    }) {
+      final hosts = <String, _SavedHost>{};
+      for (final entry in entries) {
+        final host = _SavedHost.decode(entry);
+        if (hosts.containsKey(host.address.id)) break;
+        hosts[host.address.id] = host;
+      }
+      if (hosts.length == entries.length && hosts.containsKey(selected)) {
+        return _SavedHosts(hosts, selected);
+      }
+    }
+    throw const _HostError('The saved computers are invalid.');
+  }
+
+  _SavedHosts withHost(_SavedHost host, {bool select = false}) => _SavedHosts({
+    ...hosts,
+    host.address.id: host,
+  }, select ? host.address.id : selectedId);
+
+  _SavedHosts withoutHost(String id) {
+    final remaining = {...hosts}..remove(id);
+    return _SavedHosts(
+      remaining,
+      selectedId == id ? remaining.keys.firstOrNull : selectedId,
+    );
+  }
+
+  Map<String, Object?> toJson() => {
+    'hosts': [for (final host in hosts.values) host.toJson()],
+    'selected': selectedId,
+  };
+}
+
 class _PendingHost {
   const _PendingHost(
     this.host,
@@ -732,15 +941,22 @@ class _PendingHost {
 }
 
 class _ClientSession {
+  _ClientSession(this.hostId);
+
+  final String hostId;
   LinkNode? node;
   LinkConnection? link;
   LinkPeer? peer;
   StreamSubscription<LinkEvent>? events;
   final eventsFinished = Completer<void>();
   bool pairing = false;
+  bool confirming = false;
   bool waitingForHostApproval = false;
   bool cancelled = false;
+  Future<void>? cancellation;
   bool revoked = false;
+
+  bool get ended => revoked || peer?.isClosed == true;
 
   void finishEvents() {
     if (!eventsFinished.isCompleted) eventsFinished.complete();

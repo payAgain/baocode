@@ -7,7 +7,9 @@ import 'package:bao_link/bao_link.dart'
         LinkPathKind,
         LinkPeer,
         LinkSessionStatus,
-        ProjectInfo;
+        ProjectInfo,
+        fingerprintOf,
+        keyOfDeviceId;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -105,6 +107,8 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   bool _working = false;
   bool _sidebarHidden = false;
   ({LinkPeer peer, DesktopHostChatKey? editor})? _peopleDock;
+  bool _addingComputer = false;
+  bool _switchingComputer = false;
   bool _openingInvite = false;
   bool _browsing = false;
   bool _leaving = false;
@@ -121,11 +125,15 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   DesktopHostChats get _chats => widget.chats;
   bool get _busy => _working || _connection.busy;
   bool get _online =>
-      _connection.pendingCode == null && _connection.peer != null;
+      !_addingComputer &&
+      !_switchingComputer &&
+      _connection.pendingCode == null &&
+      _connection.peer != null;
   bool get _stored =>
       _online ||
       (_connection.pendingCode == null && _connection.hostName != null);
-  bool get _showInvite => _connection.pendingCode == null && !_stored;
+  bool get _showInvite =>
+      _connection.pendingCode == null && (_addingComputer || !_stored);
   bool get _chatBusy => _chatRequest != null || _chats.busy;
 
   void _openPeople(LinkPeer peer, {DesktopHostChatKey? editor}) {
@@ -279,6 +287,110 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     });
   }
 
+  void _showAddComputer() {
+    if (_busy || !_stored) return;
+    setState(() {
+      _addingComputer = true;
+      _localError = null;
+      _peopleDock = null;
+    });
+  }
+
+  void _finishAddingComputer() {
+    _invite.clear();
+    if (!_addingComputer) return;
+    if (_browsing) {
+      _browsing = false;
+      unawaited(_connection.stopDiscovery());
+    }
+    setState(() {
+      _addingComputer = false;
+      _localError = null;
+    });
+  }
+
+  Future<void> _chooseComputer(_HostText text) async {
+    if (_busy || _leaving || _addingComputer) return;
+    final connection = _connection;
+    final selected = connection.selectedHostId;
+    final hosts = connection.savedHosts;
+    final nameCounts = <String, int>{};
+    for (final host in hosts) {
+      nameCounts.update(host.name, (count) => count + 1, ifAbsent: () => 1);
+    }
+    final choice = await showDialog<({DesktopSavedHost host, bool forget})>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(text.savedComputers),
+        scrollable: true,
+        content: SizedBox(
+          width: 360,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final host in hosts)
+                ListTile(
+                  leading: Icon(
+                    host.id == selected ? Icons.check : Codicons.deviceDesktop,
+                    size: 16,
+                  ),
+                  selected: host.id == selected,
+                  title: Text(host.name),
+                  subtitle: nameCounts[host.name]! > 1
+                      ? Text(_fingerprint(host.id))
+                      : null,
+                  onTap: () =>
+                      Navigator.pop(context, (host: host, forget: false)),
+                  trailing: IconButton(
+                    tooltip: text.forget,
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                    onPressed: () =>
+                        Navigator.pop(context, (host: host, forget: true)),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(text.cancel),
+          ),
+        ],
+      ),
+    );
+    if (!mounted ||
+        _leaving ||
+        !identical(connection, _connection) ||
+        choice == null ||
+        !connection.savedHosts.any((host) => host.id == choice.host.id)) {
+      return;
+    }
+    final id = choice.host.id;
+    if (choice.forget) {
+      await _forget(text, host: choice.host);
+    } else if (id == connection.selectedHostId && connection.peer == null) {
+      await _runConnection((connection) => connection.reconnect());
+    } else if (id != connection.selectedHostId) {
+      await _runConnection((connection) async {
+        _switchingComputer = true;
+        try {
+          _peopleDock = null;
+          _closeChat();
+          _restoreHandled.remove(id);
+          await connection.selectHost(id);
+        } finally {
+          _switchingComputer = false;
+        }
+      });
+    }
+  }
+
+  static String _fingerprint(String id) => switch (keyOfDeviceId(id)) {
+    final key? => fingerprintOf(key),
+    null => id,
+  };
+
   Future<void> _pair() async {
     final invite = _invite.text.trim();
     if (!_showInvite || invite.isEmpty) return;
@@ -295,12 +407,21 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   Future<void> _confirm(String code) async {
     if (_connection.pendingCode != code) return;
     await _runConnection((connection) async {
+      final previousHost = _addingComputer ? connection.selectedHostId : null;
       _confirmingCode = code;
-      _drafts[connection]?.clear();
       try {
         await connection.confirm();
-        if (mounted && identical(_connection, connection) && _stored) {
-          _invite.clear();
+        final peer = connection.peer;
+        if (mounted &&
+            identical(_connection, connection) &&
+            connection.pendingCode == null &&
+            peer != null &&
+            peer.remote != previousHost &&
+            connection.error == null) {
+          // A new pairing must not restore draft text from an old pairing to
+          // this ID. Text for the other saved computers remains separate.
+          _drafts[connection]?.removeWhere((key, _) => key.$1 == peer.remote);
+          _finishAddingComputer();
         }
       } finally {
         _confirmingCode = null;
@@ -308,10 +429,33 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     });
   }
 
-  Future<void> _forget(_HostText text) async {
+  Future<void> _cancelPairing() async {
+    final connection = _connection;
+    Future<void> cancel(DesktopHostConnection connection) async {
+      await connection.cancelPairing();
+      if (mounted &&
+          identical(_connection, connection) &&
+          connection.pendingCode == null) {
+        _finishAddingComputer();
+      }
+    }
+
+    if (connection.waitingForHostApproval) {
+      await cancel(connection);
+    } else {
+      await _runConnection(cancel);
+    }
+  }
+
+  Future<void> _forget(_HostText text, {DesktopSavedHost? host}) async {
     if (_busy || !_stored || _confirmingForget) return;
     final connection = _connection;
-    final name = connection.hostName;
+    var activeChanged = false;
+    void invalidateActiveConfirmation() => activeChanged = true;
+    // Host options follows whichever host is currently selected, including
+    // offline. Invalidate that confirmation if connection state changes.
+    // A row from the chooser instead refers to a fixed saved ID.
+    if (host == null) connection.addListener(invalidateActiveConfirmation);
     _confirmingForget = true;
     try {
       final confirmed = await showDialog<bool>(
@@ -319,7 +463,11 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
         builder: (context) => AlertDialog(
           scrollable: true,
           title: Text(text.forgetTitle),
-          content: Text(text.forgetDescription),
+          content: Text(
+            host == null
+                ? text.forgetDescription
+                : '${host.name}\n${_fingerprint(host.id)}\n\n${text.forgetDescription}',
+          ),
           actions: [
             TextButton(
               autofocus: true,
@@ -338,12 +486,21 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
       );
       if (confirmed != true ||
           !mounted ||
+          _leaving ||
           !identical(connection, _connection) ||
-          !_stored ||
-          connection.hostName != name) {
+          (host == null
+              ? activeChanged || !_stored
+              : !connection.savedHosts.any((saved) => saved.id == host.id))) {
         return;
       }
       await _runConnection((connection) async {
+        if (host != null) {
+          await connection.forgetHost(host.id);
+          if (!connection.savedHosts.any((saved) => saved.id == host.id)) {
+            _drafts[connection]?.removeWhere((key, _) => key.$1 == host.id);
+          }
+          return;
+        }
         await connection.forget();
         if (connection.hostName == null &&
             connection.peer == null &&
@@ -353,6 +510,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
         }
       });
     } finally {
+      if (host == null) connection.removeListener(invalidateActiveConfirmation);
       _confirmingForget = false;
     }
   }
@@ -638,7 +796,9 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
             builder: (context, constraints) {
               final code = _connection.pendingCode ?? _confirmingCode;
               final error = _localError ?? _connection.error;
-              final host = code == null ? _connection.peer?.remote : null;
+              final host = code == null && _online
+                  ? _connection.peer?.remote
+                  : null;
               final selected = host == null ? null : _chats.selected;
               final wide = host != null && constraints.maxWidth >= 880;
               final showSidebar = wide && (!_sidebarHidden || selected == null);
@@ -688,15 +848,24 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                         textAlign: TextAlign.center,
                       ),
                     ),
-                    Semantics(
-                      header: true,
-                      child: Text(
-                        text.title,
-                        style: SettingsText.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
+                    if (!wide || !_stored)
+                      Semantics(
+                        header: true,
+                        child: Text(
+                          text.title,
+                          style: SettingsText.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
-                    ),
+                    if (code == null && _stored && !_addingComputer)
+                      if (wide)
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: _computerActions(text, compact: true),
+                        )
+                      else
+                        ..._computerActions(text, compact: false),
                   ],
                 ),
               );
@@ -821,7 +990,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
               else if (_stored)
                 _host(text),
               if (_connection.peer case final peer?
-                  when code == null && !peer.isClosed)
+                  when code == null && _online && !peer.isClosed)
                 Align(
                   alignment: AlignmentDirectional.centerStart,
                   child: TextButton.icon(
@@ -832,6 +1001,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 ),
               if (_stored &&
                   !_online &&
+                  !_addingComputer &&
                   code == null &&
                   _connection.discoverySupported)
                 _nearby(text),
@@ -1210,13 +1380,15 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                       ),
               ),
             if (wide) ...[
-              if (_sidebarHidden)
+              if (_sidebarHidden) ...[
                 IconButton(
                   visualDensity: VisualDensity.compact,
                   tooltip: text.switchToLocal,
                   icon: const Icon(Codicons.deviceDesktop, size: 16),
                   onPressed: _back,
                 ),
+                ..._computerActions(text, compact: true),
+              ],
               IconButton(
                 key: const ValueKey('host-toggle-sidebar'),
                 visualDensity: VisualDensity.compact,
@@ -1386,6 +1558,26 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     );
   }
 
+  List<Widget> _computerActions(_HostText text, {required bool compact}) => [
+    for (final (label, icon, action) in [
+      (text.computers, Codicons.deviceDesktop, () => _chooseComputer(text)),
+      (text.addComputer, Icons.add, _showAddComputer),
+    ])
+      if (compact)
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          tooltip: label,
+          icon: Icon(icon, size: 16),
+          onPressed: _busy ? null : action,
+        )
+      else
+        TextButton.icon(
+          onPressed: _busy ? null : action,
+          icon: Icon(icon, size: 16),
+          label: Text(label),
+        ),
+  ];
+
   Widget _nearby(_HostText text) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
@@ -1409,7 +1601,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
           _connection.discovering &&
           _connection.nearbyHosts.isEmpty)
         Text(text.searching, style: SettingsText.description),
-      if (_browsing && !_stored)
+      if (_browsing && _showInvite)
         for (final advert in _connection.nearbyHosts)
           TextButton.icon(
             icon: const Icon(Codicons.deviceDesktop, size: 16),
@@ -1472,6 +1664,11 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 child: Text(text.pair),
               ),
             ),
+            if (_addingComputer)
+              TextButton(
+                onPressed: _busy ? null : _finishAddingComputer,
+                child: Text(text.cancel),
+              ),
           ],
         ),
       ],
@@ -1506,13 +1703,9 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
               child: Text(text.confirm),
             ),
             OutlinedButton(
-              onPressed: _connection.waitingForHostApproval
-                  ? () => _connection.cancelPairing()
-                  : _busy
-                  ? null
-                  : () => _runConnection(
-                      (connection) => connection.cancelPairing(),
-                    ),
+              onPressed: !_busy || _connection.waitingForHostApproval
+                  ? _cancelPairing
+                  : null,
               child: Text(text.cancelPairing),
             ),
           ],
@@ -1876,6 +2069,9 @@ class _HostText {
   final bool _zh;
   String get title => _zh ? '远程工作区' : 'Remote workspace';
   String get switchToLocal => _zh ? '切回本地' : 'Switch to local';
+  String get addComputer => _zh ? '添加电脑' : 'Add computer';
+  String get computers => _zh ? '电脑' : 'Computers';
+  String get savedComputers => _zh ? '已保存的电脑' : 'Saved computers';
   String get managePeople =>
       _zh ? '管理机器人、群聊和资料' : 'Manage bots, groups & profile';
   String get botSettings => _zh ? '机器人设置' : 'Bot settings';
