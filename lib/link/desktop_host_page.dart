@@ -36,6 +36,8 @@ import 'desktop_host_composer.dart';
 import 'desktop_host_connection.dart';
 import 'desktop_host_controls.dart';
 import 'desktop_host_project_history.dart';
+import 'desktop_mutual_text.dart';
+import 'link_host.dart';
 import 'desktop_remote_activity.dart';
 import 'desktop_remote_session_actions.dart';
 import 'desktop_host_session_controls.dart';
@@ -86,12 +88,14 @@ class DesktopHostPage extends StatefulWidget {
     required this.chats,
     required this.onBack,
     this.lastChatStore,
+    this.localHost,
   });
 
   final DesktopHostConnection connection;
   final DesktopHostChats chats;
   final VoidCallback onBack;
   final DesktopHostLastChatStore? lastChatStore;
+  final LinkHost? localHost;
 
   @override
   State<DesktopHostPage> createState() => _DesktopHostPageState();
@@ -104,6 +108,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
 
   final _invite = TextEditingController();
   final _inviteFocus = FocusNode();
+  bool _mutualPairing = false;
   bool _working = false;
   bool _sidebarHidden = false;
   ({LinkPeer peer, DesktopHostChatKey? editor})? _peopleDock;
@@ -221,8 +226,15 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
 
   @override
   void dispose() {
+    final connection = _connection;
+    if (widget.localHost != null && _mutualPairing) {
+      if (connection.pendingMutualAttempt case final attempt?) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          unawaited(connection.cancelMutualAttempt(attempt));
+        });
+      }
+    }
     if (_browsing) {
-      final connection = _connection;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         unawaited(connection.stopDiscovery());
       });
@@ -298,6 +310,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
 
   void _finishAddingComputer() {
     _invite.clear();
+    _mutualPairing = false;
     if (!_addingComputer) return;
     if (_browsing) {
       _browsing = false;
@@ -397,15 +410,23 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     await _runConnection((connection) async {
       _openingInvite = true;
       try {
-        await connection.pair(invite);
+        if (_mutualPairing) {
+          await connection.pairMutually(invite);
+        } else {
+          await connection.pair(invite);
+        }
       } finally {
         _openingInvite = false;
       }
     });
   }
 
-  Future<void> _confirm(String code) async {
+  Future<void> _confirm(String code, {Object? mutualAttempt}) async {
     if (_connection.pendingCode != code) return;
+    if (widget.localHost != null &&
+        _connection.pendingMutualAttempt != mutualAttempt) {
+      return;
+    }
     await _runConnection((connection) async {
       final previousHost = _addingComputer ? connection.selectedHostId : null;
       _confirmingCode = code;
@@ -787,7 +808,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   Widget build(BuildContext context) {
     final text = _HostText(context);
     return ListenableBuilder(
-      listenable: Listenable.merge([_connection, _chats]),
+      listenable: Listenable.merge([_connection, _chats, widget.localHost]),
       builder: (context, _) {
         _queueRestore();
         return Material(
@@ -1615,7 +1636,11 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 : () => _runConnection((connection) async {
                     _openingInvite = true;
                     try {
-                      await connection.pairNearby(advert.id);
+                      if (_mutualPairing) {
+                        await connection.pairNearbyMutually(advert.id);
+                      } else {
+                        await connection.pairNearby(advert.id);
+                      }
                     } finally {
                       _openingInvite = false;
                     }
@@ -1631,6 +1656,27 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
         Text(text.pairTitle, style: SettingsText.title),
         const SizedBox(height: 6),
         Text(text.pairDescription, style: SettingsText.description),
+        if (widget.localHost case final local?) ...[
+          Material(
+            type: MaterialType.transparency,
+            child: CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: Text(text.mutual.option),
+              value: _mutualPairing,
+              onChanged: _busy
+                  ? null
+                  : (value) => setState(() => _mutualPairing = value == true),
+            ),
+          ),
+          if (_mutualPairing)
+            Text(
+              local.canShareDesktop
+                  ? text.mutual.risk
+                  : text.mutual.enableLocally,
+              style: SettingsText.description,
+            ),
+        ],
         if (_connection.discoverySupported) _nearby(text),
         const SizedBox(height: 16),
         TextField(
@@ -1675,44 +1721,71 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     ),
   );
 
-  Widget _comparison(_HostText text, String code) => _HostCard(
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(text.codeTitle, style: SettingsText.title),
-        const SizedBox(height: 6),
-        Text(text.compare, style: SettingsText.description),
-        if (_connection.pendingNeedsApproval ||
-            _connection.waitingForHostApproval)
-          Text(text.bothApprove, style: SettingsText.description),
-        const SizedBox(height: 14),
-        Semantics(
-          liveRegion: true,
-          child: SelectableText(
-            code,
-            style: SettingsText.path.copyWith(fontSize: 22, letterSpacing: 1),
+  Widget _comparison(_HostText text, String code) {
+    final reverse = widget.localHost == null
+        ? null
+        : _connection.pendingReverseCode;
+    final attempt = reverse == null ? null : _connection.pendingMutualAttempt;
+    return _HostCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(text.codeTitle, style: SettingsText.title),
+          const SizedBox(height: 6),
+          Text(
+            reverse == null ? text.compare : text.mutual.compare,
+            style: SettingsText.description,
           ),
-        ),
-        const SizedBox(height: 14),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            FilledButton(
-              onPressed: _busy ? null : () => _confirm(code),
-              child: Text(text.confirm),
+          if (reverse != null)
+            Text(text.mutual.risk, style: SettingsText.description),
+          if (reverse == null &&
+              (_connection.pendingNeedsApproval ||
+                  _connection.waitingForHostApproval))
+            Text(text.bothApprove, style: SettingsText.description),
+          const SizedBox(height: 14),
+          if (reverse != null) Text(text.mutual.forward),
+          Semantics(
+            liveRegion: true,
+            child: SelectableText(
+              code,
+              style: SettingsText.path.copyWith(fontSize: 22, letterSpacing: 1),
             ),
-            OutlinedButton(
-              onPressed: !_busy || _connection.waitingForHostApproval
-                  ? _cancelPairing
-                  : null,
-              child: Text(text.cancelPairing),
+          ),
+          if (reverse != null) ...[
+            const SizedBox(height: 8),
+            Text(text.mutual.reverse),
+            SelectableText(
+              reverse,
+              style: SettingsText.path.copyWith(fontSize: 22, letterSpacing: 1),
             ),
+            if (_connection.waitingForHostApproval)
+              Text(text.mutual.waiting, style: SettingsText.description),
           ],
-        ),
-      ],
-    ),
-  );
+          const SizedBox(height: 14),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilledButton(
+                onPressed: _busy
+                    ? null
+                    : () => _confirm(code, mutualAttempt: attempt),
+                child: Text(
+                  reverse == null ? text.confirm : text.mutual.confirm,
+                ),
+              ),
+              OutlinedButton(
+                onPressed: !_busy || _connection.waitingForHostApproval
+                    ? _cancelPairing
+                    : null,
+                child: Text(text.cancelPairing),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _HostComposer extends StatelessWidget {
@@ -2064,9 +2137,11 @@ class _Progress extends StatelessWidget {
 // Kept with the view while its strings are scoped to this page.
 class _HostText {
   _HostText(BuildContext context)
-    : _zh = Localizations.localeOf(context).languageCode == 'zh';
+    : _zh = Localizations.localeOf(context).languageCode == 'zh',
+      mutual = DesktopMutualText(context);
 
   final bool _zh;
+  final DesktopMutualText mutual;
   String get title => _zh ? '远程工作区' : 'Remote workspace';
   String get switchToLocal => _zh ? '切回本地' : 'Switch to local';
   String get addComputer => _zh ? '添加电脑' : 'Add computer';

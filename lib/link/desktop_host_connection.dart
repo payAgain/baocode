@@ -5,6 +5,8 @@ import 'package:bao_link/bao_link.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/secret_store.dart';
+import 'desktop_mutual_pairing.dart';
+import 'link_host.dart';
 import 'desktop_host_connection_stub.dart'
     if (dart.library.io) 'desktop_host_connection_io.dart'
     as platform;
@@ -18,7 +20,7 @@ typedef DesktopSavedHost = ({String id, String name});
 /// Saved BaoCode desktops, with one outgoing Mobile Link connection at a time.
 /// Each pairing has its own client key, independent of the local LinkHost.
 class DesktopHostConnection extends ChangeNotifier {
-  DesktopHostConnection()
+  DesktopHostConnection({LinkHost? localHost})
     : this._(
         SecretStore.instance,
         platform.bindDesktopHostClient,
@@ -26,6 +28,7 @@ class DesktopHostConnection extends ChangeNotifier {
         discovery.desktopRemoteDiscoverySupported
             ? discovery.discoverDesktopRemoteHosts
             : null,
+        localHost,
       );
 
   @visibleForTesting
@@ -34,13 +37,15 @@ class DesktopHostConnection extends ChangeNotifier {
     required Future<LinkNode> Function(LinkIdentity, List<String>) bind,
     required Future<DeviceInfo> Function() device,
     Stream<List<LinkAdvert>> Function()? discover,
-  }) : this._(store, bind, device, discover);
+    LinkHost? localHost,
+  }) : this._(store, bind, device, discover, localHost);
 
   DesktopHostConnection._(
     this._store,
     this._bind,
     this._device,
     this._discover,
+    this.localHost,
   );
 
   static const _legacyStorageId = 'desktop_host_connection.v1';
@@ -52,6 +57,7 @@ class DesktopHostConnection extends ChangeNotifier {
   final Future<LinkNode> Function(LinkIdentity, List<String>) _bind;
   final Future<DeviceInfo> Function() _device;
   final Stream<List<LinkAdvert>> Function()? _discover;
+  final LinkHost? localHost;
   _SavedHosts _saved = const _SavedHosts({}, null);
   _SavedHost? get _selected => _saved.hosts[_saved.selectedId];
   bool _loaded = false;
@@ -74,6 +80,8 @@ class DesktopHostConnection extends ChangeNotifier {
   bool get busy => _busy;
   String? get error => _error;
   String? get pendingCode => _pending?.code;
+  String? get pendingReverseCode => _pending?.binding?.reverseCode;
+  Object? get pendingMutualAttempt => _pending?.binding;
   bool get pendingNeedsApproval => _pending?.needsApproval ?? false;
   bool get waitingForHostApproval => _session?.waitingForHostApproval ?? false;
   String? get hostName => _pending?.host.name ?? _selected?.name;
@@ -168,7 +176,11 @@ class DesktopHostConnection extends ChangeNotifier {
 
   /// Dials the computer that issued the literal invite and shows the safety
   /// code. Only [confirm] can complete a new pairing.
-  Future<void> pair(String invite) =>
+  Future<void> pair(String invite) => _pairInvite(invite, mutual: false);
+
+  Future<void> pairMutually(String invite) => _pairInvite(invite, mutual: true);
+
+  Future<void> _pairInvite(String invite, {required bool mutual}) =>
       _startPairing('Could not open the invite.', () async {
         final offer = _parseOffer(invite);
         await _beginPairing(
@@ -177,11 +189,16 @@ class DesktopHostConnection extends ChangeNotifier {
           direct: offer.direct,
           token: encodeKey(offer.token),
           expires: offer.expires,
+          mutual: mutual,
         );
       });
 
   /// Dials only a currently visible, explicitly selected pairing advert.
-  Future<void> pairNearby(String id) {
+  Future<void> pairNearby(String id) => _pairNearby(id, mutual: false);
+
+  Future<void> pairNearbyMutually(String id) => _pairNearby(id, mutual: true);
+
+  Future<void> _pairNearby(String id, {required bool mutual}) {
     final browse = _browse;
     LinkAdvert currentAdvert() {
       final advert = nearbyHosts.where((advert) => advert.id == id).firstOrNull;
@@ -200,6 +217,7 @@ class DesktopHostConnection extends ChangeNotifier {
         // relay policy from the authenticated host.
         direct: true,
         pairingAddresses: () => currentAdvert().addrs,
+        mutual: mutual,
       );
     });
   }
@@ -222,8 +240,16 @@ class DesktopHostConnection extends ChangeNotifier {
     String? token,
     DateTime? expires,
     List<String> Function()? pairingAddresses,
+    required bool mutual,
   }) async {
-    final needsApproval = token == null;
+    final local = localHost;
+    final shareEpoch = local?.desktopShareEpoch;
+    if (mutual && (shareEpoch == null || local!.id == address.id)) {
+      throw const _HostError(
+        'Enable sharing in Settings → Mobile before pairing mutually.',
+      );
+    }
+    final needsApproval = token == null || mutual;
     if (_saved.hosts.containsKey(address.id)) {
       throw const _HostError('This computer is already saved.');
     }
@@ -248,8 +274,19 @@ class DesktopHostConnection extends ChangeNotifier {
         session,
         peer,
         token: token,
-        request: needsApproval,
+        request: token == null,
+        mutual: mutual,
       );
+      if (mutual &&
+          !DesktopMutualPairing.offered(switch (answer) {
+            {'capabilities': {DesktopMutualPairing.capability: final value}} =>
+              value,
+            _ => null,
+          })) {
+        throw const _HostError(
+          'Mutual pairing is unavailable on the other computer. Turn off mutual access to try one-way pairing.',
+        );
+      }
       if (answer is! Map ||
           answer['pairing'] != true ||
           (answer['approval'] == true) != needsApproval) {
@@ -261,6 +298,31 @@ class DesktopHostConnection extends ChangeNotifier {
       }
       final details = host.updated(_deviceFrom(answer));
       _checkSession(session);
+      DesktopPairBinding? binding;
+      if (mutual) {
+        final attempt = encodeKey(randomBytes(16));
+        final preparation = await peer.call(DesktopMutualPairing.prepare, {
+          'attempt': attempt,
+          'reverseHost': local!.id,
+        });
+        _checkSession(session);
+        if (preparation case {'reverseClient': final String reverseClient}) {
+          binding = DesktopPairBinding(
+            attempt: attempt,
+            forwardHost: peer.remote,
+            forwardClient: host.identity.id,
+            reverseHost: local.id,
+            reverseClient: reverseClient,
+          );
+        }
+        if (binding == null ||
+            !binding.valid ||
+            !binding.matches(preparation)) {
+          throw const _HostError(
+            'The return connection did not match the expected identities.',
+          );
+        }
+      }
       if (expires != null) {
         final timeLeft = expires.difference(DateTime.now());
         if (timeLeft <= Duration.zero) {
@@ -279,6 +341,8 @@ class DesktopHostConnection extends ChangeNotifier {
         ).join('  '),
         expires,
         needsApproval: needsApproval,
+        binding: binding,
+        shareEpoch: shareEpoch,
       );
     });
   }
@@ -297,6 +361,10 @@ class DesktopHostConnection extends ChangeNotifier {
         throw const _HostError('This invite has expired.');
       }
       final peer = session.peer!;
+      if (pending.binding != null) {
+        await _confirmMutual(session, peer, pending);
+        return;
+      }
       session.waitingForHostApproval = pending.needsApproval;
       final confirmation = peer.call(
         LinkMethods.confirm,
@@ -342,16 +410,215 @@ class DesktopHostConnection extends ChangeNotifier {
     }
   });
 
+  Future<void> _confirmMutual(
+    _ClientSession session,
+    LinkPeer peer,
+    _PendingHost pending,
+  ) async {
+    final binding = pending.binding!;
+    final local = localHost!;
+    DesktopReverseReservation? reservation;
+    bool kept = false;
+    bool contacted = false;
+    bool current() =>
+        _session == session &&
+        !session.cancelled &&
+        !session.revoked &&
+        !peer.isClosed &&
+        local.desktopShareEpoch == pending.shareEpoch;
+    void check() {
+      _checkSession(session);
+      if (!current()) throw DesktopMutualPairing.rejected;
+    }
+
+    session.waitingForHostApproval = true;
+    _notify();
+    void sharingChanged() {
+      if (local.desktopShareEpoch != pending.shareEpoch) {
+        unawaited(peer.close());
+      }
+    }
+
+    local.addListener(sharingChanged);
+    try {
+      check();
+      final consent = await peer.call(
+        DesktopMutualPairing.consent,
+        binding.toJson(),
+        DesktopMutualPairing.consentTimeout,
+      );
+      check();
+      if (!binding.matches(consent)) throw DesktopMutualPairing.rejected;
+      reservation = local.armDesktopReverse(
+        binding,
+        pending.host.name,
+        current,
+      );
+      await _save(
+        _saved.withHost(pending.host, select: true),
+        validate: check,
+        beforeCommit: () async {
+          // Check the protected store before either inbound grant. This
+          // candidate is not published and its key alone has no access.
+          contacted = true;
+          final linked = await peer.call(DesktopMutualPairing.link, {
+            'binding': binding.toJson(),
+            'route': local.desktopReturnRoute,
+          }, DesktopMutualPairing.connectTimeout);
+          check();
+          if (!binding.matches(linked) ||
+              !local.desktopReverseGranted(reservation!)) {
+            throw DesktopMutualPairing.rejected;
+          }
+          _deviceFrom(await _hello(session, peer));
+        },
+        onCommit: () {
+          kept = true;
+          unawaited(local.endDesktopReverse(reservation!, keep: true));
+          _publishPairing(session, peer);
+        },
+      );
+    } on Object {
+      if (contacted && !session.cancelled) await _abortMutual(peer, binding);
+      if (session.cancelled) return;
+      throw const _HostError(
+        'Mutual pairing was not completed. Check sharing on both computers, then try again or choose one-way pairing.',
+      );
+    } finally {
+      local.removeListener(sharingChanged);
+      if (!kept && reservation != null) {
+        await local.endDesktopReverse(reservation, keep: false);
+      }
+    }
+  }
+
+  void _publishPairing(_ClientSession session, LinkPeer peer) {
+    session.pairing = false;
+    session.confirming = false;
+    session.waitingForHostApproval = false;
+    _pausedHostId = null;
+    _clearPending();
+    _authorized = peer;
+  }
+
+  /// The responding desktop uses this same single outbound slot. If it
+  /// already has a selection, save the new workspace without switching it.
+  Future<bool> completeDesktopReverse(
+    DesktopPairBinding binding,
+    LinkIdentity identity,
+    DesktopReturnRoute route,
+    String name,
+    bool Function() valid,
+    Future<void> Function() keepForward,
+  ) async {
+    if (_busy ||
+        _disposed ||
+        !valid() ||
+        localHost?.id != binding.forwardHost ||
+        route.address.id != binding.reverseHost ||
+        identity.id != binding.reverseClient) {
+      return false;
+    }
+    bool kept = false;
+    await _run('Could not finish the return connection.', () async {
+      await _readSaved();
+      if (!valid() ||
+          _saved.hosts.containsKey(route.address.id) ||
+          _session?.pairing == true) {
+        return;
+      }
+      final restore = selectedHostId;
+      if (_session case final previous?) {
+        _pausedHostId = previous.hostId;
+        await _drop(previous);
+      } else if (restore != null) {
+        _pausedHostId = restore;
+      }
+      if (!valid()) return;
+      final host = _SavedHost(
+        identity,
+        name.isEmpty ? 'BaoCode' : name,
+        route.address,
+        direct: route.direct,
+        restrictRelays: true,
+      );
+      await _connect(host, pairing: true, (session, peer) async {
+        void check() {
+          _checkSession(session);
+          if (!valid()) throw DesktopMutualPairing.rejected;
+        }
+
+        try {
+          check();
+          final proof = await peer.call(
+            DesktopMutualPairing.reverse,
+            binding.toJson(),
+          );
+          check();
+          if (!binding.matches(proof)) throw DesktopMutualPairing.rejected;
+          await _save(
+            _saved.withHost(host, select: restore == null),
+            validate: check,
+            beforeCommit: () async {
+              // Both owners consented, the exact reverse transport proved
+              // its key, and both outgoing stores have verified their writes.
+              await keepForward();
+              check();
+              final grant = await peer.call(
+                DesktopMutualPairing.grant,
+                binding.toJson(),
+              );
+              check();
+              if (!binding.matches(grant)) throw DesktopMutualPairing.rejected;
+              _deviceFrom(await _hello(session, peer));
+            },
+            onCommit: () {
+              kept = true;
+              if (restore == null) _publishPairing(session, peer);
+            },
+          );
+          if (restore != null) await _drop(session);
+        } on Object {
+          await _abortMutual(peer, binding);
+          rethrow;
+        }
+      });
+    });
+    return kept;
+  }
+
+  static Future<void> _abortMutual(
+    LinkPeer peer,
+    DesktopPairBinding binding,
+  ) async {
+    try {
+      await peer.call(
+        DesktopMutualPairing.abort,
+        binding.toJson(),
+        const Duration(seconds: 2),
+      );
+    } on Object {
+      // The other host can already be offline. The local reservation is
+      // invalidated separately; do not imply rollback across an outage.
+    }
+  }
+
+  Future<void> cancelMutualAttempt(Object attempt) async {
+    if (identical(pendingMutualAttempt, attempt)) await cancelPairing();
+  }
+
   Future<void> cancelPairing() async {
     _preparingPair = false;
     final session = _session;
     if (session == null || !session.pairing) return;
     if (session.confirming) {
+      final binding = _pending?.binding;
       session.cancelled = true;
       session.waitingForHostApproval = false;
       _clearPending();
       final cancellation = session.cancellation ??= _cancelConfirmation(
         session,
+        binding,
       );
       _notify();
       await cancellation;
@@ -360,10 +627,17 @@ class DesktopHostConnection extends ChangeNotifier {
     }
   }
 
-  Future<void> _cancelConfirmation(_ClientSession session) async {
+  Future<void> _cancelConfirmation(
+    _ClientSession session,
+    DesktopPairBinding? binding,
+  ) async {
     // The host may already have accepted the confirmation. Clear that
     // authorization before closing the still-private pending peer.
-    await _unpair(session.peer!);
+    if (binding == null) {
+      await _unpair(session.peer!);
+    } else {
+      await _abortMutual(session.peer!, binding);
+    }
     await _endPending(session);
   }
 
@@ -521,6 +795,8 @@ class DesktopHostConnection extends ChangeNotifier {
         host.address.copyWith(
           relays: host.direct
               ? const []
+              : host.restrictRelays
+              ? host.address.relays
               : {...host.address.relays, ...defaultLinkRelays}.toList(),
           addrs:
               pairingAddresses?.call() ??
@@ -535,6 +811,11 @@ class DesktopHostConnection extends ChangeNotifier {
       if (link.remote != host.address.id) {
         throw const _HostError(
           'The computer did not prove the expected identity.',
+        );
+      }
+      if (node.id != host.identity.id) {
+        throw const _HostError(
+          'The local connection did not use the expected identity.',
         );
       }
       final peer = await LinkPeer.connect(link, mirror: LinkSessionMirror());
@@ -568,6 +849,7 @@ class DesktopHostConnection extends ChangeNotifier {
     LinkPeer peer, {
     String? token,
     bool request = false,
+    bool mutual = false,
   }) async {
     final device = await _device();
     _checkSession(session);
@@ -576,6 +858,10 @@ class DesktopHostConnection extends ChangeNotifier {
       'system': device.system,
       'token': ?token,
       if (request) 'request': true,
+      if (mutual)
+        'capabilities': {
+          DesktopMutualPairing.capability: DesktopMutualPairing.version,
+        },
     });
   }
 
@@ -650,6 +936,7 @@ class DesktopHostConnection extends ChangeNotifier {
   Future<void> _save(
     _SavedHosts next, {
     void Function()? validate,
+    Future<void> Function()? beforeCommit,
     void Function()? onCommit,
   }) async {
     final previous = await _store.read(_storageId);
@@ -659,6 +946,10 @@ class DesktopHostConnection extends ChangeNotifier {
       validate?.call();
       await _writeSaved(text);
       validate?.call();
+      if (beforeCommit != null) {
+        await beforeCommit();
+        validate?.call();
+      }
     } on Object {
       // A backend may have written before throwing or failing verification.
       // Restore the previous snapshot, never delete other saved pairings.
@@ -836,10 +1127,13 @@ class _SavedHost {
     this.name,
     LinkAddress address, {
     required this.direct,
+    this.restrictRelays = false,
   }) : address = address.copyWith(
          relays: direct
              ? const []
-             : (address.relays.isEmpty ? linkRelays() : address.relays),
+             : (address.relays.isEmpty && !restrictRelays
+                   ? linkRelays()
+                   : address.relays),
        );
 
   static _SavedHost decode(Object? json) {
@@ -852,7 +1146,13 @@ class _SavedHost {
       final identity = LinkIdentity.fromJson(identityJson);
       final address = LinkAddress.fromJson(addressJson);
       if (identity != null && address != null && address.id != identity.id) {
-        return _SavedHost(identity, name, address, direct: direct);
+        return _SavedHost(
+          identity,
+          name,
+          address,
+          direct: direct,
+          restrictRelays: json['restrictRelays'] == true,
+        );
       }
     }
     throw const _HostError(
@@ -864,15 +1164,21 @@ class _SavedHost {
   final String name;
   final LinkAddress address;
   final bool direct;
+  final bool restrictRelays;
 
   _SavedHost updated(DeviceInfo device) => _SavedHost(
     identity,
     device.name.isEmpty ? name : device.name,
     address.copyWith(
-      relays: device.relays.isEmpty ? address.relays : device.relays,
-      addrs: device.addrs.isEmpty ? address.addrs : device.addrs,
+      relays: restrictRelays || device.relays.isEmpty
+          ? address.relays
+          : device.relays,
+      addrs: restrictRelays || device.addrs.isEmpty
+          ? address.addrs
+          : device.addrs,
     ),
-    direct: device.direct,
+    direct: restrictRelays ? direct : device.direct,
+    restrictRelays: restrictRelays,
   );
 
   Map<String, Object?> toJson() => {
@@ -880,6 +1186,7 @@ class _SavedHost {
     'name': name,
     'address': address.toJson(),
     'direct': direct,
+    if (restrictRelays) 'restrictRelays': true,
   };
 }
 
@@ -932,12 +1239,16 @@ class _PendingHost {
     this.code,
     this.expires, {
     required this.needsApproval,
+    this.binding,
+    this.shareEpoch,
   });
 
   final _SavedHost host;
   final String code;
   final DateTime? expires;
   final bool needsApproval;
+  final DesktopPairBinding? binding;
+  final Object? shareEpoch;
 }
 
 class _ClientSession {

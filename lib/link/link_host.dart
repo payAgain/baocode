@@ -7,6 +7,8 @@ import 'package:flutter/foundation.dart';
 import '../bots/bots.dart';
 import '../customize/customization_store.dart';
 import '../workspace/workspace.dart';
+import 'desktop_host_connection.dart';
+import 'desktop_mutual_pairing.dart';
 import 'link_platform.dart';
 import 'link_quota.dart';
 import 'phone_push.dart';
@@ -128,6 +130,7 @@ class PendingPairing {
     this.system,
     this.code, {
     this.needsApproval = false,
+    this._desktopRequest,
   });
 
   final _Connection _connection;
@@ -139,12 +142,40 @@ class PendingPairing {
 
   /// Found nearby: the user here has to allow it ([LinkHost.approvePending]).
   final bool needsApproval;
+  final _MutualIncoming? _desktopRequest;
+  bool get mutual => _desktopRequest != null;
+  String? get reverseCode => _desktopRequest?.binding?.reverseCode;
 
   /// The user here allowed it.
   bool approved = false;
 
   /// The phone said the codes matched: waits for [approved].
   Completer<Object?>? _confirmed;
+}
+
+/// Incoming standard workspace access, kept separate from mobile push.
+typedef DesktopWorkspaceGrant = ({String clientId, String hostId, String name});
+
+enum DesktopMutualStatus { connecting, complete, incomplete, cancelled }
+
+class _MutualIncoming {
+  _MutualIncoming(this.offer);
+  final PairingOffer offer;
+  final consent = Completer<bool>();
+  DesktopPairBinding? binding;
+  LinkIdentity? identity;
+  bool linking = false;
+}
+
+/// A live reverse leg armed by the local desktop's confirming client.
+class DesktopReverseReservation {
+  DesktopReverseReservation._(this.binding, this.name, this.isCurrent);
+  final DesktopPairBinding binding;
+  final String name;
+  final bool Function() isCurrent;
+  _Connection? _connection;
+  bool _granting = false;
+  DesktopWorkspaceGrant? _grant;
 }
 
 /// How the relays to keep to are chosen (Settings → Mobile).
@@ -225,6 +256,22 @@ class LinkHost extends ChangeNotifier {
   }) : platform = platform ?? LinkPlatform.current();
 
   final Workspace workspace;
+
+  /// The main workbench's single outgoing connection, created on demand.
+  DesktopHostConnection Function()? desktopClient;
+  final _desktopGrants = <String, DesktopWorkspaceGrant>{};
+  List<DesktopWorkspaceGrant> get desktopGrants =>
+      List.unmodifiable(_desktopGrants.values);
+  DesktopReverseReservation? _reverse;
+  DesktopMutualStatus? desktopMutualStatus;
+  bool get canShareDesktop =>
+      _enabled &&
+      _node != null &&
+      _status == LinkHostStatus.listening &&
+      !_disposed;
+
+  /// Changes whenever the locally enabled listener is stopped or rebound.
+  Object? get desktopShareEpoch => canShareDesktop ? _node : null;
 
   /// Claude Code's customizations here, for the phones to list.
   final CustomizationStore? customizations;
@@ -412,6 +459,25 @@ class LinkHost extends ChangeNotifier {
         }
       }
     }
+    if (json['desktopGrants'] case final List<Object?> grants
+        when identity != null) {
+      for (final grant in grants) {
+        if (grant
+            case {
+              'client': final String client,
+              'host': final String host,
+              'name': final String name,
+            }
+            when DesktopMutualPairing.validId(client) &&
+                DesktopMutualPairing.validId(host) &&
+                client != host &&
+                client != id &&
+                host != id &&
+                !_phones.containsKey(client)) {
+          _desktopGrants[client] = (clientId: client, hostId: host, name: name);
+        }
+      }
+    }
     if (json['pathCounts'] case final Map<String, Object?> counts) {
       _counts = LinkPathCounts({
         for (final MapEntry(:key, :value) in counts.entries)
@@ -425,7 +491,7 @@ class LinkHost extends ChangeNotifier {
     _syncPush();
   }
 
-  Map<String, Object?> _toJson() => {
+  Map<String, Object?> _toJson([Iterable<DesktopWorkspaceGrant>? grants]) => {
     'version': 2,
     'identity': _identity.toJson(),
     'enabled': _enabled,
@@ -434,6 +500,10 @@ class LinkHost extends ChangeNotifier {
     'pinnedRelay': ?_pinnedRelay,
     'linkPort': _linkPort,
     'phones': [for (final phone in _phones.values) phone.toJson()],
+    'desktopGrants': [
+      for (final grant in grants ?? _desktopGrants.values)
+        {'client': grant.clientId, 'host': grant.hostId, 'name': grant.name},
+    ],
     if (_legacy.isNotEmpty)
       'legacyPhones': [for (final phone in _legacy) phone.toJson()],
     'pathCounts': _counts.toJson(),
@@ -444,12 +514,90 @@ class LinkHost extends ChangeNotifier {
   Future<void> _save() {
     final platform = this.platform;
     if (platform == null || !_loaded) return Future.value();
-    final json = _toJson();
     return _saving = _saving.then(
-      (_) => platform.write(json).catchError((Object error) {
+      (_) => platform.write(_toJson()).catchError((Object error) {
         debugPrint('mobile.json not kept: $error');
       }),
     );
+  }
+
+  Future<void> _writeDesktopGrants(
+    Iterable<DesktopWorkspaceGrant> grants,
+  ) async {
+    final storage = platform!;
+    final json = _toJson(grants);
+    await storage.write(json);
+    final kept = await storage.read();
+    if (jsonEncode(kept['desktopGrants']) !=
+            jsonEncode(json['desktopGrants']) ||
+        jsonEncode(kept['identity']) != jsonEncode(json['identity'])) {
+      throw const FormatException('Could not verify workspace access storage');
+    }
+  }
+
+  Future<void> _keepDesktopGrant(
+    DesktopWorkspaceGrant grant,
+    bool Function() valid,
+  ) {
+    final operation = _saving.then((_) async {
+      if (!valid() ||
+          _phones.containsKey(grant.clientId) ||
+          _desktopGrants.containsKey(grant.clientId) ||
+          _desktopGrants.values.any((other) => other.hostId == grant.hostId)) {
+        throw DesktopMutualPairing.rejected;
+      }
+      try {
+        await _writeDesktopGrants([..._desktopGrants.values, grant]);
+        if (!valid()) throw DesktopMutualPairing.rejected;
+        _desktopGrants[grant.clientId] = grant;
+      } on Object {
+        // A failing backend may already have written the candidate.
+        try {
+          await _writeDesktopGrants(_desktopGrants.values);
+        } on Object {
+          desktopMutualStatus = DesktopMutualStatus.incomplete;
+        }
+        rethrow;
+      }
+      notifyListeners();
+    });
+    _saving = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  Future<bool> removeDesktopGrant(DesktopWorkspaceGrant grant) =>
+      _removeDesktopGrant(grant);
+
+  Future<bool> _removeDesktopGrant(
+    DesktopWorkspaceGrant grant, {
+    _Connection? replyTo,
+  }) async {
+    if (_desktopGrants[grant.clientId] != grant) return true;
+    _desktopGrants.remove(grant.clientId);
+    if (desktopMutualStatus == DesktopMutualStatus.complete) {
+      desktopMutualStatus = null;
+    }
+    for (final connection in [..._connections]) {
+      if (connection.desktopGrant != grant) continue;
+      connection.bridge?.dispose();
+      connection.bridge = null;
+      if (connection == replyTo) continue;
+      connection.peer.emit(LinkEvents.unpaired);
+      unawaited(connection.peer.close());
+    }
+    notifyListeners();
+    final operation = _saving.then(
+      (_) => _writeDesktopGrants(_desktopGrants.values),
+    );
+    _saving = operation.catchError((Object _) {});
+    try {
+      await operation;
+      return true;
+    } on Object {
+      desktopMutualStatus = DesktopMutualStatus.incomplete;
+      notifyListeners();
+      return false;
+    }
   }
 
   /// [sent] of [pathCounts] got through the usage report.
@@ -656,6 +804,12 @@ class LinkHost extends ChangeNotifier {
   Future<void> _stop() async {
     final node = _node;
     _node = null;
+    final reverse = _reverse;
+    if (reverse != null) unawaited(endDesktopReverse(reverse, keep: false));
+    if (_pending case final pending? when pending.mutual) {
+      _pending = null;
+      _turnAway(pending);
+    }
     await _accepting?.cancel();
     _accepting = null;
     await _watching?.cancel();
@@ -712,6 +866,11 @@ class LinkHost extends ChangeNotifier {
     if (!_enabled) await setEnabled(true);
     await refresh();
     if (_status != LinkHostStatus.listening) return null;
+    if (_pending case final pending? when pending.mutual) {
+      _pending = null;
+      _turnAway(pending);
+    }
+    desktopMutualStatus = null;
     _justPaired = null;
     _offer = PairingOffer(
       name: _device?.name ?? '',
@@ -724,7 +883,14 @@ class LinkHost extends ChangeNotifier {
     );
     // Expired: no longer advertised as pairing.
     _expiry?.cancel();
-    _expiry = Timer(offerLifetime, notifyListeners);
+    _expiry = Timer(offerLifetime, () {
+      if (_pending case final pending? when pending.mutual) {
+        _pending = null;
+        _turnAway(pending);
+        desktopMutualStatus = DesktopMutualStatus.incomplete;
+      }
+      notifyListeners();
+    });
     notifyListeners();
     return _offer;
   }
@@ -754,7 +920,7 @@ class LinkHost extends ChangeNotifier {
   /// desktop nearby: kept once it says so too (at once if it did).
   void approvePending() {
     final pending = _pending;
-    if (pending == null || !pending.needsApproval) return;
+    if (pending == null || !pending.needsApproval || pending.mutual) return;
     pending.approved = true;
     if (pending._confirmed case final confirmed?) {
       confirmed.complete(_finishPairing(pending));
@@ -762,9 +928,33 @@ class LinkHost extends ChangeNotifier {
     notifyListeners();
   }
 
+  void approveMutual(PendingPairing pending) {
+    final request = pending._desktopRequest;
+    if (request == null ||
+        request.binding == null ||
+        !_mutualCurrent(pending, request) ||
+        pending.approved) {
+      return;
+    }
+    pending.approved = true;
+    request.consent.complete(true);
+    desktopMutualStatus = DesktopMutualStatus.connecting;
+    notifyListeners();
+  }
+
+  void rejectMutual(PendingPairing pending) {
+    if (_pending == pending && pending.mutual) rejectPending();
+  }
+
   /// Tells a phone waiting for the user here that it was turned down,
   /// then lets it go.
   void _turnAway(PendingPairing pending) {
+    if (pending._desktopRequest case final request?) {
+      if (!request.consent.isCompleted) request.consent.complete(false);
+      desktopMutualStatus = DesktopMutualStatus.cancelled;
+      unawaited(pending._connection.peer.close());
+      return;
+    }
     final confirmed = pending._confirmed;
     if (confirmed != null && !confirmed.isCompleted) {
       confirmed.completeError(
@@ -795,6 +985,7 @@ class LinkHost extends ChangeNotifier {
   // --- Phones -----------------------------------------------------------------
 
   Future<void> _accept(LinkConnection link) async {
+    final node = _node;
     final key = keyOfDeviceId(link.remote);
     if (key == null) {
       link.close();
@@ -804,6 +995,10 @@ class LinkHost extends ChangeNotifier {
     try {
       peer = await LinkPeer.accept(link);
     } on Object {
+      return;
+    }
+    if (node == null || _node != node || !_enabled || _disposed) {
+      await peer.close();
       return;
     }
     final connection = _Connection(peer, key);
@@ -819,9 +1014,18 @@ class LinkHost extends ChangeNotifier {
         _connections.remove(connection);
         connection.dispose();
         connection.bridge?.dispose();
+        if (connection.desktopGrant case final grant?
+            when connection.awaitingDesktopHello) {
+          desktopMutualStatus = DesktopMutualStatus.incomplete;
+          unawaited(_removeDesktopGrant(grant));
+        }
         if (_pending case final pending?
             when pending._connection == connection) {
           _pending = null;
+          if (pending._desktopRequest case final request?) {
+            if (!request.consent.isCompleted) request.consent.complete(false);
+            desktopMutualStatus = DesktopMutualStatus.incomplete;
+          }
           // Gone while the user here was asked.
           if (pending._confirmed case final confirmed?
               when !confirmed.isCompleted) {
@@ -846,6 +1050,20 @@ class LinkHost extends ChangeNotifier {
     String method,
     Map<String, Object?> params,
   ) async {
+    switch (method) {
+      case DesktopMutualPairing.prepare:
+        return _prepareDesktop(connection, params);
+      case DesktopMutualPairing.consent:
+        return _waitDesktopConsent(connection, params);
+      case DesktopMutualPairing.link:
+        return _linkDesktop(connection, params);
+      case DesktopMutualPairing.reverse:
+      case DesktopMutualPairing.grant:
+        return _reverseDesktop(connection, method, params);
+      case DesktopMutualPairing.abort:
+        await _abortDesktop(connection, params);
+        return null;
+    }
     if (connection.bridge case final bridge?) {
       if (method == LinkMethods.push) {
         if (connection.phone case final phone?) _setPush(phone, params);
@@ -856,6 +1074,11 @@ class LinkHost extends ChangeNotifier {
         return null;
       }
       if (method == LinkMethods.unpair) {
+        if (connection.desktopGrant case final grant?) {
+          if (!await _removeDesktopGrant(grant, replyTo: connection)) {
+            throw DesktopMutualPairing.rejected;
+          }
+        }
         if (connection.phone case final phone?) {
           _phones.remove(phone.id);
           unawaited(_save());
@@ -885,11 +1108,56 @@ class LinkHost extends ChangeNotifier {
           _connect(connection, _phones[phone.id]!);
           return {'device': _deviceInfo().toJson()};
         }
+        if (_desktopGrants[connection.id] case final grant?) {
+          if (_reverse case final reverse?
+              when reverse.binding.reverseClient == connection.id &&
+                  (reverse._connection != connection ||
+                      !_reverseCurrent(reverse))) {
+            throw DesktopMutualPairing.rejected;
+          }
+          if (_connections.any(
+            (other) =>
+                other != connection &&
+                other.desktopGrant == grant &&
+                other.awaitingDesktopHello,
+          )) {
+            throw DesktopMutualPairing.rejected;
+          }
+          if (_pending case final pending?
+              when pending.mutual && pending._connection.id == connection.id) {
+            throw DesktopMutualPairing.rejected;
+          }
+          if (!canShareDesktop ||
+              (connection.desktopBinding != null &&
+                  connection.desktopGrant != grant)) {
+            throw DesktopMutualPairing.rejected;
+          }
+          if (connection.awaitingDesktopHello) {
+            connection.awaitingDesktopHello = false;
+            desktopMutualStatus = DesktopMutualStatus.complete;
+          }
+          _connectDesktop(connection, grant);
+          return {'device': _deviceInfo().toJson()};
+        }
+        if (connection.desktopBinding != null ||
+            _reverse?.binding.reverseClient == connection.id) {
+          throw DesktopMutualPairing.rejected;
+        }
         final offer = _offer;
         final token = switch (params['token']) {
           final String text => _decode(text),
           _ => null,
         };
+        final mutualVersion = switch (params['capabilities']) {
+          {DesktopMutualPairing.capability: final value} => value,
+          _ => null,
+        };
+        final mutual =
+            desktopClient != null &&
+            canShareDesktop &&
+            DesktopMutualPairing.offered(mutualVersion) &&
+            connection.id != id &&
+            _reverse?.binding.reverseClient != connection.id;
         if (token == null && params['request'] == true) {
           // Found nearby: no secret, so the user here allows it.
           if (offer == null || offer.expiredAt(DateTime.now())) {
@@ -910,12 +1178,17 @@ class LinkHost extends ChangeNotifier {
             system,
             safetyCode(_identity.publicKey, key),
             needsApproval: true,
+            desktopRequest: mutual ? _MutualIncoming(offer) : null,
           );
           notifyListeners();
           return {
             'device': _deviceInfo().toJson(),
             'pairing': true,
             'approval': true,
+            if (mutual)
+              'capabilities': {
+                DesktopMutualPairing.capability: DesktopMutualPairing.version,
+              },
           };
         }
         if (token == null) {
@@ -935,12 +1208,25 @@ class LinkHost extends ChangeNotifier {
           name,
           system,
           safetyCode(_identity.publicKey, key),
+          needsApproval: mutual,
+          desktopRequest: mutual ? _MutualIncoming(offer) : null,
         );
         notifyListeners();
-        return {'device': _deviceInfo().toJson(), 'pairing': true};
+        return {
+          'device': _deviceInfo().toJson(),
+          'pairing': true,
+          if (mutual) ...{
+            'approval': true,
+            'capabilities': {
+              DesktopMutualPairing.capability: DesktopMutualPairing.version,
+            },
+          },
+        };
       case LinkMethods.confirm:
         final pending = _pending;
-        if (pending == null || pending._connection != connection) {
+        if (pending == null ||
+            pending._connection != connection ||
+            pending.mutual) {
           throw const LinkRemoteException(LinkErrors.unpaired, 'Not pairing');
         }
         if (pending.needsApproval && !pending.approved) {
@@ -952,6 +1238,258 @@ class LinkHost extends ChangeNotifier {
         return _finishPairing(pending);
     }
     throw const LinkRemoteException(LinkErrors.unpaired, 'Not paired');
+  }
+
+  bool _mutualCurrent(PendingPairing pending, _MutualIncoming request) =>
+      canShareDesktop &&
+      _pending == pending &&
+      _offer == request.offer &&
+      !request.offer.expiredAt(DateTime.now()) &&
+      !pending._connection.peer.isClosed;
+
+  Object _prepareDesktop(_Connection connection, Map<String, Object?> params) {
+    final pending = _pending;
+    final request = pending?._desktopRequest;
+    if (pending == null ||
+        request == null ||
+        pending._connection != connection ||
+        !_mutualCurrent(pending, request) ||
+        request.binding != null ||
+        params['attempt'] is! String ||
+        params['reverseHost'] is! String) {
+      throw DesktopMutualPairing.rejected;
+    }
+    final identity = LinkIdentity.generate();
+    final binding = DesktopPairBinding(
+      attempt: params['attempt']! as String,
+      forwardHost: id,
+      forwardClient: connection.id,
+      reverseHost: params['reverseHost']! as String,
+      reverseClient: identity.id,
+    );
+    if (!binding.valid ||
+        _desktopGrants.values.any(
+          (grant) => grant.hostId == binding.reverseHost,
+        )) {
+      throw DesktopMutualPairing.rejected;
+    }
+    request.identity = identity;
+    request.binding = binding;
+    connection.desktopBinding = binding;
+    notifyListeners();
+    return binding.toJson();
+  }
+
+  Future<Object> _waitDesktopConsent(
+    _Connection connection,
+    Map<String, Object?> params,
+  ) async {
+    final pending = _pending;
+    final request = pending?._desktopRequest;
+    final binding = request?.binding;
+    if (pending == null ||
+        request == null ||
+        binding == null ||
+        pending._connection != connection ||
+        !_mutualCurrent(pending, request) ||
+        !binding.matches(params)) {
+      throw DesktopMutualPairing.rejected;
+    }
+    final consent = await request.consent.future.timeout(
+      DesktopMutualPairing.consentTimeout,
+    );
+    if (!consent || !_mutualCurrent(pending, request)) {
+      throw DesktopMutualPairing.rejected;
+    }
+    return binding.toJson();
+  }
+
+  Future<Object> _linkDesktop(
+    _Connection connection,
+    Map<String, Object?> params,
+  ) async {
+    final pending = _pending;
+    final request = pending?._desktopRequest;
+    final binding = request?.binding;
+    if (pending == null ||
+        request == null ||
+        binding == null ||
+        pending._connection != connection ||
+        !_mutualCurrent(pending, request) ||
+        !binding.matches(params['binding']) ||
+        request.linking ||
+        !pending.approved) {
+      throw DesktopMutualPairing.rejected;
+    }
+    final route = DesktopReturnRoute.decode(
+      params['route'],
+      allowedRelays: relays,
+    );
+    if (route == null || route.address.id != binding.reverseHost) {
+      throw DesktopMutualPairing.rejected;
+    }
+    request.linking = true;
+    bool valid() => _mutualCurrent(pending, request) && pending.approved;
+    final grant = (
+      clientId: connection.id,
+      hostId: binding.reverseHost,
+      name: pending.name,
+    );
+    try {
+      final client = desktopClient?.call();
+      if (client == null) throw DesktopMutualPairing.rejected;
+      if (!await client.completeDesktopReverse(
+            binding,
+            request.identity!,
+            route,
+            pending.name,
+            valid,
+            () => _keepDesktopGrant(grant, valid),
+          ) ||
+          !valid() ||
+          _desktopGrants[grant.clientId] != grant) {
+        throw DesktopMutualPairing.rejected;
+      }
+      connection.desktopGrant = grant;
+      connection.awaitingDesktopHello = true;
+      _pending = null;
+      _offer = null;
+      _expiry?.cancel();
+      // The initiator acknowledges the result with its workspace hello.
+      desktopMutualStatus = DesktopMutualStatus.connecting;
+      notifyListeners();
+      return binding.toJson();
+    } on Object {
+      await _removeDesktopGrant(grant);
+      if (_pending == pending) {
+        _pending = null;
+        desktopMutualStatus = DesktopMutualStatus.incomplete;
+        notifyListeners();
+      }
+      throw DesktopMutualPairing.rejected;
+    }
+  }
+
+  DesktopReverseReservation armDesktopReverse(
+    DesktopPairBinding binding,
+    String name,
+    bool Function() isCurrent,
+  ) {
+    if (!canShareDesktop ||
+        !binding.valid ||
+        binding.reverseHost != id ||
+        _reverse != null ||
+        _pending?.mutual == true ||
+        _phones.containsKey(binding.reverseClient) ||
+        _desktopGrants.containsKey(binding.reverseClient) ||
+        _desktopGrants.values.any(
+          (grant) => grant.hostId == binding.forwardHost,
+        ) ||
+        !isCurrent()) {
+      throw DesktopMutualPairing.rejected;
+    }
+    return _reverse = DesktopReverseReservation._(binding, name, isCurrent);
+  }
+
+  Map<String, Object?> get desktopReturnRoute => {
+    'id': id,
+    'addrs': _tellAddrs,
+    'relays': _tellRelays.take(16).toList(),
+    'direct': _relayMode == LinkRelayMode.direct,
+  };
+
+  bool _reverseCurrent(DesktopReverseReservation reservation) =>
+      _reverse == reservation && canShareDesktop && reservation.isCurrent();
+
+  bool desktopReverseGranted(DesktopReverseReservation reservation) =>
+      _reverseCurrent(reservation) &&
+      reservation._grant != null &&
+      _desktopGrants[reservation.binding.reverseClient] == reservation._grant;
+
+  Future<void> endDesktopReverse(
+    DesktopReverseReservation reservation, {
+    required bool keep,
+  }) async {
+    if (_reverse != reservation) return;
+    _reverse = null;
+    if (!keep) {
+      if (reservation._grant case final grant?) {
+        await _removeDesktopGrant(grant);
+      }
+      await reservation._connection?.peer.close();
+    }
+  }
+
+  Future<Object> _reverseDesktop(
+    _Connection connection,
+    String method,
+    Map<String, Object?> params,
+  ) async {
+    final reverse = _reverse;
+    if (reverse == null ||
+        !_reverseCurrent(reverse) ||
+        !reverse.binding.matches(params) ||
+        reverse.binding.reverseClient != connection.id ||
+        _phones.containsKey(connection.id)) {
+      throw DesktopMutualPairing.rejected;
+    }
+    if (method == DesktopMutualPairing.reverse) {
+      if (reverse._connection != null ||
+          connection.bridge != null ||
+          connection.desktopBinding != null) {
+        throw DesktopMutualPairing.rejected;
+      }
+      reverse._connection = connection;
+      connection.desktopBinding = reverse.binding;
+    } else {
+      if (reverse._connection != connection || reverse._granting) {
+        throw DesktopMutualPairing.rejected;
+      }
+      reverse._granting = true;
+      final grant = (
+        clientId: connection.id,
+        hostId: reverse.binding.forwardHost,
+        name: reverse.name,
+      );
+      reverse._grant = grant;
+      await _keepDesktopGrant(
+        grant,
+        () => _reverseCurrent(reverse) && !connection.peer.isClosed,
+      );
+      if (!_reverseCurrent(reverse) || connection.peer.isClosed) {
+        await _removeDesktopGrant(grant);
+        throw DesktopMutualPairing.rejected;
+      }
+      connection.desktopGrant = grant;
+    }
+    return reverse.binding.toJson();
+  }
+
+  Future<void> _abortDesktop(
+    _Connection connection,
+    Map<String, Object?> params,
+  ) async {
+    if (connection.desktopBinding?.matches(params) != true) {
+      throw DesktopMutualPairing.rejected;
+    }
+    if (_pending case final pending? when pending._connection == connection) {
+      rejectMutual(pending);
+    }
+    if (_reverse case final reverse? when reverse._connection == connection) {
+      _reverse = null;
+      if (reverse._grant case final grant?) {
+        if (!await _removeDesktopGrant(grant, replyTo: connection)) {
+          throw DesktopMutualPairing.rejected;
+        }
+      }
+    }
+    if (connection.desktopGrant case final grant?) {
+      if (!await _removeDesktopGrant(grant, replyTo: connection)) {
+        throw DesktopMutualPairing.rejected;
+      }
+      desktopMutualStatus = DesktopMutualStatus.incomplete;
+      notifyListeners();
+    }
   }
 
   /// Keeps [pending]'s phone, and connects it.
@@ -986,20 +1524,35 @@ class LinkHost extends ChangeNotifier {
         unawaited(other.peer.close());
       }
     }
-    connection
-      ..phone = phone
-      ..bridge = (WorkspaceBridge(
-        workspace: workspace,
-        peer: connection.peer,
-        device: _deviceInfo,
-        branchOf: (project) =>
-            project.host == null ? platform?.branchOf(project.root) : null,
-        filesOf: filesOf,
-        reachHost: reachHost,
-        customizations: customizations,
-        bots: bots,
-        quota: quota,
-      )..start());
+    connection.phone = phone;
+    _startBridge(connection);
+  }
+
+  void _connectDesktop(_Connection connection, DesktopWorkspaceGrant grant) {
+    for (final other in [..._connections]) {
+      if (other != connection && other.desktopGrant == grant) {
+        other.bridge?.dispose();
+        other.bridge = null;
+        unawaited(other.peer.close());
+      }
+    }
+    connection.desktopGrant = grant;
+    _startBridge(connection);
+  }
+
+  void _startBridge(_Connection connection) {
+    connection.bridge = (WorkspaceBridge(
+      workspace: workspace,
+      peer: connection.peer,
+      device: _deviceInfo,
+      branchOf: (project) =>
+          project.host == null ? platform?.branchOf(project.root) : null,
+      filesOf: filesOf,
+      reachHost: reachHost,
+      customizations: customizations,
+      bots: bots,
+      quota: quota,
+    )..start());
     notifyListeners();
   }
 
@@ -1113,6 +1666,10 @@ class LinkHost extends ChangeNotifier {
 
 class _Connection {
   _Connection(this.peer, this.key) : id = deviceIdOf(key);
+
+  DesktopWorkspaceGrant? desktopGrant;
+  DesktopPairBinding? desktopBinding;
+  bool awaitingDesktopHello = false;
 
   final LinkPeer peer;
 
