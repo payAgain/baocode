@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 import 'package:bao_link/bao_link.dart';
+import 'package:baocode/chat/chat_column.dart';
+import 'package:baocode/chat/chat_width.dart';
 import 'package:baocode/chat/composer/file_drop.dart';
 import 'package:baocode/l10n/l10n.dart';
 import 'package:baocode/link/desktop_host_connection.dart';
@@ -52,6 +54,13 @@ void main() {
     final page = find.byType(DesktopHostPage);
     expect(page, findsOneWidget);
     expect(tester.getSize(page).width, 1440);
+    final column = find.descendant(of: page, matching: find.byType(ChatColumn));
+    expect(column, findsOneWidget);
+    final previous = ChatWidth.current.value;
+    addTearDown(() => ChatWidth.current.value = previous);
+    ChatWidth.current.value = 1040;
+    await tester.pump();
+    expect(tester.widget<ChatColumn>(column).maxWidth, 1040);
     expect(find.byType(Sidebar), findsNothing);
     expect(find.byType(HeaderMenuBar), findsNothing);
     final caption = windowCalls.lastWhere(

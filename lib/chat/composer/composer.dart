@@ -35,6 +35,7 @@ import 'composer_images.dart';
 import 'composer_mock_data.dart';
 import 'composer_picker.dart';
 import 'composer_polish.dart';
+import 'composer_presentation.dart';
 import 'pickers_row.dart';
 import 'session_model_picker.dart';
 import 'kernel_option_text.dart';
@@ -158,21 +159,6 @@ class ChatComposer extends StatefulWidget {
 class ChatComposerState extends State<ChatComposer>
     with ChatKeyTarget
     implements FileDropDelegate {
-  static const _fontSize = 13.5;
-  static TextStyle get _textStyle => TextStyle(
-    color: AppColors.textPrimary,
-    fontSize: _fontSize,
-    height: 1.5,
-    // Center glyphs in the line box so the custom caret lines up with them.
-    leadingDistribution: TextLeadingDistribution.even,
-  );
-  static const _lineHeight = _fontSize * 1.5;
-
-  /// Resting height of the text area: roomier than one line, and it keeps
-  /// the composer at the height it had with the old context row.
-  static const _minEditorHeight = _lineHeight + 28;
-  static const _maxEditorLines = 10;
-
   late final ComposerController _controller = _createController();
   final FocusNode _focusNode = FocusNode(debugLabel: 'Composer');
   final ScrollController _scrollController = ScrollController();
@@ -1668,17 +1654,9 @@ class ChatComposerState extends State<ChatComposer>
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
       onTap: _focusNode.requestFocus,
-      child: AnimatedContainer(
+      child: ComposerSurface(
         key: _boxKey,
-        duration: const Duration(milliseconds: 150),
-        decoration: BoxDecoration(
-          // The agents window's chat input, editing a sent message too:
-          // the color of every bubble, and their line; typed into, the line
-          // turns a little towards the accent.
-          color: AppColors.bubbleFill,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColors.bubbleBorder(focused: focused)),
-        ),
+        focused: focused,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1724,7 +1702,7 @@ class ChatComposerState extends State<ChatComposer>
 
   Widget _buildEditorBody(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 2),
+      padding: composerEditorPadding,
       child: ClipRect(
         child: ComposerCaret(
           editorKey: _editorKey,
@@ -1877,24 +1855,9 @@ class ChatComposerState extends State<ChatComposer>
     _clickWindow = Timer(kDoubleTapTimeout, () => _clickWindow = null);
   }
 
-  /// Grows with content up to 10 lines, or a third of the window on short
-  /// windows, then scrolls internally.
-  double _maxEditorHeight(BuildContext context) {
-    final byWindow = MediaQuery.sizeOf(context).height / 3;
-    return math.max(
-      _minEditorHeight,
-      math.min(_lineHeight * _maxEditorLines, byWindow),
-    );
-  }
-
   Widget _buildMarkdownEditor(BuildContext context) {
-    final colors = themeColors;
-    final base = DefaultTextStyle.of(context).style.merge(_textStyle);
     return ConstrainedBox(
-      constraints: BoxConstraints(
-        minHeight: _minEditorHeight,
-        maxHeight: _maxEditorHeight(context),
-      ),
+      constraints: composerEditorConstraints(context),
       child: MarkdownEditor(
         key: _editorKey,
         controller: _controller,
@@ -1907,14 +1870,7 @@ class ChatComposerState extends State<ChatComposer>
         onPaste: _paste,
         onPasteCopy: (markdown) =>
             renumberPastes(markdown, from: _nextPastedNumber()),
-        style: MarkdownEditorStyle(
-          text: base,
-          selection: AppColors.textSelection,
-          caret: colors['editorCursor.foreground'],
-          placeholder: TextStyle(
-            color: colors['agentsChatInput.placeholderForeground'],
-          ),
-        ),
+        style: composerEditorStyle(context),
       ),
     );
   }
@@ -1938,7 +1894,7 @@ class ChatComposerState extends State<ChatComposer>
       option,
     );
     return Padding(
-      padding: const EdgeInsets.fromLTRB(6, 4, 6, 6),
+      padding: composerToolbarPadding,
       child: Row(
         children: [
           // Takes the room left, so the actions sit at the far end; the
@@ -2108,15 +2064,10 @@ class _SendButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final active = streaming || enabled;
-    final colors = themeColors;
-    // As upstream's submit button: the primary button's colors; disabled,
-    // none but the disabled icon.
-    final foreground = colors['button.foreground'];
     // With the keys that do the same, as the keybindings have them.
     const input = {ChatContextKeys.inChatInput: true};
-    return IdeHover(
-      message: streaming
+    return ComposerSendButton(
+      tooltip: streaming
           ? ChatKeys.titleWithKey(
               context.l10n.composerStop,
               ChatCommandIds.cancel,
@@ -2127,46 +2078,8 @@ class _SendButton extends StatelessWidget {
               ChatCommandIds.submit,
               input,
             ),
-      child: HoverBuilder(
-        cursor: active ? SystemMouseCursors.click : SystemMouseCursors.basic,
-        builder: (context, hovered) => GestureDetector(
-          onTap: streaming ? onStop : (enabled ? onSend : null),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            width: 24,
-            height: 24,
-            decoration: BoxDecoration(
-              color: !active
-                  ? Colors.transparent
-                  : hovered
-                  ? colors['button.hoverBackground']
-                  : colors['button.background'],
-              shape: BoxShape.circle,
-            ),
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 150),
-              transitionBuilder: (child, animation) =>
-                  ScaleTransition(scale: animation, child: child),
-              child: streaming
-                  ? Container(
-                      key: const ValueKey('stop'),
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: foreground,
-                        borderRadius: BorderRadius.circular(1.5),
-                      ),
-                    )
-                  : Icon(
-                      key: const ValueKey('send'),
-                      Icons.arrow_upward_rounded,
-                      size: 15,
-                      color: active ? foreground : AppColors.textFaint,
-                    ),
-            ),
-          ),
-        ),
-      ),
+      onSend: enabled ? onSend : null,
+      onStop: streaming ? onStop : null,
     );
   }
 }
