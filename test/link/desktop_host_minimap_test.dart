@@ -29,6 +29,9 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'desktop_mutual_pairing_test.dart' show machines;
+import 'my_computers_test.dart' show admit;
+
 const _project = ProjectInfo(
   id: r'C:\fixture',
   name: 'Synthetic Windows project',
@@ -98,9 +101,12 @@ void main() {
       expect(ChatMinimap.enabled.value, isTrue);
       expect(ChatMinimap.side.value, ChatMinimapSide.left);
 
+      final (viewer, owner) = await machines();
+      await viewer.host.createComputerGroup();
+      await admit(viewer, owner);
       final (client, remote) = MemoryLinkConnection.pair(
-        a: 'synthetic-client',
-        b: 'synthetic-windows-host',
+        a: viewer.host.id,
+        b: owner.host.id,
       );
       final opened = <Object?>[];
       final accepting = LinkPeer.accept(
@@ -161,7 +167,7 @@ void main() {
       final peer = await LinkPeer.connect(client, mirror: LinkSessionMirror());
       final host = await accepting;
       final workspace = Workspace.mock();
-      final settings = AppSettings(locale: AppLocale());
+      final settings = AppSettings(locale: AppLocale(), link: viewer.host);
       final surface = GlobalKey();
       addTearDown(workspace.dispose);
 
@@ -181,7 +187,11 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        await tester.tap(find.text('Switch to remote workspace'));
+        await tester.tap(find.text('My computers'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(ValueKey(('open-computer', owner.host.id))),
+        );
         await tester.pumpAndSettle();
         final page = find.byType(DesktopHostPage);
         expect(page, findsOneWidget);
@@ -350,6 +360,8 @@ void main() {
         await tester.pumpWidget(const SizedBox.shrink());
         await peer.close();
         await host.close();
+        await viewer.host.pauseGroupConnections();
+        await owner.host.pauseGroupConnections();
       }
     },
     variant: const TargetPlatformVariant({
@@ -445,6 +457,19 @@ class _FixtureConnection extends ChangeNotifier
   final LinkPeer peer;
   @override
   Future<void> load() async => notifyListeners();
+  @override
+  String? selectedHostId;
+  @override
+  bool get groupSelected => selectedHostId != null;
+  @override
+  Future<void> selectGroupMember(String id) async {
+    if (id != peer.remote) throw StateError('Unexpected fixture host');
+    selectedHostId = id;
+    notifyListeners();
+  }
+
+  @override
+  Future<void> stopDiscovery() async {}
   @override
   String? get pendingCode => null;
   @override
