@@ -192,9 +192,14 @@ void main() {
         _Chat('b', 'Configure domain', 'project'),
         _Chat('bot', 'Helper', 'bot'),
       ];
-    await _pumpPage(tester, _Connection()..peer = _Peer(), chats: chats);
+    final peer = _Peer();
+    await _pumpPage(tester, _Connection()..peer = peer, chats: chats);
     expect(find.text('claude'), findsOneWidget);
     expect(find.text('orm-adaptation-factory'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey(('new-session', r'D:\orm'))).hitTestable(),
+      findsOneWidget,
+    );
     expect(
       tester.getTopLeft(find.text('Install CLI')).dx,
       greaterThan(tester.getTopLeft(find.text('claude')).dx),
@@ -207,9 +212,54 @@ void main() {
     expect(chats.opens, isEmpty);
     await tester.tap(find.text('claude'));
     await tester.pump();
+    final manage = find.byKey(const ValueKey(('manage-session', 'b')));
+    await tester.tap(manage);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(chats.opens, isEmpty);
+    expect(peer.calls, isEmpty);
+    for (final method in [
+      LinkMethods.pin,
+      LinkMethods.rename,
+      LinkMethods.archive,
+      LinkMethods.delete,
+    ]) {
+      await tester.tap(manage);
+      await tester.pumpAndSettle();
+      final label = {
+        LinkMethods.pin: 'Pin',
+        LinkMethods.rename: 'Rename',
+        LinkMethods.archive: 'Archive',
+        LinkMethods.delete: 'Delete',
+      }[method]!;
+      await tester.tap(find.text(label));
+      await tester.pumpAndSettle();
+      if (method == LinkMethods.rename) {
+        await tester.enterText(find.byType(TextFormField), 'New title');
+        await tester.tap(find.text('Save'));
+      }
+      if (method == LinkMethods.archive || method == LinkMethods.delete) {
+        await tester.tap(find.widgetWithText(TextButton, label));
+      }
+      await tester.pumpAndSettle();
+      expect(peer.calls.last.$1, method);
+      expect(peer.calls.last.$2, {
+        'session': 'b',
+        if (method == LinkMethods.pin) 'pinned': true,
+        if (method == LinkMethods.rename) 'title': 'New title',
+      });
+    }
     await tester.tap(find.text('Configure domain'));
     await tester.pump();
     expect(chats.opens, ['b']);
+    await tester.tap(find.byKey(const ValueKey(('new-session', r'D:\orm'))));
+    await tester.pumpAndSettle();
+    expect(chats.created, [r'D:\orm']);
+    expect(chats.selected?.id, 'fresh');
   });
 
   testWidgets('wide workspace keeps chat navigation beside the composer', (
@@ -800,6 +850,10 @@ class _Peer extends Fake implements LinkPeer {
 class _Chat extends Fake implements DesktopHostChat {
   _Chat(this.id, this.title, this.kind);
   @override
+  bool get pinned => false;
+  @override
+  bool get provisional => false;
+  @override
   DateTime? get updatedAt => kind == 'project'
       ? DateTime.now().subtract(const Duration(days: 1))
       : null;
@@ -845,6 +899,21 @@ class _Chats extends ChangeNotifier implements DesktopHostChats {
   bool hasEarlier = false;
   @override
   String? error;
+
+  final created = <String>[];
+  @override
+  Future<void> createInProject(String projectId, String placeholder) async {
+    created.add(projectId);
+    await open(
+      DesktopHostChat(
+        id: 'fresh',
+        title: placeholder,
+        kind: 'project',
+        projectId: projectId,
+        provisional: true,
+      ),
+    );
+  }
 
   final opens = <String>[];
   final sends = <String>[];

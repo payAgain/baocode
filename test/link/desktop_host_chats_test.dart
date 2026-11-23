@@ -78,6 +78,32 @@ List<String> _texts(DesktopHostChats chats) => [
 ];
 
 void main() {
+  test(
+    'closed draft request cannot reopen a conversation after a late response',
+    () async {
+      final reply = Completer<Object?>();
+      final received = Completer<void>();
+      final (peer, _) = await _peers((method, params) {
+        if (method == LinkMethods.draft) {
+          received.complete();
+          return reply.future;
+        }
+        if (method == LinkMethods.state) return _state();
+        if (method == LinkMethods.open) return _update('late', []).toJson();
+        return null;
+      });
+      final chats = DesktopHostChats()..bind(peer);
+      addTearDown(chats.dispose);
+      await pumpEventQueue();
+      final create = chats.createInProject(_project.id, 'New chat');
+      await received.future;
+      chats.closeChat();
+      reply.complete({'session': 'late'});
+      await create;
+      expect(chats.selected, isNull);
+      expect(chats.chats.map((c) => c.id), isNot(contains('late')));
+    },
+  );
   test('keeps empty and same-named host folders by ID over the link', () async {
     const a = ProjectInfo(
       id: r'C:\work\claude',
@@ -285,6 +311,31 @@ void main() {
         'other client group prompt',
       ]);
       expect(desktop.messages.last.mine, isTrue);
+      // An empty host draft is not listed. It remains usable through unrelated
+      // catalog updates and the first send promotes the same id into the tree.
+      await desktop.createInProject(projectChat.projectId!, 'New chat');
+      final fresh = desktop.selected!;
+      expect(fresh.provisional, isTrue);
+      expect(fresh.id, isNot(projectChat.id));
+      await otherClient.call(LinkMethods.rename, {
+        'session': projectChat.id,
+        'title': 'Changed elsewhere',
+      });
+      await pumpEventQueue();
+      expect(desktop.selected?.id, fresh.id);
+      expect(desktop.chats.where((c) => c.id == fresh.id), hasLength(1));
+      await desktop.send('fresh paired draft');
+      await pumpEventQueue();
+      final seen = LinkState.fromJson(
+        (await otherClient.call(LinkMethods.state))! as Map<String, Object?>,
+      );
+      expect(
+        seen.sessions.singleWhere((s) => s.id == fresh.id).project,
+        projectChat.projectId,
+      );
+      expect(desktop.selected?.id, fresh.id);
+      expect(desktop.selected?.provisional, false);
+      expect(_texts(desktop), contains('fresh paired draft'));
     },
   );
 

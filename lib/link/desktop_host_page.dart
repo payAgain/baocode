@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:bao_link/bao_link.dart' show LinkMethods, ProjectInfo;
+import 'package:bao_link/bao_link.dart' show LinkMethods, LinkPeer, ProjectInfo;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -117,7 +117,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   void dispose() {
     final chats = _chats;
     final selected = chats.selected;
-    if (selected != null) {
+    if (selected != null || _chatRequest != null) {
       // Workbench navigation can remove this page without using either back
       // button. Close its subscription after the tree finishes unmounting,
       // since closeChat notifies any remaining model listeners.
@@ -260,7 +260,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
         (_connection.pendingCode != null && _confirmingCode == null)) {
       unawaited(_connection.cancelPairing().onError<Exception>((_, _) {}));
     }
-    if (_chats.selected != null) _closeChat();
+    if (_chats.selected != null || _chatRequest != null) _closeChat();
     widget.onBack();
   }
 
@@ -312,6 +312,126 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
       } on Exception {
         // A storage failure should not close a working conversation.
       }
+    }
+  }
+
+  Future<void> _createSession(ProjectInfo folder) async {
+    final peer = _connection.peer;
+    if (peer == null || !_online || _busy || _chatBusy) return;
+    final host = peer.remote;
+    _restoreHandled.add(host);
+    setState(() => _collapsedFolders.remove((host, folder.id)));
+    final label = _HostText(context).newSession;
+    final opened = await _runChat(
+      (chats) => chats.createInProject(folder.id, label),
+    );
+    if (!mounted || !opened || !identical(_connection.peer, peer)) return;
+    final current = _chats.selected;
+    if (current != null &&
+        current.kind == 'project' &&
+        current.projectId == folder.id) {
+      try {
+        await widget.lastChatStore?.write(host, (
+          kind: current.kind,
+          id: current.id,
+        ));
+      } on Exception {
+        /* Selection remains usable. */
+      }
+    }
+  }
+
+  Future<void> _manageSession(
+    LinkPeer peer,
+    DesktopHostChat chat,
+    String method,
+  ) async {
+    bool current() =>
+        mounted &&
+        identical(_connection.peer, peer) &&
+        _online &&
+        !_busy &&
+        !_chatBusy &&
+        _chats.chats.any(
+          (c) =>
+              c.kind == 'project' &&
+              c.id == chat.id &&
+              c.projectId == chat.projectId,
+        );
+    if (!current()) return;
+    final strings = context.l10n;
+    final params = <String, Object?>{'session': chat.id};
+    switch (method) {
+      case LinkMethods.rename:
+        var title = chat.title;
+        final value = await showDialog<String>(
+          context: context,
+          builder: (dialog) => AlertDialog(
+            title: Text(strings.commonRename),
+            content: TextFormField(
+              initialValue: title,
+              autofocus: true,
+              onChanged: (s) => title = s,
+              onFieldSubmitted: (s) => Navigator.pop(dialog, s),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialog),
+                child: Text(strings.commonCancel),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(dialog, title),
+                child: Text(strings.commonSave),
+              ),
+            ],
+          ),
+        );
+        if (value == null ||
+            value.trim().isEmpty ||
+            value.trim() == chat.title) {
+          return;
+        }
+        params['title'] = value.trim();
+      case LinkMethods.pin:
+        params['pinned'] = !chat.pinned;
+      case LinkMethods.archive:
+      case LinkMethods.delete:
+        final deleting = method == LinkMethods.delete;
+        final accepted = await showDialog<bool>(
+          context: context,
+          builder: (dialog) => AlertDialog(
+            title: Text(
+              deleting
+                  ? strings.sidebarDeleteAgentTitle
+                  : strings.sidebarArchive,
+            ),
+            content: Text(
+              deleting
+                  ? strings.sidebarDeleteAgentMessage(chat.title)
+                  : chat.title,
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialog, false),
+                child: Text(strings.commonCancel),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(dialog, true),
+                child: Text(
+                  deleting ? strings.commonDelete : strings.sidebarArchive,
+                ),
+              ),
+            ],
+          ),
+        );
+        if (accepted != true) return;
+      default:
+        return;
+    }
+    if (current()) {
+      await _runChat((_) async {
+        await peer.call(method, params);
+      });
     }
   }
 
@@ -588,6 +708,19 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                   child: _CatalogRow(
                     key: ValueKey(('folder', folder.id)),
                     label: folder.name,
+                    action: IconButton(
+                      key: ValueKey(('new-session', folder.id)),
+                      tooltip: text.newSession,
+                      constraints: const BoxConstraints.tightFor(
+                        width: 28,
+                        height: 28,
+                      ),
+                      padding: EdgeInsets.zero,
+                      icon: const Icon(Icons.add, size: 16),
+                      onPressed: _busy || _chatBusy
+                          ? null
+                          : () => _createSession(folder),
+                    ),
                     icon: _collapsedFolders.contains((host, folder.id))
                         ? Codicons.folder
                         : Codicons.folderOpened,
@@ -603,7 +736,12 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                   ),
                 ),
                 if (!_collapsedFolders.contains((host, folder.id)))
-                  _chatRows(byFolder[folder.id] ?? const []),
+                  _chatRows([
+                    for (final pinned in [true, false])
+                      ...?(byFolder[folder.id]?.where(
+                        (chat) => chat.pinned == pinned,
+                      )),
+                  ]),
               ]
             else
               _chatRows(entry.value),
@@ -618,13 +756,52 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     itemBuilder: (context, index) {
       final chat = chats[index];
       final selected = _chats.selected;
+      final peer = _connection.peer;
+      final strings = context.l10n;
       return _CatalogRow(
         key: ValueKey((chat.kind, chat.id)),
+        action: chat.kind != 'project' || peer == null || chat.provisional
+            ? null
+            : PopupMenuButton<String>(
+                key: ValueKey(('manage-session', chat.id)),
+                tooltip: _HostText(context).manage,
+                enabled: !_busy && !_chatBusy,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 128),
+                icon: const Icon(Icons.more_horiz, size: 16),
+                style: IconButton.styleFrom(
+                  minimumSize: const Size(28, 28),
+                  fixedSize: const Size(28, 28),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onSelected: (method) => _manageSession(peer, chat, method),
+                itemBuilder: (_) => [
+                  PopupMenuItem(
+                    value: LinkMethods.rename,
+                    child: Text(strings.commonRename),
+                  ),
+                  PopupMenuItem(
+                    value: LinkMethods.pin,
+                    child: Text(
+                      chat.pinned ? strings.sidebarUnpin : strings.sidebarPin,
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: LinkMethods.archive,
+                    child: Text(strings.sidebarArchive),
+                  ),
+                  PopupMenuItem(
+                    value: LinkMethods.delete,
+                    child: Text(strings.commonDelete),
+                  ),
+                ],
+              ),
         selected: selected?.kind == chat.kind && selected?.id == chat.id,
         onTap: _busy || _chatBusy ? null : () => _openChat(chat),
         indent: chat.kind == 'project' ? 24 : 0,
         icon: switch (chat.kind) {
-          'project' => Codicons.commentDiscussion,
+          'project' =>
+            chat.pinned ? Icons.push_pin_outlined : Codicons.commentDiscussion,
           'bot' => Icons.smart_toy_outlined,
           _ => Icons.groups_outlined,
         },
@@ -1011,6 +1188,7 @@ class _CatalogRow extends StatelessWidget {
     required this.label,
     required this.icon,
     this.trailing,
+    this.action,
     this.updatedAt,
     this.selected = false,
     this.indent = 0,
@@ -1019,6 +1197,7 @@ class _CatalogRow extends StatelessWidget {
   final String label;
   final IconData icon;
   final IconData? trailing;
+  final Widget? action;
   final DateTime? updatedAt;
   final bool selected;
   final double indent;
@@ -1061,6 +1240,7 @@ class _CatalogRow extends StatelessWidget {
                       )
                     : const SizedBox.shrink(),
               ),
+            ?action,
             if (trailing != null)
               Icon(trailing, size: 13, color: AppColors.textFaint),
           ],
@@ -1204,6 +1384,8 @@ class _HostText {
   String get loadingChats => _zh ? '正在加载主机会话…' : 'Loading host conversations…';
   String get emptyCatalog =>
       _zh ? '主机上没有会话。' : 'No conversations on this host.';
+  String get manage => _zh ? '管理会话' : 'Manage chat';
+  String get newSession => _zh ? '新建会话' : 'New chat';
   String get hostOptions => _zh ? '主机选项' : 'Host options';
   String get sidebar => _zh ? '显示或隐藏侧栏' : 'Toggle sidebar';
   String get backToChats => _zh ? '返回主机会话列表' : 'Back to host chats';
