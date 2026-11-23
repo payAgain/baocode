@@ -159,6 +159,50 @@ void main() {
     expect(find.text('Project chat'), findsNothing);
   });
 
+  testWidgets('remote folders contain their sessions and keep empty projects', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final chats = _Chats()
+      ..projects = const [
+        ProjectInfo(
+          id: r'C:\work\claude',
+          name: 'claude',
+          path: r'C:\work\claude',
+        ),
+        ProjectInfo(
+          id: r'D:\orm',
+          name: 'orm-adaptation-factory',
+          path: r'D:\orm',
+        ),
+      ]
+      ..chats = [
+        _Chat('a', 'Install CLI', 'project'),
+        _Chat('b', 'Configure domain', 'project'),
+        _Chat('bot', 'Helper', 'bot'),
+      ];
+    await _pumpPage(tester, _Connection()..peer = _Peer(), chats: chats);
+    expect(find.text('claude'), findsOneWidget);
+    expect(find.text('orm-adaptation-factory'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Install CLI')).dx,
+      greaterThan(tester.getTopLeft(find.text('claude')).dx),
+    );
+    await tester.tap(find.text('claude'));
+    await tester.pump();
+    expect(find.text('Install CLI'), findsNothing);
+    expect(find.text('Configure domain'), findsNothing);
+    expect(find.text('Helper'), findsOneWidget);
+    expect(chats.opens, isEmpty);
+    await tester.tap(find.text('claude'));
+    await tester.pump();
+    await tester.tap(find.text('Configure domain'));
+    await tester.pump();
+    expect(chats.opens, ['b']);
+  });
+
   testWidgets('wide workspace keeps chat navigation beside the composer', (
     tester,
   ) async {
@@ -677,6 +721,8 @@ class _Peer extends Fake implements LinkPeer {
 
 class _Chat extends Fake implements DesktopHostChat {
   _Chat(this.id, this.title, this.kind);
+  @override
+  String? get projectId => kind == 'project' ? r'C:\work\claude' : null;
 
   @override
   final String id;
@@ -698,6 +744,10 @@ class _Message extends Fake implements DesktopHostMessage {
 }
 
 class _Chats extends ChangeNotifier implements DesktopHostChats {
+  @override
+  List<ProjectInfo> projects = const [
+    ProjectInfo(id: r'C:\work\claude', name: 'Work', path: r'C:\work\claude'),
+  ];
   @override
   List<DesktopHostChat> chats = [];
   @override

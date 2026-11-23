@@ -77,6 +77,42 @@ List<String> _texts(DesktopHostChats chats) => [
 ];
 
 void main() {
+  test('keeps empty and same-named host folders by ID over the link', () async {
+    const a = ProjectInfo(
+      id: r'C:\work\claude',
+      name: 'claude',
+      path: r'C:\work\claude',
+    );
+    const b = ProjectInfo(
+      id: r'D:\work\claude',
+      name: 'claude',
+      path: r'D:\work\claude',
+    );
+    final state = LinkState(
+      device: _device,
+      projects: const [a, b],
+      sessions: [
+        SessionSummary(
+          id: 'kept',
+          project: b.id,
+          title: 'Chat',
+          updatedAt: DateTime(2026),
+        ),
+      ],
+    );
+    final (peer, _) = await _peers(
+      (method, _) => method == LinkMethods.state ? state.toJson() : null,
+    );
+    final chats = DesktopHostChats();
+    addTearDown(chats.dispose);
+    chats.bind(peer);
+    await pumpEventQueue();
+    expect(chats.projects.map((p) => p.id), [a.id, b.id]);
+    expect(chats.chats.single.projectId, b.id);
+    expect(chats.chats.single.id, 'kept');
+    chats.reset();
+    expect(chats.projects, isEmpty);
+  });
   test(
     'real bridge shares project, private and group chats with two clients',
     () async {

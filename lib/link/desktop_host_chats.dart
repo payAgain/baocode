@@ -13,11 +13,13 @@ class DesktopHostChat {
     required this.id,
     required this.title,
     required this.kind,
+    this.projectId,
   });
 
   final String id;
   final String title;
   final String kind;
+  final String? projectId;
 
   (String, String) get _key => (kind, id);
 }
@@ -59,6 +61,8 @@ class DesktopHostChats extends ChangeNotifier {
   bool _loadingState = false;
   bool _stateEventSeen = false;
   String? _stateError;
+  List<ProjectInfo> _projects = const [];
+  List<ProjectInfo> get projects => _projects;
   List<DesktopHostChat> _chats = const [];
   Map<String, String?> _botSessions = const {};
   Map<String, String> _botNames = const {};
@@ -125,6 +129,7 @@ class DesktopHostChats extends ChangeNotifier {
     _disconnect();
     _host = null;
     _selected = null;
+    _projects = const [];
     _chats = const [];
     _botSessions = const {};
     _botNames = const {};
@@ -178,20 +183,22 @@ class DesktopHostChats extends ChangeNotifier {
     _botSessions = {for (final bot in state.bots) bot.id: bot.session};
     _botNames = {for (final bot in state.bots) bot.id: bot.name};
     final botIds = _botSessions.values.toSet();
+    _projects = List.unmodifiable(state.projects);
     final projects = state.projects.map((project) => project.id).toSet();
     final entries = <(String, String), DesktopHostChat>{};
-    void add(String kind, String id, String title) {
+    void add(String kind, String id, String title, {String? projectId}) {
       if (id.isEmpty) return;
       entries[(kind, id)] = DesktopHostChat(
         id: id,
         title: title.isEmpty ? id : title,
         kind: kind,
+        projectId: projectId,
       );
     }
 
     for (final session in state.sessions) {
       if (projects.contains(session.project) && !botIds.contains(session.id)) {
-        add('project', session.id, session.title);
+        add('project', session.id, session.title, projectId: session.project);
       }
     }
     for (final bot in state.bots) {
