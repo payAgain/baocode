@@ -96,6 +96,7 @@ import 'keybindings/keybinding_service.dart';
 import 'keybindings/window_keybindings.dart';
 import 'l10n/command_titles.dart';
 import 'l10n/l10n.dart';
+import 'link/computer_admission_prompt.dart';
 import 'link/computer_group_dialog.dart';
 import 'link/desktop_host_chats.dart';
 import 'link/desktop_host_connection.dart';
@@ -721,8 +722,15 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     _restoreSidePanel();
     _workspace.addListener(_syncWorkspaceFolders);
     _workspace.addListener(_reloadedElsewhere);
+    _bindComputerAdmissionPrompt();
     _restoreDesktopWorkspace();
     _syncWorkspaceFileDrops();
+  }
+
+  @override
+  void didUpdateWidget(covariant Workbench oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _bindComputerAdmissionPrompt();
   }
 
   /// A conversation read anew elsewhere in the workspace (its session
@@ -941,6 +949,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   @override
   void dispose() {
+    _computerAdmissionPrompt?.dispose();
     _cancelWorkspaceRestore?.call();
     _desktopConnection?.removeListener(_remoteChanged);
     _remoteNotices?.dispose();
@@ -1424,6 +1433,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   static const _desktopWorkspaceKey = 'workbench.desktopWorkspace';
   bool _remoteWorkspace = false;
   bool _myComputersOpen = false;
+  ComputerAdmissionPrompt? _computerAdmissionPrompt;
   VoidCallback? _cancelWorkspaceRestore;
   bool get _canSwitchWorkspace =>
       (widget.window?.isChat ?? true) && WindowControls.isDesktop;
@@ -1431,6 +1441,18 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   DesktopHostChats? _desktopChats;
   DesktopRemoteNotifications? _remoteNotices;
   String? _lastHostKey;
+
+  void _bindComputerAdmissionPrompt() {
+    final desktop = AppPlatform.isMacOS || AppPlatform.isWindows;
+    final host = desktop && (widget.window?.isChat ?? true)
+        ? widget.settings?.link
+        : null;
+    if (identical(host, _computerAdmissionPrompt?.host)) return;
+    _computerAdmissionPrompt?.dispose();
+    _computerAdmissionPrompt = host?.supported == true
+        ? ComputerAdmissionPrompt(host!, () => context)
+        : null;
+  }
 
   void _restoreDesktopWorkspace() {
     final storage = widget.settings?.files?.storage;

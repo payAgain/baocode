@@ -43,6 +43,31 @@ void main() {
     variant: desktop,
   );
 
+  testWidgets('join review explains identity, code and workspace access', (
+    tester,
+  ) async {
+    final (sponsor, joiner) = await machines();
+    await sponsor.host.createComputerGroup();
+    await pumpWorkbench(tester, joiner);
+    await tap(tester, 'My computers');
+    await tap(tester, 'Use invite');
+    await tester.enterText(
+      find.byKey(const ValueKey('computer-group-invite')),
+      sponsor.host.createGroupInvite(),
+    );
+    await tester.pump();
+    await tap(tester, 'Review invite');
+    expect(find.text('Join the group through ${sponsor.name}'), findsOneWidget);
+    expect(find.text('Verify this computer'), findsOneWidget);
+    expect(find.text('Compare security code'), findsOneWidget);
+    expect(find.text('Workspace access'), findsOneWidget);
+    expect(find.text('Join and share workspace'), findsOneWidget);
+    await tap(tester, 'Cancel join');
+    await tester.pumpWidget(const SizedBox.shrink());
+    await sponsor.host.pauseGroupConnections();
+    await joiner.host.pauseGroupConnections();
+  }, variant: desktop);
+
   testWidgets('the environment switcher offers one first-run setup', (
     tester,
   ) async {

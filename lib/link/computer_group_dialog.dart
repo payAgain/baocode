@@ -6,6 +6,8 @@ import 'package:flutter/services.dart';
 
 import '../l10n/l10n.dart';
 import '../theme/app_theme.dart';
+import 'computer_admission_prompt.dart';
+import 'computer_admission_review.dart';
 import 'computer_group.dart';
 import 'desktop_host_connection.dart';
 import 'link_host.dart';
@@ -14,21 +16,24 @@ Future<String?> showMyComputers(
   BuildContext context, {
   required LinkHost? host,
   DesktopHostConnection? connection,
-}) => showDialog<String>(
-  animationStyle: AnimationStyle.noAnimation,
-  context: context,
-  builder: (context) => host == null || !host.supported
-      ? AlertDialog(
-          title: Text(context.l10n.myComputers),
-          content: Text(context.l10n.myComputersUnavailable),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: Text(context.l10n.commonClose),
-            ),
-          ],
-        )
-      : _GroupDialog(host: host, connection: connection),
+}) => trackManualComputerReview(
+  host,
+  () => showDialog<String>(
+    animationStyle: AnimationStyle.noAnimation,
+    context: context,
+    builder: (context) => host == null || !host.supported
+        ? AlertDialog(
+            title: Text(context.l10n.myComputers),
+            content: Text(context.l10n.myComputersUnavailable),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text(context.l10n.commonClose),
+              ),
+            ],
+          )
+        : _GroupDialog(host: host, connection: connection),
+  ),
 );
 
 class _GroupDialog extends StatefulWidget {
@@ -132,20 +137,21 @@ class _GroupDialogState extends State<_GroupDialog> {
           if (_host.computerGroupStorageError)
             Text(text.storage)
           else if (waiting != null) ...[
-            Text(text.waiting(waiting.sponsor.name)),
-            SelectableText(waiting.code),
+            ComputerAdmissionWaiting(
+              title: text.waiting(waiting.sponsor.name),
+              code: waiting.code,
+            ),
             TextButton(
               onPressed: () => _host.cancelGroupJoin(waiting),
               child: Text(text.cancelJoin),
             ),
           ] else if (preview != null) ...[
-            Text(text.joinVia(preview.sponsor.name)),
-            Text(_fingerprint(preview.sponsor.id)),
-            Text(text.compare),
-            SelectableText(preview.code),
-            Text(text.scope),
-            FilledButton(
-              onPressed: _busy
+            ComputerGroupAdmissionReview(
+              title: text.joinVia(preview.sponsor.name),
+              fingerprint: _fingerprint(preview.sponsor.id),
+              code: preview.code,
+              primaryLabel: text.confirmJoin,
+              onPrimary: _busy
                   ? null
                   : () {
                       setState(() {
@@ -154,10 +160,8 @@ class _GroupDialogState extends State<_GroupDialog> {
                       });
                       unawaited(_run(() => _host.confirmGroupJoin(preview)));
                     },
-              child: Text(text.confirmJoin),
-            ),
-            TextButton(
-              onPressed: _busy
+              secondaryLabel: text.cancelJoin,
+              onSecondary: _busy
                   ? null
                   : () {
                       _host.cancelGroupJoin(preview);
@@ -166,7 +170,6 @@ class _GroupDialogState extends State<_GroupDialog> {
                         _setup = null;
                       });
                     },
-              child: Text(text.cancelJoin),
             ),
           ] else if (group == null) ...[
             ..._setupWidgets(text),
@@ -196,28 +199,16 @@ class _GroupDialogState extends State<_GroupDialog> {
               child: Text(context.l10n.commonCancel),
             ),
           ] else if (request != null) ...[
-            Text(text.approving(request.member.name)),
-            Text(_fingerprint(request.member.id)),
-            Text(text.compare),
-            SelectableText(request.code),
-            Text(text.scope),
-            FilledButton(
-              onPressed: _busy
-                  ? null
-                  : () => _run(() async {
-                      await _host.approveGroupJoin(request);
-                      if (mounted) {
-                        setState(() {
-                          _invitingNearby = false;
-                          _showInviteOptions = false;
-                        });
-                      }
-                    }),
-              child: Text(text.approve),
-            ),
-            TextButton(
-              onPressed: _busy ? null : () => _host.denyGroupJoin(request),
-              child: Text(text.decline),
+            ComputerApprovalPanel(
+              host: _host,
+              request: request,
+              onApproved: () {
+                if (!mounted) return;
+                setState(() {
+                  _invitingNearby = false;
+                  _showInviteOptions = false;
+                });
+              },
             ),
           ] else ...[
             _roster(text, group),
@@ -760,9 +751,7 @@ class _Text {
   String get welcome => zh
       ? '创建一个可信电脑组，或使用另一台电脑发出的邀请。'
       : 'Create a group for your trusted computers or use an invite from another computer.';
-  String get scope => zh
-      ? '当前和未来的成员可以互相操作 BaoCode 工作区，包括运行智能体、处理审批、读取 BaoCode 可访问的项目外文件。每位成员都可以批准加入或从整个组移除其他成员。请仅与完全信任的电脑共享。'
-      : 'Current and future members can operate one another’s BaoCode workspaces. They can run agents, answer approvals and read files BaoCode can access outside projects. Any member can approve new members or remove another computer from the whole group. Share only with computers you fully trust.';
+  String get scope => admissionScope(zh);
   String get paused =>
       zh ? '这台电脑的组连接已暂停。' : 'Group connections are paused on this computer.';
   String get enable => zh ? '恢复连接' : 'Resume connections';
@@ -792,9 +781,6 @@ class _Text {
   String get stopInviting => zh ? '停止附近邀请' : 'Stop inviting nearby';
   String get invite => zh ? '邀请链接' : 'Invite link';
   String get review => zh ? '查看邀请' : 'Review invite';
-  String get compare => zh
-      ? '请核对两台电脑上的校验码。只有一致时才继续。'
-      : 'Compare this code on both computers. Continue only if the codes match.';
   String get share => zh
       ? '仅将此一次性邀请发给要加入的电脑。邀请会过期。'
       : 'Share this short-lived, one-time invite only with the joining computer.';
@@ -802,8 +788,6 @@ class _Text {
   String get copied => zh ? '已复制邀请' : 'Invite copied';
   String get confirmJoin => zh ? '加入并共享工作区' : 'Join and share workspace';
   String get cancelJoin => zh ? '取消加入' : 'Cancel join';
-  String get approve => zh ? '批准加入组' : 'Approve group member';
-  String get decline => zh ? '拒绝加入' : 'Decline group member';
   String get keepWaiting => zh ? '关闭窗口并继续等待' : 'Close and keep waiting';
   String get confirmRemove => zh ? '从组中移除' : 'Remove from group';
   String get youRemoved => zh
@@ -836,8 +820,6 @@ class _Text {
       zh ? '通过 $name 加入组' : 'Join the group through $name';
   String waiting(String name) =>
       zh ? '等待 $name 批准' : 'Waiting for $name to approve';
-  String approving(String name) =>
-      zh ? '$name 请求加入组' : '$name requests to join the group';
   String pending(String names) => zh
       ? '尚未收到确认（电脑可能离线）：$names'
       : 'Awaiting acknowledgment from $names. These computers may be offline.';
