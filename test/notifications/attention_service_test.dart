@@ -78,7 +78,7 @@ void main() {
   var focused = true;
   final opened = <AgentThread>[];
 
-  void start() {
+  void start({void Function(String, String, String)? remote}) {
     workspace = Workspace.mock();
     host = _FakeHost();
     service = AttentionService(
@@ -87,6 +87,7 @@ void main() {
       settings: () => settings,
       l10n: () => englishLocalizations,
       onOpen: opened.add,
+      onOpenRemote: remote,
       focused: () => focused,
     )..start();
     addTearDown(service.dispose);
@@ -98,6 +99,16 @@ void main() {
     opened.clear();
   });
 
+  testWidgets('opens remote notifications with the originating host and chat', (
+    tester,
+  ) async {
+    final routes = <(String, String, String)>[];
+    start(remote: (host, kind, id) => routes.add((host, kind, id)));
+    host.openHandler!('remote:host123:project:work%3A123');
+    host.openHandler!('remote:host123:unknown:work');
+    expect(routes, [('host123', 'project', 'work:123')]);
+    expect(opened, isEmpty);
+  });
   testWidgets('notifies of a background agent that asks, then finishes', (
     tester,
   ) async {

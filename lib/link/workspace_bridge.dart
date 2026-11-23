@@ -221,8 +221,20 @@ class WorkspaceBridge {
         'This agent cannot go back',
       );
     }
-    final index =
-        (_follows[idOf(thread)]?.from ?? 0) + (params['index'] as int? ?? -1);
+    final follow = _follows[idOf(thread)];
+    final from = follow?.from ?? 0;
+    if (params.containsKey('expectedWindow') &&
+        (follow == null ||
+            session.isStreaming ||
+            session.pendingInteraction != null ||
+            linkDigest([
+                  for (var i = from; i < session.itemCount; i++)
+                    follow._encode(session.itemAt(i)),
+                ]) !=
+                params['expectedWindow'])) {
+      throw const LinkRemoteException('stale', 'The conversation changed');
+    }
+    final index = from + (params['index'] as int? ?? -1);
     if (index < 0 ||
         index >= session.itemCount ||
         session.itemAt(index) is! UserMessageItem) {
@@ -323,6 +335,7 @@ class WorkspaceBridge {
         if (bots?.groups case final groups?)
           for (final group in groups.groups) _linkGroup(groups, group),
       ],
+      groupOptions: bots == null ? const [] : const ['passes', 'rules', 'gap'],
     );
   }
 
@@ -505,6 +518,15 @@ class WorkspaceBridge {
       );
     }
     final session = thread.session;
+    if (params['duringTurn'] == true &&
+        (!session.isStreaming ||
+            !session.canQueue ||
+            session.pendingInteraction != null ||
+            (params['now'] == true &&
+                (params['expectedTurn'] == null ||
+                    params['expectedTurn'] != _turnToken(session))))) {
+      throw const LinkRemoteException('stale', 'The running turn changed');
+    }
     if (!session.canSend) {
       throw const LinkRemoteException('busy', 'The agent is at work');
     }
@@ -584,8 +606,8 @@ class WorkspaceBridge {
         }
       case LinkMethods.edit:
         final thread = _thread(params['session']);
-        final index = _messageAt(thread, params);
         final images = await _compacted(params['images']);
+        final index = _messageAt(thread, params);
         final message = _message(thread, params, images);
         if (message.isEmpty) return null;
         thread.session.editMessage(
@@ -626,7 +648,8 @@ class WorkspaceBridge {
         return null;
       case LinkMethods.startPlan:
         final session = _thread(params['session']).session;
-        if (session.awaitingPlan == null) {
+        final plan = session.awaitingPlan;
+        if (plan == null) {
           throw const LinkRemoteException(
             LinkErrors.notFound,
             'No plan awaits',
@@ -634,6 +657,11 @@ class WorkspaceBridge {
         }
         if (!session.canStartPlan) {
           throw const LinkRemoteException('busy', 'The agent is at work');
+        }
+        if (params.containsKey('expectedPlan') &&
+            (session.pendingInteraction != null ||
+                params['expectedPlan'] != linkDigest(ChatCodec.encode(plan)))) {
+          throw const LinkRemoteException('stale', 'The plan changed');
         }
         session.startPlan(workspace.l10n().planStartMessage);
         return null;
@@ -685,29 +713,8 @@ class WorkspaceBridge {
         workspace.hideProject(_project(params['project']));
         return null;
       case LinkMethods.keep:
-        final session = _thread(params['session']).session;
-        switch (_paths(params, session)) {
-          case null:
-            session.keepAllChanges();
-          case final paths:
-            session.keepChanges([
-              for (final change in session.fileChanges)
-                if (paths.contains(change.path)) change,
-            ]);
-        }
-        return null;
       case LinkMethods.undo:
-        final session = _thread(params['session']).session;
-        switch (_paths(params, session)) {
-          case null:
-            session.undoAllChanges?.call();
-          case final paths:
-            session.undoChanges?.call([
-              for (final change in session.fileChanges)
-                if (paths.contains(change.path)) change,
-            ]);
-        }
-        return null;
+        return _resolveChanges(params, keep: method == LinkMethods.keep);
       case LinkMethods.stopTask:
         final session = _thread(params['session']).session;
         if (params['agent'] case final String agent) {
@@ -750,6 +757,7 @@ class WorkspaceBridge {
           params['path'] as String? ?? '',
         );
       case LinkMethods.read:
+        if (params.containsKey('expectedChange')) return _readChange(params);
         return _readFile(
           _filesProject(params),
           params['path'] as String? ?? '',
@@ -1406,17 +1414,207 @@ class WorkspaceBridge {
     return [for (final list in lists) ...list];
   }
 
-  /// The changes' paths [params] names, absolute as [session] has them;
-  /// null for all of them.
-  static Set<String>? _paths(Map<String, Object?> params, ChatSession session) {
-    final paths = params['paths'];
-    if (paths is! List) return null;
-    return {
-      for (final path in paths.whereType<String>())
-        session.paths.isAbsolute(path) || session.root == null
-            ? path
-            : session.paths.join(session.root!, path),
+  static const _staleChange = LinkRemoteException(
+    'stale',
+    'The pending change has changed. Review it again.',
+  );
+
+  /// Selects only records in this session. Match the advertised path first
+  /// so duplicate folder basenames and nested roots always round-trip.
+  FileChange _selectedChange(
+    AgentThread thread,
+    String path, {
+    required bool guarded,
+  }) {
+    final session = thread.session;
+    final named = session.fileChanges.where((change) {
+      final logical = _phonePath(thread.project, change.path);
+      final advertised = logical ?? (guarded ? null : change.path);
+      return advertised?.replaceAll(r'\', '/') == path;
+    });
+    if (named.length == 1) return named.single;
+    if (named.isNotEmpty || guarded) throw _staleChange;
+
+    // Older phones could send an absolute or session-relative spelling.
+    final full = session.paths.isAbsolute(path) || session.root == null
+        ? path
+        : session.paths.join(session.root!, path);
+    return session.fileChanges
+            .where((change) => change.path == full)
+            .firstOrNull ??
+        (throw _staleChange);
+  }
+
+  FileChange _reviewedChange(
+    AgentThread thread,
+    String path,
+    Object? revision,
+  ) {
+    final change = _selectedChange(thread, path, guarded: true);
+    final follow = _follows[idOf(thread)];
+    if (revision is! String ||
+        follow == null ||
+        !identical(follow.session, thread.session) ||
+        !follow._hasChangeRevision(change, revision)) {
+      throw _staleChange;
+    }
+    return change;
+  }
+
+  static final _resolvingChanges = Expando<bool>();
+
+  Future<Object?> _resolveChanges(
+    Map<String, Object?> params, {
+    required bool keep,
+  }) async {
+    final thread = _thread(params['session']);
+    final session = thread.session;
+    if (_resolvingChanges[session] == true) {
+      throw const LinkRemoteException(
+        LinkErrors.busy,
+        'Another change review action is in progress.',
+      );
+    }
+    _resolvingChanges[session] = true;
+    try {
+      return await _resolveChangesFor(thread, params, keep: keep);
+    } finally {
+      _resolvingChanges[session] = null;
+    }
+  }
+
+  Future<Object?> _resolveChangesFor(
+    AgentThread thread,
+    Map<String, Object?> params, {
+    required bool keep,
+  }) async {
+    final session = thread.session;
+    final raw = params['paths'];
+    final all = !params.containsKey('paths');
+    final guarded = params.containsKey('expectedChange');
+    if (!all &&
+        (raw is! List ||
+            raw.isEmpty ||
+            raw.any((path) => path is! String || path.isEmpty))) {
+      throw _staleChange;
+    }
+    if (guarded && (raw is! List || raw.length != 1)) throw _staleChange;
+    // An empty set changes no turns and waits for earlier review updates.
+    if (guarded) await session.changeReview?.forgetTurns(const {});
+    if (guarded && session.isStreaming) {
+      throw const LinkRemoteException(
+        LinkErrors.busy,
+        'Wait for the agent to finish before resolving this change.',
+      );
+    }
+    final review = session.changeReview;
+    final selected = all
+        ? session.fileChanges
+        : <FileChange>{
+            for (final path in (raw as List).cast<String>())
+              if (guarded)
+                _reviewedChange(thread, path, params['expectedChange'])
+              else
+                _selectedChange(thread, path, guarded: false),
+          }.toList();
+    if (selected.isEmpty) throw _staleChange;
+
+    const cannotUndo = LinkRemoteException(
+      LinkErrors.unsupported,
+      'Undo is unavailable for the selected changes.',
+    );
+    final targets = all && !keep && review != null
+        ? selected.where((change) => change.tracked).toList()
+        : selected;
+    if (keep) {
+      if (all) {
+        session.keepAllChanges();
+        // Keep all also updates the session's fallback kernel bookkeeping.
+        // Wait for the queued review operation before checking its effect.
+        if (review != null) await review.forgetTurns(const {});
+      } else if (review != null) {
+        await review.keep(targets.map((change) => change.path));
+      } else {
+        session.keepChanges(targets);
+      }
+    } else if (review != null) {
+      if (targets.isEmpty || targets.any((change) => !change.tracked)) {
+        throw cannotUndo;
+      }
+      await review.undo(targets.map((change) => change.path));
+    } else {
+      final undoAll = all ? session.undoAllChanges : null;
+      if (undoAll == null) throw cannotUndo;
+      // Some kernels can revert the turn as a whole; they publish the result.
+      undoAll();
+      return null;
+    }
+
+    if (review?.failure != null) {
+      throw const LinkRemoteException(
+        LinkErrors.unsupported,
+        'The change review is no longer available.',
+      );
+    }
+    final remaining = {
+      for (final change in session.fileChanges) change.path: change,
     };
+    for (final target in targets) {
+      final pending = remaining[target.path];
+      if (pending == null) continue;
+      if (!keep && pending.conflict) {
+        throw const LinkRemoteException(
+          'conflict',
+          'Undo conflicted. The change is still pending.',
+        );
+      }
+      throw _staleChange;
+    }
+    return null;
+  }
+
+  /// A scoped read of the current and original text from this session's
+  /// review. The general file read can use another thread's original.
+  Future<Map<String, Object?>> _readChange(Map<String, Object?> params) async {
+    final thread = _thread(params['session']);
+    final path = params['path'];
+    if (path is! String) throw _staleChange;
+    final expected = params['expectedChange'];
+    final change = _reviewedChange(thread, path, expected);
+    final originalOf = thread.session.originalOf(change);
+    if (change.binary || originalOf == null) {
+      throw const LinkRemoteException(
+        LinkErrors.unsupported,
+        'No text diff for this change.',
+      );
+    }
+
+    await _reach(thread.project);
+    await thread.session.changeReview?.forgetTurns(const {});
+    _reviewedChange(thread, path, expected);
+    final original = await originalOf();
+    _reviewedChange(thread, path, expected);
+    if (original.length > LinkLimits.file) return {'tooLarge': true};
+    final files = _filesOf(thread.project).files;
+    final String text;
+    try {
+      text = await files.read(change.path);
+    } on IdeFileNotFoundException {
+      if (change.kind != FileChangeKind.deleted) throw _staleChange;
+      _reviewedChange(thread, path, expected);
+      return {'original': original, 'text': ''};
+    } on IdeBinaryFileException {
+      _reviewedChange(thread, path, expected);
+      return {'binary': true};
+    } on IdeFileTooLargeException {
+      _reviewedChange(thread, path, expected);
+      return {'tooLarge': true};
+    }
+    _reviewedChange(thread, path, expected);
+    if (text.length > LinkLimits.file) {
+      return {'tooLarge': true};
+    }
+    return {'original': original, 'text': text};
   }
 
   static void _choose(ChatSession session, String kind, String id) {
@@ -1633,6 +1831,12 @@ class _Follow {
     final goal = _goal(session.goal);
     final context = _context(session.context);
     final quota = this.quota?.of(session);
+    final actions = {
+      'queue': session.canQueue,
+      'edit': session.canEditMessages,
+      'startPlan': session.canStartPlan,
+      'turn': ?_turnToken(session),
+    };
     final restText = jsonEncode([
       earlier,
       goal,
@@ -1643,6 +1847,7 @@ class _Follow {
       changes,
       [for (final task in tasks) task.toJson()],
       quota,
+      actions,
     ]);
     if (!full &&
         start == count &&
@@ -1677,6 +1882,7 @@ class _Follow {
       goal: goal,
       context: context,
       quota: quota,
+      actions: actions,
     );
   }
 
@@ -1769,7 +1975,8 @@ class _Follow {
   }
 
   Map<String, Object?> _change(FileChange change) {
-    final path = pathOf(change.path) ?? change.path;
+    final logicalPath = pathOf(change.path);
+    final path = logicalPath ?? change.path;
     return {
       // POSIX on the phone, whatever the desktop.
       'path': path.replaceAll(r'\', '/'),
@@ -1779,8 +1986,23 @@ class _Follow {
       if (change.binary) 'binary': true,
       if (!change.tracked) 'tracked': false,
       if (change.conflict) 'conflict': true,
+      'revision': _changeRevisions[change] ??=
+          '${WorkspaceBridge._run}-$_reviewFollow-${_nextChangeRevision++}',
+      'undoable': change.tracked && session.changeReview != null,
+      if (logicalPath != null &&
+          !change.binary &&
+          session.originalOf(change) != null)
+        'preview': true,
     };
   }
+
+  static int _nextReviewFollow = 0;
+  final int _reviewFollow = _nextReviewFollow++;
+  int _nextChangeRevision = 0;
+  final _changeRevisions = Expando<String>();
+
+  bool _hasChangeRevision(FileChange change, String revision) =>
+      _changeRevisions[change] == revision;
 
   List<LinkChoice> _choices() {
     LinkChoice? of(String kind, KernelChoice? choice) => switch (choice) {
@@ -1825,6 +2047,17 @@ class _Follow {
     session.detach();
   }
 }
+
+/// Token for the running turn shown in a Send now confirmation.
+int? _turnToken(ChatSession session) => switch (session.itemCount) {
+  final count when session.isStreaming && count > 0 => switch (session.itemAt(
+    count - 1,
+  )) {
+    LiveStatusItem(:final startedAt) => startedAt?.millisecondsSinceEpoch,
+    _ => null,
+  },
+  _ => null,
+};
 
 /// A task's output the phone watches: looked at every so often, and what
 /// was added sent ([LinkEvents.output]); all of its tail again when it was

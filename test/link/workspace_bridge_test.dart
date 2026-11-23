@@ -360,6 +360,48 @@ void main() {
     );
   });
 
+  test(
+    'in-turn delivery uses the host turn advertised by the follow',
+    () async {
+      await open();
+      final session = workspace.threads.first.session;
+      session.send(const ComposerMessage(text: 'synthetic active turn'));
+      await settle();
+      final capabilities = updates.last.actions;
+      expect(capabilities, containsPair('queue', true));
+      final turn = capabilities!['turn'] as int;
+      await expectLater(
+        bridge.handle(LinkMethods.send, {
+          'session': id,
+          'text': 'stale interruption',
+          'duringTurn': true,
+          'now': true,
+          'expectedTurn': turn - 1,
+        }),
+        throwsA(
+          isA<LinkRemoteException>().having(
+            (error) => error.code,
+            'code',
+            'stale',
+          ),
+        ),
+      );
+      expect(
+        await bridge.handle(LinkMethods.send, {
+          'session': id,
+          'text': 'next synthetic turn',
+          'duringTurn': true,
+          'now': false,
+        }),
+        {'session': id},
+      );
+      await settle();
+      expect(session.queued.map((entry) => entry.$2.text), [
+        'next synthetic turn',
+      ]);
+    },
+  );
+
   test('streamed text goes as what was added, and adds up the same', () async {
     final mirror = LinkSessionMirror()
       ..opened(
@@ -465,6 +507,40 @@ void main() {
   });
 
   group('edit', () {
+    test(
+      'guarded rewinds reject a transcript that changed before submission',
+      () async {
+        final first = await open(3);
+        expect(first.actions, containsPair('edit', true));
+        expect(first.actions, containsPair('queue', true));
+        final guard = linkDigest(first.items);
+        expect(
+          await bridge.handle(LinkMethods.rewindPlan, {
+            'session': id,
+            'index': 1,
+            'expectedWindow': guard,
+          }),
+          containsPair('files', isEmpty),
+        );
+        await bridge.handle(LinkMethods.earlier, {'session': id, 'count': 2});
+        await expectLater(
+          bridge.handle(LinkMethods.edit, {
+            'session': id,
+            'index': 1,
+            'expectedWindow': guard,
+            'text': 'do not send',
+          }),
+          throwsA(
+            isA<LinkRemoteException>().having(
+              (error) => error.code,
+              'code',
+              'stale',
+            ),
+          ),
+        );
+      },
+    );
+
     test('an answer is not a message to edit', () async {
       await open();
       expect(

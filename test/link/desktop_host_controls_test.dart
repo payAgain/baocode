@@ -289,6 +289,10 @@ void main() {
     (tester) async {
       final host = await _Host.show(tester);
       await _tap(tester, 'Private helper');
+      host.update('bot-session', live: true);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('stop')), findsNothing);
+      expect(host.chats.sessionControls!.canStop, isFalse);
       expect(find.text('Host Ask'), findsNothing);
       expect(find.text('Host Default'), findsNothing);
       expect(find.text('fixture-branch'), findsNothing);

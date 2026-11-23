@@ -23,6 +23,7 @@ class AttentionService {
     required this.settings,
     required this.l10n,
     required this.onOpen,
+    this.onOpenRemote,
     this.settingsChanges,
     this.shown,
     bool Function()? focused,
@@ -47,6 +48,7 @@ class AttentionService {
   /// Opens an agent the user picked in a notification or the tray's menu;
   /// the window is in front already.
   final void Function(AgentThread thread) onOpen;
+  final void Function(String host, String kind, String id)? onOpenRemote;
 
   /// Whether the window is in front.
   final bool Function() _focused;
@@ -102,6 +104,21 @@ class AttentionService {
 
   void _open(String? id) {
     if (id == null) return;
+    if (id.split(':') case ['remote', final host, final kind, final chat]
+        when host.isNotEmpty &&
+            chat.isNotEmpty &&
+            const {'project', 'bot', 'group'}.contains(kind)) {
+      try {
+        onOpenRemote?.call(
+          Uri.decodeComponent(host),
+          kind,
+          Uri.decodeComponent(chat),
+        );
+      } on ArgumentError {
+        return;
+      }
+      return;
+    }
     for (final thread in workspace.threads) {
       if (_ids[thread] == id) {
         if (thread.archived) workspace.setArchived(thread, false);

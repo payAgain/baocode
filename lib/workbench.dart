@@ -97,6 +97,8 @@ import 'l10n/l10n.dart';
 import 'link/desktop_host_connection.dart';
 import 'link/desktop_host_chats.dart';
 import 'link/desktop_host_page.dart';
+import 'link/desktop_remote_notifications.dart';
+import 'platform/app_platform.dart';
 import 'notifications/attention_host.dart';
 import 'notifications/attention_service.dart';
 import 'notifications/attention_settings.dart';
@@ -631,6 +633,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
           settingsChanges: widget.settings?.files?.settings,
           l10n: () => context.l10n,
           shown: _workspace.isShown,
+          onOpenRemote: _openRemoteNotice,
           onOpen: (thread) => _windows != null
               ? _windows!.showAgent(thread)
               : _openNotifiedAgent(thread),
@@ -936,6 +939,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   @override
   void dispose() {
     _desktopConnection?.removeListener(_remoteChanged);
+    _remoteNotices?.dispose();
     _desktopChats?.dispose();
     _desktopConnection?.dispose();
     _sessionLinks.dispose();
@@ -1411,6 +1415,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
       (widget.window?.isChat ?? true) && WindowControls.isDesktop;
   DesktopHostConnection? _desktopConnection;
   DesktopHostChats? _desktopChats;
+  DesktopRemoteNotifications? _remoteNotices;
   String? _lastHostKey;
 
   void _restoreDesktopWorkspace() {
@@ -1436,7 +1441,20 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   Future<void> _loadComputer() async {
     if (_desktopConnection != null) return;
-    _desktopChats = DesktopHostChats();
+    if (_main && (AppPlatform.isMacOS || AppPlatform.isWindows)) {
+      _remoteNotices = DesktopRemoteNotifications(
+        host: ChannelAttentionHost.instance,
+        settings: () => AttentionSettings.parse(
+          widget.settings?.files?.settings.values ?? const {},
+        ),
+        l10n: () => context.l10n,
+        shown: (kind, id) =>
+            _remoteWorkspace &&
+            _desktopChats?.selected?.kind == kind &&
+            _desktopChats?.selected?.id == id,
+      );
+    }
+    _desktopChats = DesktopHostChats(onCatalog: _remoteNotices?.acceptState);
     _desktopConnection =
         (widget.createDesktopHostConnection?.call() ?? DesktopHostConnection())
           ..addListener(_remoteChanged);
@@ -1464,8 +1482,28 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
       _lastHostKey = null;
     }
     if (peer != null) _lastHostKey = peer.remote;
+    _remoteNotices?.bind(peer);
     _desktopChats!.bind(peer);
     setState(() {});
+  }
+
+  void _openRemoteNotice(String host, String kind, String id) {
+    final chats = _desktopChats;
+    final peer = _desktopConnection?.peer;
+    if (!mounted ||
+        !_canSwitchWorkspace ||
+        peer == null ||
+        peer.isClosed ||
+        peer.remote != host ||
+        chats == null) {
+      return;
+    }
+    final target = chats.chats
+        .where((c) => c.kind == kind && c.id == id)
+        .firstOrNull;
+    if (target == null || chats.busy) return;
+    _openComputer();
+    unawaited(chats.open(target));
   }
 
   void _openComputer() {
