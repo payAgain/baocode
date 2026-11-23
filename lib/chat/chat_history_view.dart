@@ -54,6 +54,7 @@ class ChatHistoryView extends StatefulWidget {
     required this.feed,
     this.maxContentWidth = 760,
     this.minimap = false,
+    this.minimapForOverflow = false,
     this.minimapRoom,
     this.onOpenAgent,
     this.onSetGoal,
@@ -72,9 +73,12 @@ class ChatHistoryView extends StatefulWidget {
 
   /// Whether a minimap of it shows in the margin beside its column (on
   /// [ChatMinimap.side]), when there is room for one (see [ChatMinimap]).
-  /// Its room is kept only once the conversation is long: until then there
-  /// is none to show.
   final bool minimap;
+
+  /// With [minimap] on, show it for any scrollable history instead of
+  /// waiting for the usual length threshold. Paired project replies can
+  /// overflow the viewport with just one turn in the host's history window.
+  final bool minimapForOverflow;
 
   /// Told whether the column keeps the minimap's room, for what is level
   /// with it (a subagent's header).
@@ -3283,8 +3287,11 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
   /// all, do not take the minimap away and bring it back.
   bool _long = false;
 
-  /// Whether there is a minimap to show: once the history is [_long].
-  bool get _wantsMinimap => _long && _feed.itemCount > 0;
+  /// Whether there is enough history to show a minimap. In paired projects,
+  /// keep the scrollbar for histories that fit in a single view.
+  bool get _wantsMinimap =>
+      _feed.itemCount > 0 &&
+      (widget.minimapForOverflow ? _contentAbove || _contentBelow : _long);
 
   /// Whether the column keeps room for the minimap: once there is one to
   /// show. Narrower then, the history only grows taller, and scrolls on.
@@ -3573,7 +3580,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
                       ]),
                       columnIn: _columnIn,
                       at: ChatMinimap.side.value,
-                      long: _long,
+                      showPreview: _wantsMinimap,
                       scrolling: () =>
                           _scrollController.hasClients && _userScrolling,
                       onSeek: _seek,

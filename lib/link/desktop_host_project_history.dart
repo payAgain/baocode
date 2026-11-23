@@ -40,6 +40,7 @@ class DesktopHostProjectHistory extends StatelessWidget {
           feed: feed,
           maxContentWidth: ChatWidth.current.value,
           minimap: ChatMinimap.enabled.value,
+          minimapForOverflow: true,
           underTitle: true,
           autoLoadEarlier: false,
           earlierEnabled: earlierEnabled,

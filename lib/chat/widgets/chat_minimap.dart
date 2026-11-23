@@ -72,7 +72,7 @@ enum ChatMinimapSide {
 /// (shown while the history is scrolled, or the pointer is over it), and a
 /// press or a drag on it scrolls there. In the margin beside the column, on
 /// the [side] chosen, when there is room for it (not in a narrow pane), and
-/// once the conversation is long ([longAfter]). Where the side panel's rail
+/// once there is enough history ([showPreview]). Where the side panel's rail
 /// floats over that margin's top (see [ChatColumnInset.rail]), under it
 /// instead, in line with it.
 ///
@@ -87,7 +87,7 @@ class ChatMinimap extends StatefulWidget {
     required this.span,
     required this.moved,
     required this.columnIn,
-    required this.long,
+    required this.showPreview,
     required this.scrolling,
     required this.onSeek,
     required this.onSeekEnd,
@@ -115,8 +115,8 @@ class ChatMinimap extends StatefulWidget {
   /// The column's left and width in the history, [width] wide.
   final ({double left, double width}) Function(double width) columnIn;
 
-  /// Whether the conversation is long ([longAfter]): shown only then.
-  final bool long;
+  /// Whether there is enough history to show the minimap.
+  final bool showPreview;
 
   /// Whether the user is scrolling the history: the glass shows meanwhile.
   final bool Function() scrolling;
@@ -159,10 +159,9 @@ class ChatMinimap extends StatefulWidget {
   /// the minimap is not shown.
   static const roomFrom = 320.0;
 
-  /// How much more than it shows a conversation has before it has one,
-  /// in heights of the history: a short one has nothing to find its way
-  /// around in, and its steps folded or not would bring it and take it
-  /// away (see ChatHistoryView).
+  /// The ordinary conversation's threshold in viewport heights of overflow.
+  /// A short conversation has little to navigate, and folding its steps can
+  /// otherwise bring the minimap in and out (see ChatHistoryView).
   static const longAfter = 1.5;
 
   /// How tall [item] samples in a column [width] wide, for tests.
@@ -947,7 +946,7 @@ class _ChatMinimapState extends State<ChatMinimap>
           0.0,
           constraints.maxHeight - top - ChatMinimap._inset,
         );
-        final shown = fits && widget.long && widget.rowCount > 0;
+        final shown = fits && widget.showPreview && widget.rowCount > 0;
         // Under the rail, in line with it; else beside the column.
         final left = math.max(0.0, switch ((place, _railFromEdge)) {
           (_?, final edge?) => (right ? width - edge : edge) - _width / 2,
