@@ -667,6 +667,9 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     widget.window?.attach(this);
     _windows?.addListener(_windowsChanged);
     if (_main) {
+      if (widget.settings?.link case final link? when _canSwitchWorkspace) {
+        link.desktopClient = _getDesktopConnection;
+      }
       // A link to a stash (#12 references) shows it here.
       StashController.current?.showPage = _showStash;
       // A stash's file opens as the Stash page shows it.
@@ -938,6 +941,10 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   @override
   void dispose() {
+    final link = widget.settings?.link;
+    if (link?.desktopClient == _getDesktopConnection) {
+      link!.desktopClient = null;
+    }
     _desktopConnection?.removeListener(_remoteChanged);
     _remoteNotices?.dispose();
     _desktopChats?.dispose();
@@ -1439,8 +1446,10 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     }
   }
 
-  Future<void> _loadComputer() async {
-    if (_desktopConnection != null) return;
+  Future<void> _loadComputer() => _getDesktopConnection().load();
+
+  DesktopHostConnection _getDesktopConnection() {
+    if (_desktopConnection case final connection?) return connection;
     if (_main && (AppPlatform.isMacOS || AppPlatform.isWindows)) {
       _remoteNotices = DesktopRemoteNotifications(
         host: ChannelAttentionHost.instance,
@@ -1455,10 +1464,10 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
       );
     }
     _desktopChats = DesktopHostChats(onCatalog: _remoteNotices?.acceptState);
-    _desktopConnection =
-        (widget.createDesktopHostConnection?.call() ?? DesktopHostConnection())
+    return _desktopConnection =
+        (widget.createDesktopHostConnection?.call() ??
+              DesktopHostConnection(localHost: widget.settings?.link))
           ..addListener(_remoteChanged);
-    await _desktopConnection!.load();
   }
 
   Future<void> _keepDesktopWorkspace() async {
@@ -3065,6 +3074,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
             Expanded(
               child: DesktopHostPage(
                 connection: _desktopConnection!,
+                localHost: widget.settings?.link,
                 chats: _desktopChats!,
                 onBack: _openLocalWorkspace,
                 lastChatStore: SavedDesktopHostChat.forStorage(

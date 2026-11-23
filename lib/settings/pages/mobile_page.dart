@@ -8,6 +8,7 @@ import '../../ide/ide_button.dart';
 import '../../ide/ide_hover.dart';
 import '../../ide/ide_menu.dart';
 import '../../l10n/l10n.dart';
+import '../../link/desktop_mutual_text.dart';
 import '../../link/link_host.dart';
 import '../../link/phone_downloads.dart';
 import '../../link/qr_view.dart';
@@ -64,6 +65,12 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
   @override
   void dispose() {
     _host.removeListener(_changed);
+    if (_host.pending case final pending? when pending.mutual) {
+      final host = _host;
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => host.rejectMutual(pending),
+      );
+    }
     _copiedTimer?.cancel();
     _ticker?.cancel();
     super.dispose();
@@ -122,10 +129,18 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     final host = _host;
+    final pairing = SettingsGroup(
+      title: l10n.mobilePair,
+      children: [_pairing(context)],
+    );
+    final pinDesktopPairing =
+        host.pending?.mutual == true ||
+        (host.pending == null && host.desktopMutualStatus != null);
     return SettingsPage(
       title: l10n.settingsSectionMobile,
       description: l10n.mobileSettingsDescription,
       children: [
+        if (pinDesktopPairing) pairing,
         // The app first: no phone pairs without it.
         SettingsGroup(
           title: l10n.mobileGetApp,
@@ -169,7 +184,8 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
             ],
           ],
         ),
-        SettingsGroup(title: l10n.mobilePair, children: [_pairing(context)]),
+        if (!pinDesktopPairing) pairing,
+        if (host.desktopGrants.isNotEmpty) _desktopShares(context),
         SettingsGroup(
           title: l10n.mobilePhones,
           children: [
@@ -386,6 +402,32 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
 
   /// The pairing card's row: a button to show a code; the code; the
   /// safety code to compare once a phone scanned it; who was paired.
+  Widget _desktopShares(BuildContext context) {
+    final text = DesktopMutualText(context);
+    return SettingsGroup(
+      title: text.shares,
+      description: text.target,
+      children: [
+        for (final grant in _host.desktopGrants)
+          SettingsRow(
+            label: grant.name.isEmpty ? text.shares : grant.name,
+            description: text.inbound,
+            below: [
+              Text(
+                fingerprintOf(keyOfDeviceId(grant.clientId)!),
+                style: SettingsText.path,
+              ),
+            ],
+            trailing: IdeButton(
+              label: text.revoke,
+              secondary: true,
+              onPressed: () => unawaited(_host.removeDesktopGrant(grant)),
+            ),
+          ),
+      ],
+    );
+  }
+
   Widget _pairing(BuildContext context) {
     final l10n = context.l10n;
     final host = _host;
@@ -393,6 +435,47 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
     final pending = host.pending;
     if (pending != null) {
       final name = pending.name.isEmpty ? pending.system : pending.name;
+      if (pending.mutual) {
+        final text = DesktopMutualText(context);
+        final reverse = pending.reverseCode;
+        return SettingsRow(
+          label: text.request(name),
+          description: text.risk,
+          below: [
+            Text(text.compare, style: SettingsText.description),
+            Text(text.forward),
+            SelectableText(
+              pending.code.join('  '),
+              style: SettingsText.path.copyWith(fontSize: 22),
+            ),
+            if (reverse != null) ...[
+              Text(text.reverse),
+              SelectableText(
+                reverse,
+                style: SettingsText.path.copyWith(fontSize: 22),
+              ),
+            ],
+            if (pending.approved)
+              Text(text.waiting, style: SettingsText.description),
+            SettingsButtons(
+              children: [
+                if (!pending.approved)
+                  IdeButton(
+                    label: text.approve,
+                    onPressed: reverse == null
+                        ? null
+                        : () => host.approveMutual(pending),
+                  ),
+                IdeButton(
+                  label: l10n.mobilePairCancel,
+                  secondary: true,
+                  onPressed: () => host.rejectMutual(pending),
+                ),
+              ],
+            ),
+          ],
+        );
+      }
       if (pending.needsApproval) {
         // Found nearby, with no code scanned: allowed here, or not.
         return SettingsRow(
@@ -442,6 +525,27 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
           label: l10n.mobilePairMismatch,
           secondary: true,
           onPressed: host.rejectPending,
+        ),
+      );
+    }
+    if (host.desktopMutualStatus case final status?) {
+      final text = DesktopMutualText(context);
+      return SettingsRow(
+        label: switch (status) {
+          DesktopMutualStatus.complete => text.ready,
+          DesktopMutualStatus.incomplete => text.incomplete,
+          DesktopMutualStatus.cancelled => text.cancelled,
+          DesktopMutualStatus.connecting => text.connecting,
+        },
+        description: status == DesktopMutualStatus.complete
+            ? text.target
+            : null,
+        trailing: IdeButton(
+          label: l10n.mobilePairNewCode,
+          icon: Codicons.refresh,
+          onPressed: host.supported
+              ? () => unawaited(host.beginPairing())
+              : null,
         ),
       );
     }
