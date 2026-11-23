@@ -545,17 +545,375 @@ void main() {
     expect(client.pendingCode, isNull);
   });
 
-  test('a saved computer is preserved until the user forgets it', () async {
+  Future<LinkHost> secondHost() async {
+    final otherWorkspace = Workspace.mock();
+    final other = LinkHost(
+      workspace: otherWorkspace,
+      platform: _SecondPlatform(platform.network)
+        ..kept = {'relayMode': 'direct', 'discoverable': false},
+    );
+    await other.load();
+    addTearDown(() async {
+      await other.setEnabled(false);
+      other.dispose();
+      otherWorkspace.dispose();
+    });
+    return other;
+  }
+
+  test('confirming a second host retains the first pairing', () async {
     await pairAndConfirm();
-    final saved = client.peer;
-    final next = (await host.beginPairing())!;
-    await client.pair(next.uri);
-    expect(client.error, contains('Forget'));
-    expect(client.peer, same(saved));
-    expect(clientNodes.length, 1);
-    final record = jsonDecode(store.records.values.single) as Map;
-    expect(record.keys.toSet(), {'identity', 'name', 'address', 'direct'});
+    final first = client.peer!;
+    final originalIdentity = host.phones.single.id;
+    final other = await secondHost();
+    await client.pair((await other.beginPairing())!.uri);
+    expect(client.pendingCode, isNotNull, reason: client.error);
+    expect(client.peer, isNull);
+    expect(first.isClosed, isTrue);
+    expect(other.phones, isEmpty);
+    await client.confirm();
+    expect(client.error, isNull);
+    expect(client.peer?.remote, other.id);
+    expect(client.hostName, 'Second Desktop');
+    expect(host.phones.single.id, originalIdentity);
+    expect(other.phones.single.id, isNot(originalIdentity));
   });
+
+  Future<LinkHost> pairSecondHost() async {
+    await pairAndConfirm();
+    final other = await secondHost();
+    await client.pair((await other.beginPairing())!.uri);
+    await client.confirm();
+    expect(client.peer?.remote, other.id);
+    return other;
+  }
+
+  test(
+    'switching closes the previous RPC peer and persists selection',
+    () async {
+      final other = await pairSecondHost();
+      final previous = client.peer!;
+      final clientId = host.phones.single.id;
+      expect(client.savedHosts.map((host) => host.id), [host.id, other.id]);
+      expect(client.selectedHostId, other.id);
+      await client.selectHost(host.id);
+      expect(client.selectedHostId, host.id);
+      expect(previous.isClosed, isTrue);
+      await expectLater(
+        previous.call(LinkMethods.state),
+        throwsA(isA<LinkClosedException>()),
+      );
+      expect(client.peer?.remote, host.id);
+      expect(clientNodes.last.id, clientId);
+      expect(await client.peer!.call(LinkMethods.state), isA<Map>());
+      final current = client.peer!;
+      client.dispose();
+      await current.done;
+      client = newClient();
+      await client.load();
+      expect(client.selectedHostId, host.id);
+      expect(client.peer?.remote, host.id);
+      expect(clientNodes.last.id, clientId);
+      expect(client.savedHosts, hasLength(2));
+    },
+  );
+
+  test('forgetting an inactive host leaves the current peer usable', () async {
+    final other = await pairSecondHost();
+    final current = client.peer!;
+    final dialCount = dials.length;
+    await client.forgetHost(host.id);
+    expect(client.savedHosts, [(id: other.id, name: 'Second Desktop')]);
+    expect(client.peer, same(current));
+    expect(client.selectedHostId, other.id);
+    expect(dials, hasLength(dialCount));
+    expect(await current.call(LinkMethods.state), isA<Map>());
+    client.dispose();
+    await current.done;
+    client = newClient();
+    await client.load();
+    expect(client.savedHosts.map((host) => host.id), [other.id]);
+  });
+
+  test('forget compatibility removes only the selected host', () async {
+    final other = await pairSecondHost();
+    await client.forget();
+    expect(other.phones, isEmpty);
+    expect(client.savedHosts, [(id: host.id, name: 'Test Mac')]);
+    expect(client.selectedHostId, host.id);
+    expect(client.peer, isNull);
+    await client.reconnect();
+    expect(client.peer?.remote, host.id);
+  });
+
+  test('canceling a second pairing resumes the original workspace', () async {
+    await pairAndConfirm();
+    final first = client.peer!;
+    final clientId = host.phones.single.id;
+    final previousRecord = store.records.values.single;
+    final other = await secondHost();
+    await client.pair((await other.beginPairing())!.uri);
+    expect(client.selectedHostId, host.id);
+    expect(client.peer, isNull);
+    expect(first.isClosed, isTrue);
+    await client.cancelPairing();
+    expect(client.pendingCode, isNull);
+    expect(client.savedHosts.map((host) => host.id), [host.id]);
+    expect(client.peer?.remote, host.id);
+    expect(clientNodes.last.id, clientId);
+    expect(store.records.values.single, previousRecord);
+    expect(other.phones, isEmpty);
+  });
+
+  test(
+    'cancel during confirming the second host preserves the old record',
+    () async {
+      await pairAndConfirm();
+      final previous = store.records.values.single;
+      final clientId = host.phones.single.id;
+      final other = await secondHost();
+      await client.pair((await other.beginPairing())!.uri);
+      final started = Completer<void>();
+      final release = Completer<void>();
+      store.beforeWrite = () {
+        if (!started.isCompleted) started.complete();
+        return release.future;
+      };
+      final confirmation = client.confirm();
+      await started.future;
+      expect(other.phones, hasLength(1));
+      await client.cancelPairing();
+      release.complete();
+      await confirmation;
+      expect(client.selectedHostId, host.id);
+      expect(client.peer?.remote, host.id);
+      expect(clientNodes.last.id, clientId);
+      expect(other.phones, isEmpty);
+      expect(store.records.values.single, previous);
+    },
+  );
+
+  test(
+    'reload retires a legacy key only after v2 migration verifies',
+    () async {
+      const legacyId = 'desktop_host_connection.v1';
+      final offer = (await host.beginPairing())!;
+      await client.pair(offer.uri);
+      await client.confirm();
+      final clientId = host.phones.single.id;
+      final old = client.peer!;
+      client.dispose();
+      await old.done;
+      final registry = jsonDecode(store.records.values.single) as Map;
+      final legacy = jsonEncode((registry['hosts'] as List).single);
+      store.records
+        ..clear()
+        ..[legacyId] = legacy;
+      store.dropWrites = true;
+      client = newClient();
+      await client.load();
+      expect(client.peer?.remote, host.id);
+      expect(clientNodes.last.id, clientId);
+      expect(store.records, {legacyId: legacy});
+
+      final loaded = client.peer!;
+      client.dispose();
+      await loaded.done;
+      store.dropWrites = false;
+      store.keepOnDelete = legacyId;
+      client = newClient();
+      await client.load();
+      expect(clientNodes.last.id, clientId);
+      expect(store.records, hasLength(2));
+
+      final migrated = client.peer!;
+      client.dispose();
+      await migrated.done;
+      store.keepOnDelete = null;
+      client = newClient();
+      await client.load();
+      expect(client.savedHosts, [(id: host.id, name: 'Test Mac')]);
+      expect(clientNodes.last.id, clientId);
+      expect(store.records.containsKey(legacyId), isFalse);
+    },
+  );
+
+  test(
+    'a nearby selection lost during bind never dials its stale address',
+    () async {
+      await pairAndConfirm();
+      final other = await secondHost();
+      final offer = (await other.beginPairing())!;
+      final advert = LinkAdvert(
+        name: offer.name,
+        key: offer.key,
+        port: 47100,
+        pairing: true,
+        addresses: const ['192.168.1.20'],
+      );
+      client.startDiscovery();
+      discovery.add([advert]);
+      await Future<void>.delayed(Duration.zero);
+      final binding = Completer<void>();
+      final release = Completer<void>();
+      beforeBind = () {
+        beforeBind = null;
+        binding.complete();
+        return release.future;
+      };
+      final pairing = client.pairNearby(other.id);
+      await binding.future;
+      await client.stopDiscovery();
+      release.complete();
+      await pairing;
+      expect(dials.map((dial) => dial.id), [host.id, host.id]);
+      expect(client.pendingCode, isNull);
+      expect(client.selectedHostId, host.id);
+      expect(client.peer?.remote, host.id);
+      expect(client.error, contains('no longer available'));
+    },
+  );
+
+  test('nearby retry does not spin when binding fails', () async {
+    await pairAndConfirm();
+    final old = client.peer!;
+    client.dispose();
+    await old.done;
+    client = newClient();
+    canDial = (_) => false;
+    await client.load();
+    var binds = 0;
+    beforeBind = () async {
+      binds++;
+      if (binds == 2) await client.stopDiscovery();
+      throw const LinkClosedException('binding failed');
+    };
+    client.startDiscovery();
+    discovery.add([
+      LinkAdvert(
+        name: 'Moved host',
+        key: keyOfDeviceId(host.id)!,
+        port: 47110,
+        addresses: const ['192.168.1.25'],
+      ),
+    ]);
+    await Future<void>.delayed(Duration.zero);
+    expect(binds, 1);
+    expect(client.selectedHostId, host.id);
+  });
+
+  test('an offline host is selected before discovery may retry it', () async {
+    final other = await pairSecondHost();
+    final clientId = host.phones.single.id;
+    const moved = '192.168.2.71:47100';
+    canDial = (address) =>
+        address.id != host.id || address.addrs.contains(moved);
+    final advert = LinkAdvert(
+      name: 'Unverified name',
+      key: keyOfDeviceId(host.id)!,
+      port: 47100,
+      addresses: const ['192.168.2.71'],
+    );
+    client.startDiscovery();
+    final onlineDials = dials.length;
+    discovery.add([advert]);
+    await Future<void>.delayed(Duration.zero);
+    expect(dials, hasLength(onlineDials));
+    expect(client.peer?.remote, other.id);
+    await client.stopDiscovery();
+    final previous = client.peer!;
+    await client.selectHost(host.id);
+    expect(previous.isClosed, isTrue);
+    expect(client.selectedHostId, host.id);
+    expect(client.peer, isNull);
+    expect(client.savedHosts, hasLength(2));
+    client.startDiscovery();
+    final connected = Completer<void>();
+    client.addListener(() {
+      if (client.peer != null && !connected.isCompleted) connected.complete();
+    });
+    discovery.add([advert]);
+    await connected.future.timeout(const Duration(seconds: 2));
+    expect(client.peer?.remote, host.id);
+    expect(clientNodes.last.id, clientId);
+    expect(client.hostName, 'Test Mac');
+  });
+
+  test(
+    'a revocation queued during switching removes only its sender',
+    () async {
+      final other = await pairSecondHost();
+      final previous = client.peer!;
+      other.unpair(other.phones.single);
+      await client.selectHost(host.id);
+      expect(previous.isClosed, isTrue);
+      expect(client.peer?.remote, host.id);
+      expect(client.savedHosts, [(id: host.id, name: 'Test Mac')]);
+      expect(client.error, isNull);
+    },
+  );
+
+  test(
+    'an inactive revocation is isolated when that host is selected',
+    () async {
+      final other = await pairSecondHost();
+      final originalId = other.phones.single.id;
+      host.unpair(host.phones.single);
+      await client.selectHost(host.id);
+      expect(client.error, contains('removed your access'));
+      expect(client.savedHosts, [(id: other.id, name: 'Second Desktop')]);
+      expect(client.selectedHostId, other.id);
+      await client.reconnect();
+      expect(client.peer?.remote, other.id);
+      expect(clientNodes.last.id, originalId);
+    },
+  );
+
+  test('host selection waits for an in-progress revocation write', () async {
+    final other = await pairSecondHost();
+    final previous = client.peer!;
+    final started = Completer<void>();
+    final release = Completer<void>();
+    store.beforeWrite = () {
+      if (!started.isCompleted) started.complete();
+      return release.future;
+    };
+    other.unpair(other.phones.single);
+    await started.future;
+    final selection = client.selectHost(host.id);
+    release.complete();
+    await selection;
+    expect(previous.isClosed, isTrue);
+    expect(client.peer?.remote, host.id);
+    expect(client.savedHosts, [(id: host.id, name: 'Test Mac')]);
+  });
+
+  test(
+    'pairing an already saved computer leaves its identity intact',
+    () async {
+      await pairAndConfirm();
+      final saved = client.peer;
+      final next = (await host.beginPairing())!;
+      await client.pair(next.uri);
+      expect(client.error, contains('already saved'));
+      expect(client.peer, same(saved));
+      expect(clientNodes.length, 1);
+      expect(client.savedHosts.single, (id: host.id, name: 'Test Mac'));
+    },
+  );
+}
+
+class _SecondPlatform extends FakeLinkPlatform {
+  _SecondPlatform(this._network);
+
+  final MemoryLinkNetwork _network;
+
+  @override
+  MemoryLinkNetwork get network => _network;
+
+  @override
+  Future<DeviceInfo> device() async =>
+      const DeviceInfo(name: 'Second Desktop', kind: 'mac', system: 'Test OS');
 }
 
 class _DialNode implements LinkNode {
@@ -593,6 +951,7 @@ class _ClientStore implements SecretStore {
   final records = <String, String>{};
   bool failWrites = false;
   bool dropWrites = false;
+  String? keepOnDelete;
   Future<void> Function()? beforeRead;
   Future<void> Function()? beforeWrite;
 
@@ -610,5 +969,7 @@ class _ClientStore implements SecretStore {
   }
 
   @override
-  Future<void> delete(String id) async => records.remove(id);
+  Future<void> delete(String id) async {
+    if (id != keepOnDelete) records.remove(id);
+  }
 }
