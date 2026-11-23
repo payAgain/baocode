@@ -50,6 +50,30 @@ class IoLinkPlatform implements LinkPlatform {
     }
   }
 
+  File get _computerGroupFile => File(
+    path == null
+        ? p.join(DataDirectory.current.stateDir, 'computer-group.json')
+        : '$path.computer-group',
+  );
+
+  @override
+  Future<Object?> readComputerGroup() async {
+    final file = _computerGroupFile;
+    if (!await file.exists()) return null;
+    if (await file.length() > 1024 * 1024) {
+      throw const FormatException('Computer group history is too large');
+    }
+    return jsonDecode(await file.readAsString()) ??
+        (throw const FormatException('Missing computer group history'));
+  }
+
+  @override
+  Future<void> writeComputerGroup(Object json) async {
+    final file = _computerGroupFile;
+    await file.parent.create(recursive: true);
+    await writeFileAtomically(file, jsonEncode(json));
+  }
+
   @override
   Future<LinkNode> bind(
     LinkIdentity identity, {

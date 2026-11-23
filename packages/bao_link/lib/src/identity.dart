@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:pinenacl/digests.dart';
-import 'package:pinenacl/ed25519.dart' show SigningKey;
+import 'package:pinenacl/ed25519.dart' show Signature, SigningKey, VerifyKey;
 import 'package:pinenacl/tweetnacl.dart';
 
 /// An end's lasting key pair (Ed25519): a desktop's, or a phone's. Its
@@ -42,6 +42,24 @@ class LinkIdentity {
       return LinkIdentity.fromPrivateKey(decodeKey(key));
     } on Object {
       return null;
+    }
+  }
+
+  /// Detached signature for an application-specific, domain-separated message.
+  String sign(Uint8List message) =>
+      encodeKey(SigningKey.fromSeed(privateKey).sign(message).signature);
+
+  static bool verifies(String id, Uint8List message, String signature) {
+    final key = keyOfDeviceId(id);
+    if (key == null || deviceIdOf(key) != id || signature.length != 86) {
+      return false;
+    }
+    try {
+      final bytes = decodeKey(signature);
+      return encodeKey(bytes) == signature &&
+          VerifyKey(key).verify(signature: Signature(bytes), message: message);
+    } on Object {
+      return false;
     }
   }
 

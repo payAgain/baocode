@@ -7,6 +7,14 @@ import 'package:baocode/link/link_platform.dart';
 /// dial it; what it advertises is in [advertised].
 class FakeLinkPlatform implements LinkPlatform {
   Map<String, Object?> kept = {};
+  Object? keptComputerGroup;
+
+  @override
+  Future<Object?> readComputerGroup() async => keptComputerGroup;
+
+  @override
+  Future<void> writeComputerGroup(Object json) async =>
+      keptComputerGroup = json;
   final network = MemoryLinkNetwork();
 
   /// The node bound last, while it is.

@@ -7,12 +7,15 @@ import 'package:flutter/foundation.dart';
 import '../bots/bots.dart';
 import '../customize/customization_store.dart';
 import '../workspace/workspace.dart';
+import 'computer_group.dart';
 import 'desktop_host_connection.dart';
 import 'desktop_mutual_pairing.dart';
 import 'link_platform.dart';
 import 'link_quota.dart';
 import 'phone_push.dart';
 import 'workspace_bridge.dart';
+
+part 'computer_group_host.dart';
 
 /// The UDP port the desktop takes if it is free (another if not): the same
 /// one each time, for a firewall rule to name.
@@ -256,6 +259,40 @@ class LinkHost extends ChangeNotifier {
   }) : platform = platform ?? LinkPlatform.current();
 
   final Workspace workspace;
+  late final _ComputerGroupHost _group = _ComputerGroupHost(this);
+  ComputerGroup? get computerGroup => _group.group;
+  bool get computerGroupStorageError => _group.storageError;
+  bool get groupConnectionsAvailable => _group.ready;
+  Future<void> enableGroupConnections() => _group.enableIndependent();
+  Future<void> pauseGroupConnections() => _group.pause();
+  Future<void> createComputerGroup() => _group.create();
+  String createGroupInvite() => _group.invite();
+  Future<ComputerGroupJoinPreview> prepareGroupJoin(String link) =>
+      _group.prepare(link);
+  Future<void> confirmGroupJoin(ComputerGroupJoinPreview preview) =>
+      _group.confirm(preview);
+  void cancelGroupJoin(ComputerGroupJoinPreview preview) =>
+      _group.cancel(preview);
+  ComputerGroupApproval? get pendingGroupApproval => _group.pending;
+  ComputerGroupJoinPreview? get confirmingGroupJoin => _group.confirming;
+  bool get groupJoinFailed => _group.joinFailed;
+  bool groupWorkspaceConnected(String id) => _connections.any(
+    (connection) =>
+        connection.groupWorkspace &&
+        !connection.peer.isClosed &&
+        connection.id == id,
+  );
+  Future<void> approveGroupJoin(ComputerGroupApproval approval) =>
+      _group.approve(approval);
+  void denyGroupJoin(ComputerGroupApproval approval) => _group.deny(approval);
+  Future<void> syncComputerGroup() => _group.sync();
+  Future<void> removeGroupMember(String id) => _group.remove(id);
+  Set<String> pendingGroupRemoval(String id) => _group.pendingRemoval(id);
+  bool permitsGroupWorkspace(String id) => _group.permits(id);
+  Future<LinkPeer> openGroupWorkspace(
+    String id, {
+    Iterable<String> nearby = const [],
+  }) => _group.open(id, nearby: nearby);
 
   /// The main workbench's single outgoing connection, created on demand.
   DesktopHostConnection Function()? desktopClient;
@@ -486,8 +523,9 @@ class LinkHost extends ChangeNotifier {
     }
     _device = await platform.device();
     if (save) await _save();
+    await _group.load();
     notifyListeners();
-    if (_enabled) await _start();
+    if (_enabled || _group.independent) await _start();
     _syncPush();
   }
 
@@ -698,6 +736,7 @@ class LinkHost extends ChangeNotifier {
       await _start();
     } else {
       await _stop();
+      if (_group.independent) await _start();
     }
   }
 
@@ -751,7 +790,8 @@ class LinkHost extends ChangeNotifier {
     change();
     unawaited(_save());
     notifyListeners();
-    if (_enabled && (always || !listEquals(before, relays))) {
+    if ((_enabled || _group.independent) &&
+        (always || !listEquals(before, relays))) {
       await _stop();
       await _start();
     }
@@ -768,7 +808,11 @@ class LinkHost extends ChangeNotifier {
 
   Future<void> _start() async {
     final platform = this.platform;
-    if (platform == null || _node != null) return;
+    if (platform == null ||
+        _node != null ||
+        _status == LinkHostStatus.starting) {
+      return;
+    }
     _status = LinkHostStatus.starting;
     _error = null;
     notifyListeners();
@@ -780,7 +824,7 @@ class LinkHost extends ChangeNotifier {
         // Direct-only: phones were told this port, so there is no other.
         strictPort: _relayMode == LinkRelayMode.direct,
       );
-      if (!_enabled || _disposed) {
+      if ((!_enabled && !_group.independent) || _disposed) {
         await node.close();
         return;
       }
@@ -794,6 +838,7 @@ class LinkHost extends ChangeNotifier {
         notifyListeners();
       });
       _status = LinkHostStatus.listening;
+      _group.startSync();
     } on Object catch (error) {
       _status = LinkHostStatus.failed;
       _error = '$error';
@@ -804,6 +849,7 @@ class LinkHost extends ChangeNotifier {
   Future<void> _stop() async {
     final node = _node;
     _node = null;
+    _group.stopSync();
     final reverse = _reverse;
     if (reverse != null) unawaited(endDesktopReverse(reverse, keep: false));
     if (_pending case final pending? when pending.mutual) {
@@ -997,7 +1043,10 @@ class LinkHost extends ChangeNotifier {
     } on Object {
       return;
     }
-    if (node == null || _node != node || !_enabled || _disposed) {
+    if (node == null ||
+        _node != node ||
+        (!_enabled && !_group.independent) ||
+        _disposed) {
       await peer.close();
       return;
     }
@@ -1050,6 +1099,28 @@ class LinkHost extends ChangeNotifier {
     String method,
     Map<String, Object?> params,
   ) async {
+    if (method.startsWith(ComputerGroupWire.prefix)) {
+      return _group.handle(connection, method, params);
+    }
+    if (connection.groupControl) {
+      if (!connection.groupWorkspace || !_group.permits(connection.id)) {
+        throw ComputerGroupWire.rejected;
+      }
+      if (method == LinkMethods.unpair ||
+          method == LinkMethods.push ||
+          method == LinkMethods.away ||
+          method == LinkMethods.hello ||
+          method.startsWith('workspacePair.')) {
+        throw ComputerGroupWire.rejected;
+      }
+      return connection.bridge!.handle(method, params);
+    }
+    if (!_enabled) {
+      throw const LinkRemoteException(
+        LinkErrors.rejected,
+        'Legacy sharing is disabled',
+      );
+    }
     switch (method) {
       case DesktopMutualPairing.prepare:
         return _prepareDesktop(connection, params);
@@ -1603,6 +1674,7 @@ class LinkHost extends ChangeNotifier {
     if (_disposed ||
         _unadvertised ||
         !_loaded ||
+        !_enabled ||
         !_discoverable ||
         _status != LinkHostStatus.listening ||
         port == null) {
@@ -1670,6 +1742,9 @@ class _Connection {
   DesktopWorkspaceGrant? desktopGrant;
   DesktopPairBinding? desktopBinding;
   bool awaitingDesktopHello = false;
+  bool groupControl = false;
+  bool groupSynced = false;
+  bool groupWorkspace = false;
 
   final LinkPeer peer;
 
