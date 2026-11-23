@@ -216,7 +216,9 @@ class _PageConnection extends ChangeNotifier implements DesktopHostConnection {
   @override
   LinkPeer? peer;
   @override
-  String? get pendingCode => null;
+  bool get groupSelected => true;
+  @override
+  String? get selectedHostId => peer?.remote;
   @override
   String? get hostName => 'Fixture Host';
   @override

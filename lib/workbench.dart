@@ -96,8 +96,9 @@ import 'keybindings/keybinding_service.dart';
 import 'keybindings/window_keybindings.dart';
 import 'l10n/command_titles.dart';
 import 'l10n/l10n.dart';
-import 'link/desktop_host_connection.dart';
+import 'link/computer_group_dialog.dart';
 import 'link/desktop_host_chats.dart';
+import 'link/desktop_host_connection.dart';
 import 'link/desktop_host_page.dart';
 import 'link/desktop_remote_notifications.dart';
 import 'platform/app_platform.dart';
@@ -669,9 +670,6 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     widget.window?.attach(this);
     _windows?.addListener(_windowsChanged);
     if (_main) {
-      if (widget.settings?.link case final link? when _canSwitchWorkspace) {
-        link.desktopClient = _getDesktopConnection;
-      }
       // A link to a stash (#12 references) shows it here.
       StashController.current?.showPage = _showStash;
       // A stash's file opens as the Stash page shows it.
@@ -943,10 +941,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   @override
   void dispose() {
-    final link = widget.settings?.link;
-    if (link?.desktopClient == _getDesktopConnection) {
-      link!.desktopClient = null;
-    }
+    _cancelWorkspaceRestore?.call();
     _desktopConnection?.removeListener(_remoteChanged);
     _remoteNotices?.dispose();
     _desktopChats?.dispose();
@@ -1428,7 +1423,8 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   static const _desktopWorkspaceKey = 'workbench.desktopWorkspace';
   bool _remoteWorkspace = false;
-  bool _workspaceChosen = false;
+  bool _myComputersOpen = false;
+  VoidCallback? _cancelWorkspaceRestore;
   bool get _canSwitchWorkspace =>
       (widget.window?.isChat ?? true) && WindowControls.isDesktop;
   DesktopHostConnection? _desktopConnection;
@@ -1438,26 +1434,70 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   void _restoreDesktopWorkspace() {
     final storage = widget.settings?.files?.storage;
-    if (!_canSwitchWorkspace || storage == null || !storage.loaded) return;
-    switch (storage.get<String>(_desktopWorkspaceKey)) {
-      case 'remote':
-        _remoteWorkspace = true;
-        unawaited(_loadComputer());
-      case null when storage.error == null:
-        // Old versions kept only the protected pairing. Let the connection
-        // validate it; a present but unreadable/invalid record is not a choice.
-        unawaited(_migrateDesktopWorkspace());
+    final host = widget.settings?.link;
+    if (!_canSwitchWorkspace || storage == null || host == null) return;
+    final selection = storage.get<String>(_desktopWorkspaceKey);
+    if (!storage.loaded ||
+        selection == null ||
+        !selection.startsWith('group:')) {
+      return;
+    }
+    final id = selection.substring('group:'.length);
+    // The application is already loading the host. Do not load it again or
+    // dial using saved state before signed membership and its listener agree.
+    void ready() {
+      if (!mounted || !host.permitsGroupWorkspace(id)) return;
+      _cancelWorkspaceRestore?.call();
+      _openGroupComputer(id);
+    }
+
+    void onChange() {
+      final binding = WidgetsBinding.instance;
+      binding.addPostFrameCallback((_) {
+        if (_cancelWorkspaceRestore != null) ready();
+      });
+      binding.ensureVisualUpdate();
+    }
+
+    _cancelWorkspaceRestore = () {
+      host.removeListener(onChange);
+      _cancelWorkspaceRestore = null;
+    };
+    host.addListener(onChange);
+    onChange();
+  }
+
+  Future<String?> _pickComputer(BuildContext context) {
+    _cancelWorkspaceRestore?.call();
+    final host = widget.settings?.link;
+    return showMyComputers(
+      context,
+      host: host,
+      connection: host?.supported == true ? _getDesktopConnection() : null,
+    );
+  }
+
+  Future<void> _manageComputers() async {
+    if (!_canSwitchWorkspace || _myComputersOpen) return;
+    _myComputersOpen = true;
+    try {
+      final id = await _pickComputer(context);
+      if (id != null && mounted) _openGroupComputer(id);
+    } finally {
+      _myComputersOpen = false;
     }
   }
 
-  Future<void> _migrateDesktopWorkspace() async {
-    await _loadComputer();
-    if (mounted && !_workspaceChosen && _desktopConnection?.hostName != null) {
-      _openComputer();
+  void _openGroupComputer(String id) {
+    if (!_canSwitchWorkspace ||
+        widget.settings?.link?.permitsGroupWorkspace(id) != true) {
+      return;
     }
+    final connection = _getDesktopConnection();
+    if (connection.busy) return;
+    _openComputer(id);
+    unawaited(connection.selectGroupMember(id));
   }
-
-  Future<void> _loadComputer() => _getDesktopConnection().load();
 
   DesktopHostConnection _getDesktopConnection() {
     if (_desktopConnection case final connection?) return connection;
@@ -1481,11 +1521,11 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
           ..addListener(_remoteChanged);
   }
 
-  Future<void> _keepDesktopWorkspace() async {
+  Future<void> _keepDesktopWorkspace(String selection) async {
     try {
       await widget.settings?.files?.storage.set(
         _desktopWorkspaceKey,
-        _remoteWorkspace ? 'remote' : 'local',
+        selection,
       );
     } on Exception {
       appEvent('window', 'Could not save desktop workspace selection');
@@ -1495,21 +1535,29 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   void _remoteChanged() {
     if (!mounted) return;
     final connection = _desktopConnection!;
-    final peer = connection.peer;
-    if ((peer != null && _lastHostKey != null && peer.remote != _lastHostKey) ||
-        (connection.hostName == null && peer == null && _lastHostKey != null)) {
-      _desktopChats!.reset();
-      _lastHostKey = null;
-    }
-    if (peer != null) _lastHostKey = peer.remote;
+    final host = widget.settings?.link;
+    final id = connection.groupSelected ? connection.selectedHostId : null;
+    final group = host?.computerGroup;
+    final removed =
+        id != null &&
+        group != null &&
+        (!group.active.containsKey(host!.id) || !group.active.containsKey(id));
+    final peer = connection.groupSelected ? connection.peer : null;
+    if (id != _lastHostKey || removed) _desktopChats!.reset();
+    _lastHostKey = removed ? null : id;
     _remoteNotices?.bind(peer);
     _desktopChats!.bind(peer);
-    setState(() {});
+    if (removed && _remoteWorkspace) {
+      _openLocalWorkspace();
+    } else {
+      setState(() {});
+    }
   }
 
   void _openRemoteNotice(String host, String kind, String id) {
     final chats = _desktopChats;
-    final peer = _desktopConnection?.peer;
+    final connection = _desktopConnection;
+    final peer = connection?.groupSelected == true ? connection?.peer : null;
     if (!mounted ||
         !_canSwitchWorkspace ||
         peer == null ||
@@ -1522,30 +1570,29 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
         .where((c) => c.kind == kind && c.id == id)
         .firstOrNull;
     if (target == null || chats.busy) return;
-    _openComputer();
+    _openComputer(host);
     unawaited(chats.open(target));
   }
 
-  void _openComputer() {
-    if (!_canSwitchWorkspace || _remoteWorkspace) return;
+  void _openComputer(String id) {
+    _cancelWorkspaceRestore?.call();
+    unawaited(_keepDesktopWorkspace('group:$id'));
+    if (_remoteWorkspace) return;
     _leaveChord();
     setState(() {
-      _workspaceChosen = true;
       _remoteWorkspace = true;
       _drawerOpen = _drawerClosing = false;
     });
     _syncWorkspaceFileDrops();
-    unawaited(_loadComputer());
-    unawaited(_keepDesktopWorkspace());
   }
 
   void _openLocalWorkspace() {
+    _cancelWorkspaceRestore?.call();
     setState(() {
-      _workspaceChosen = true;
       _remoteWorkspace = false;
     });
     _syncWorkspaceFileDrops();
-    unawaited(_keepDesktopWorkspace());
+    unawaited(_keepDesktopWorkspace('local'));
   }
 
   CustomizationKind _customizeKind = CustomizationKind.skills;
@@ -3021,7 +3068,21 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
         context,
         section: section,
         pageBuilder: (context, section) =>
-            widget.settings?.buildPage(context, section) ??
+            widget.settings?.buildPage(
+              context,
+              section,
+              onMyComputers: _canSwitchWorkspace
+                  ? (pageContext) async {
+                      final route = ModalRoute.of(pageContext);
+                      final id = await _pickComputer(pageContext);
+                      if (id == null || !mounted || route?.isCurrent != true) {
+                        return;
+                      }
+                      route!.navigator!.pop();
+                      _openGroupComputer(id);
+                    }
+                  : null,
+            ) ??
             const SizedBox.shrink(),
         noticeBuilder: widget.settings?.buildNotice,
       );
@@ -3090,6 +3151,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
                 localHost: widget.settings?.link,
                 chats: _desktopChats!,
                 onBack: _openLocalWorkspace,
+                onMyComputers: _manageComputers,
                 lastChatStore: SavedDesktopHostChat.forStorage(
                   widget.settings?.files?.storage,
                 ),
@@ -3572,8 +3634,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
               _workspace.newWindowAgent((project ?? agent.project).path),
             ),
       link: _sidebarLink,
-      onSwitchToRemote: _canSwitchWorkspace ? _openComputer : null,
-      remoteWorkspaceName: _desktopConnection?.hostName,
+      onMyComputers: _canSwitchWorkspace ? _manageComputers : null,
       onCollapse: _toggle,
       onOpened: () {
         _closeCustomize();

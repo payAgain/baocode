@@ -98,6 +98,18 @@ abstract class AppLocalizations {
     Locale('zh'),
   ];
 
+  /// No description provided for @myComputers.
+  ///
+  /// In en, this message translates to:
+  /// **'My computers'**
+  String get myComputers;
+
+  /// No description provided for @myComputersUnavailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Computer connections are unavailable on this installation.'**
+  String get myComputersUnavailable;
+
   /// No description provided for @commonCancel.
   ///
   /// In en, this message translates to:

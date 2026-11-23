@@ -4,71 +4,74 @@ import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../l10n/l10n.dart';
 import 'computer_group.dart';
+import 'desktop_host_connection.dart';
 import 'link_host.dart';
 
-class ComputerGroupButton extends StatelessWidget {
-  const ComputerGroupButton({
-    super.key,
-    required this.host,
-    this.open,
-    this.compact = false,
-  });
-
-  final LinkHost host;
-  final ValueChanged<String>? open;
-  final bool compact;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = _Text(context);
-    final label = open != null ? text.title : text.settings;
-    void show() => unawaited(
-      showDialog<void>(
-        animationStyle: AnimationStyle.noAnimation,
-        context: context,
-        builder: (_) => _GroupDialog(host: host, open: open),
-      ),
-    );
-    if (compact) {
-      return IconButton(
-        tooltip: label,
-        onPressed: show,
-        icon: const Icon(Icons.devices, size: 17),
-      );
-    }
-    return TextButton.icon(
-      onPressed: show,
-      icon: const Icon(Icons.devices, size: 17),
-      label: Text(label),
-    );
-  }
-}
+Future<String?> showMyComputers(
+  BuildContext context, {
+  required LinkHost? host,
+  DesktopHostConnection? connection,
+}) => showDialog<String>(
+  animationStyle: AnimationStyle.noAnimation,
+  context: context,
+  builder: (context) => host == null || !host.supported
+      ? AlertDialog(
+          title: Text(context.l10n.myComputers),
+          content: Text(context.l10n.myComputersUnavailable),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(context.l10n.commonClose),
+            ),
+          ],
+        )
+      : _GroupDialog(host: host, connection: connection),
+);
 
 class _GroupDialog extends StatefulWidget {
-  const _GroupDialog({required this.host, required this.open});
+  const _GroupDialog({required this.host, this.connection});
+
   final LinkHost host;
-  final ValueChanged<String>? open;
+  final DesktopHostConnection? connection;
 
   @override
   State<_GroupDialog> createState() => _GroupDialogState();
 }
 
+enum _Setup { create, invite, nearby }
+
 class _GroupDialogState extends State<_GroupDialog> {
   final _input = TextEditingController();
-  bool _creating = false;
+  _Setup? _setup;
   bool _busy = false;
   bool _failed = false;
   bool _copied = false;
-  String? _invite;
-  String? _removing;
+  bool _showInviteOptions = false;
+  bool _browsing = false;
+  bool _invitingNearby = false;
+  (String, String)? _removing;
   ComputerGroupJoinPreview? _preview;
 
   LinkHost get _host => widget.host;
+  DesktopHostConnection? get _connection => widget.connection;
 
   @override
   void dispose() {
-    if (_preview case final preview?) _host.cancelGroupJoin(preview);
+    final preview = _preview;
+    final host = _host;
+    final connection = _connection;
+    final browsing = _browsing;
+    final inviting = _invitingNearby;
+    if (preview != null || browsing || inviting) {
+      // These notifiers can rebuild widgets outside the dialog.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (preview != null) host.cancelGroupJoin(preview);
+        if (browsing) unawaited(connection?.stopDiscovery());
+        if (inviting) host.cancelGroupInvite();
+      });
+    }
     _input.dispose();
     super.dispose();
   }
@@ -88,51 +91,66 @@ class _GroupDialogState extends State<_GroupDialog> {
     }
   }
 
+  Future<void> _prepare(
+    Future<ComputerGroupJoinPreview> Function() prepare,
+  ) async {
+    if (!_host.groupConnectionsAvailable) await _host.enableGroupConnections();
+    if (!mounted) return;
+    final preview = await prepare();
+    if (mounted) {
+      _stopBrowse();
+      setState(() => _preview = preview);
+    } else {
+      _host.cancelGroupJoin(preview);
+    }
+  }
+
+  void _stopBrowse() {
+    if (!_browsing) return;
+    _browsing = false;
+    unawaited(_connection?.stopDiscovery());
+  }
+
   String _fingerprint(String id) => fingerprintOf(keyOfDeviceId(id)!);
 
   @override
   Widget build(BuildContext context) {
     final text = _Text(context);
     return ListenableBuilder(
-      listenable: _host,
+      listenable: Listenable.merge([_host, _connection]),
       builder: (context, _) {
         final group = _host.computerGroup;
         final waiting = _host.confirmingGroupJoin;
         final request = _host.pendingGroupApproval;
-        final removing = group?.active[_removing];
-        final memberHere = group?.active.containsKey(_host.id) == true;
+        final removing = _removing?.$1 == group?.id
+            ? group?.active[_removing?.$2]
+            : null;
         final share = _host.groupConnectionsAvailable;
         final preview = _preview;
-        final openMember = widget.open;
         final children = <Widget>[
           if (_host.computerGroupStorageError)
             Text(text.storage)
-          else if (!share) ...[
-            Text(text.listener),
-            FilledButton(
-              onPressed: _busy
-                  ? null
-                  : () => _run(_host.enableGroupConnections),
-              child: Text(text.enable),
-            ),
-          ] else if (waiting != null) ...[
+          else if (waiting != null) ...[
             Text(text.waiting(waiting.sponsor.name)),
-            Text(waiting.code),
+            SelectableText(waiting.code),
             TextButton(
               onPressed: () => _host.cancelGroupJoin(waiting),
               child: Text(text.cancelJoin),
             ),
           ] else if (preview != null) ...[
             Text(text.joinVia(preview.sponsor.name)),
-            Text(_fingerprint(preview.group.id)),
+            Text(_fingerprint(preview.sponsor.id)),
             Text(text.compare),
-            Text(preview.code),
+            SelectableText(preview.code),
             Text(text.scope),
             FilledButton(
               onPressed: _busy
                   ? null
                   : () {
-                      setState(() => _preview = null);
+                      setState(() {
+                        _preview = null;
+                        _setup = null;
+                      });
                       unawaited(_run(() => _host.confirmGroupJoin(preview)));
                     },
               child: Text(text.confirmJoin),
@@ -142,52 +160,31 @@ class _GroupDialogState extends State<_GroupDialog> {
                   ? null
                   : () {
                       _host.cancelGroupJoin(preview);
-                      setState(() => _preview = null);
+                      setState(() {
+                        _preview = null;
+                        _setup = null;
+                      });
                     },
               child: Text(text.cancelJoin),
             ),
-          ] else if (group == null && _creating) ...[
-            Text(text.scope),
-            FilledButton(
-              onPressed: _busy ? null : () => _run(_host.createComputerGroup),
-              child: Text(text.confirmCreate),
-            ),
           ] else if (group == null) ...[
-            OutlinedButton(
-              onPressed: _busy ? null : () => setState(() => _creating = true),
-              child: Text(text.create),
-            ),
-            TextField(
-              key: const ValueKey('computer-group-invite'),
-              controller: _input,
-              autocorrect: false,
-              enableSuggestions: false,
-              decoration: InputDecoration(labelText: text.invite),
-            ),
-            FilledButton(
-              onPressed: _busy
-                  ? null
-                  : () => _run(() async {
-                      final reviewed = await _host.prepareGroupJoin(
-                        _input.text,
-                      );
-                      if (mounted) {
-                        setState(() => _preview = reviewed);
-                      } else {
-                        _host.cancelGroupJoin(reviewed);
-                      }
-                    }),
-              child: Text(text.review),
-            ),
-          ] else if (!memberHere) ...[
+            ..._setupWidgets(text),
+          ] else if (!group.active.containsKey(_host.id)) ...[
             Text(text.youRemoved),
           ] else if (removing != null) ...[
             Text(text.removePrompt(removing.name)),
             Text(_fingerprint(removing.id)),
-            FilledButton(
-              onPressed: _busy
+            OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Theme.of(context).colorScheme.error,
+              ),
+              onPressed: _busy || !share
                   ? null
                   : () => _run(() async {
+                      if (_host.computerGroup?.id != group.id ||
+                          !_host.permitsGroupWorkspace(removing.id)) {
+                        return;
+                      }
                       await _host.removeGroupMember(removing.id);
                       if (mounted) setState(() => _removing = null);
                     }),
@@ -195,20 +192,25 @@ class _GroupDialogState extends State<_GroupDialog> {
             ),
             TextButton(
               onPressed: _busy ? null : () => setState(() => _removing = null),
-              child: Text(text.cancel),
+              child: Text(context.l10n.commonCancel),
             ),
           ] else if (request != null) ...[
             Text(text.approving(request.member.name)),
             Text(_fingerprint(request.member.id)),
             Text(text.compare),
-            Text(request.code),
+            SelectableText(request.code),
             Text(text.scope),
             FilledButton(
               onPressed: _busy
                   ? null
                   : () => _run(() async {
                       await _host.approveGroupJoin(request);
-                      if (mounted) setState(() => _invite = null);
+                      if (mounted) {
+                        setState(() {
+                          _invitingNearby = false;
+                          _showInviteOptions = false;
+                        });
+                      }
                     }),
               child: Text(text.approve),
             ),
@@ -217,36 +219,27 @@ class _GroupDialogState extends State<_GroupDialog> {
               child: Text(text.decline),
             ),
           ] else ...[
-            Text(text.groupKey),
-            Text(_fingerprint(group.id)),
-            Text(text.scope),
-            if (group.canAdmit)
-              OutlinedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _run(() {
-                        final invite = _host.createGroupInvite();
-                        setState(() {
-                          _invite = invite;
-                          _copied = false;
-                        });
-                      }),
-                child: Text(text.createInvite),
-              ),
-            if (_invite case final invite?) ...[
-              Text(text.share),
-              TextButton(
-                onPressed: _busy
-                    ? null
-                    : () => _run(() async {
-                        await Clipboard.setData(ClipboardData(text: invite));
-                        if (mounted) setState(() => _copied = true);
-                      }),
-                child: Text(_copied ? text.copied : text.copy),
-              ),
-            ],
             for (final member in group.active.values)
-              _member(text, member, openMember),
+              _member(text, group, member),
+            if (!share) ...[
+              Text(text.paused),
+              FilledButton(
+                onPressed: _busy
+                    ? null
+                    : () => _run(_host.enableGroupConnections),
+                child: Text(text.enable),
+              ),
+            ] else ...[
+              if (group.canAdmit && !_showInviteOptions)
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.add),
+                  onPressed: _busy
+                      ? null
+                      : () => setState(() => _showInviteOptions = true),
+                  label: Text(text.createInvite),
+                ),
+              if (_showInviteOptions) ..._inviteWidgets(text),
+            ],
             for (final id in group.removed)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 6),
@@ -264,134 +257,327 @@ class _GroupDialogState extends State<_GroupDialog> {
                   ],
                 ),
               ),
-            TextButton(
-              onPressed: _busy ? null : () => _run(_host.syncComputerGroup),
-              child: Text(text.sync),
-            ),
-            TextButton(
-              onPressed: _busy ? null : () => _run(_host.pauseGroupConnections),
-              child: Text(text.pause),
-            ),
+            if (share) ...[
+              TextButton(
+                onPressed: () => showDialog<void>(
+                  context: context,
+                  builder: (context) => AlertDialog(
+                    title: Text(text.access),
+                    content: Text(text.scope),
+                    scrollable: true,
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: Text(context.l10n.commonClose),
+                      ),
+                    ],
+                  ),
+                ),
+                child: Text(text.access),
+              ),
+              if (group.removed.isNotEmpty)
+                TextButton(
+                  onPressed: _busy ? null : () => _run(_host.syncComputerGroup),
+                  child: Text(text.sync),
+                ),
+              TextButton(
+                onPressed: _busy
+                    ? null
+                    : () => _run(_host.pauseGroupConnections),
+                child: Text(text.pause),
+              ),
+            ],
           ],
           if (_failed || (_host.groupJoinFailed && group == null))
             Semantics(liveRegion: true, child: Text(text.failed)),
         ];
-        return Dialog(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 480),
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Semantics(
-                    header: true,
-                    child: Text(
-                      text.title,
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
+        return AlertDialog(
+          title: Text(context.l10n.myComputers),
+          scrollable: true,
+          content: SizedBox(
+            width: 470,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final child in children)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: child,
                   ),
-                  const SizedBox(height: 12),
-                  Flexible(
-                    child: SingleChildScrollView(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          for (final child in children)
-                            Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 4),
-                              child: child,
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  Align(
-                    alignment: AlignmentDirectional.centerEnd,
-                    child: TextButton(
-                      onPressed: () => Navigator.pop(context),
-                      child: Text(
-                        waiting == null ? text.close : text.keepWaiting,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+              ],
             ),
           ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(
+                waiting == null ? context.l10n.commonClose : text.keepWaiting,
+              ),
+            ),
+          ],
         );
       },
     );
   }
 
-  Widget _member(
-    _Text text,
-    ComputerGroupMember member,
-    ValueChanged<String>? open,
-  ) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 6),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          member.id == _host.id ? text.thisComputer(member.name) : member.name,
-        ),
-        Text(_fingerprint(member.id)),
-        if (member.id != _host.id) ...[
-          Text(
-            _host.groupWorkspaceConnected(member.id)
-                ? text.connected
-                : text.statusUnknown,
-          ),
-          Wrap(
-            children: [
-              if (open != null)
-                TextButton(
-                  onPressed: _busy || !_host.permitsGroupWorkspace(member.id)
-                      ? null
-                      : () {
-                          Navigator.pop(context);
-                          open(member.id);
-                        },
-                  child: Text(text.open(member.name)),
+  List<Widget> _setupWidgets(_Text text) => switch (_setup) {
+    _Setup.create => [
+      Text(text.scope),
+      FilledButton(
+        onPressed: _busy
+            ? null
+            : () => _run(() async {
+                if (!_host.groupConnectionsAvailable) {
+                  await _host.enableGroupConnections();
+                }
+                if (mounted) await _host.createComputerGroup();
+              }),
+        child: Text(text.confirmCreate),
+      ),
+      _back(),
+    ],
+    _Setup.invite => [
+      TextField(
+        key: const ValueKey('computer-group-invite'),
+        controller: _input,
+        autocorrect: false,
+        enableSuggestions: false,
+        enableIMEPersonalizedLearning: false,
+        decoration: InputDecoration(labelText: text.invite),
+      ),
+      ValueListenableBuilder(
+        valueListenable: _input,
+        builder: (context, value, _) => FilledButton(
+          onPressed: _busy || value.text.trim().isEmpty
+              ? null
+              : () => _run(
+                  () =>
+                      _prepare(() => _host.prepareGroupJoin(value.text.trim())),
                 ),
-              TextButton(
-                onPressed: _busy || !_host.permitsGroupWorkspace(member.id)
-                    ? null
-                    : () => setState(() => _removing = member.id),
-                child: Text(text.remove(member.name)),
-              ),
-            ],
+          child: Text(text.review),
+        ),
+      ),
+      _back(),
+    ],
+    _Setup.nearby => [
+      Text(text.findHint),
+      if (_connection!.discoveryError != null)
+        Text(text.findFailed)
+      else if (_connection!.nearbyGroupHosts.isEmpty)
+        Text(text.searching)
+      else
+        for (final advert in _connection!.nearbyGroupHosts)
+          OutlinedButton.icon(
+            icon: const Icon(Icons.computer),
+            label: Text(advert.name),
+            onPressed: _busy
+                ? null
+                : () => _run(
+                    () => _prepare(
+                      () => _connection!.prepareNearbyGroup(advert.id),
+                    ),
+                  ),
+          ),
+      _back(),
+    ],
+    null => [
+      Text(text.welcome),
+      Wrap(
+        spacing: 8,
+        children: [
+          FilledButton(
+            onPressed: _busy
+                ? null
+                : () => setState(() => _setup = _Setup.create),
+            child: Text(text.create),
+          ),
+          OutlinedButton(
+            onPressed: _busy
+                ? null
+                : () => setState(() => _setup = _Setup.invite),
+            child: Text(text.useInvite),
+          ),
+          if (_connection?.discoverySupported == true)
+            OutlinedButton.icon(
+              icon: const Icon(Icons.radar),
+              onPressed: _busy
+                  ? null
+                  : () {
+                      setState(() {
+                        _setup = _Setup.nearby;
+                        _browsing = true;
+                        _failed = false;
+                      });
+                      _connection!.startDiscovery();
+                    },
+              label: Text(text.find),
+            ),
+        ],
+      ),
+    ],
+  };
+
+  Widget _back() => TextButton(
+    onPressed: _busy
+        ? null
+        : () {
+            _stopBrowse();
+            setState(() {
+              _setup = null;
+              _failed = false;
+            });
+          },
+    child: Text(context.l10n.commonCancel),
+  );
+
+  List<Widget> _inviteWidgets(_Text text) => [
+    if (_invitingNearby) ...[
+      Text(
+        _host.invitingNearbyGroupMembers
+            ? text.invitingNearby
+            : text.inviteExpired,
+      ),
+      TextButton(
+        onPressed: _busy
+            ? null
+            : () {
+                _host.cancelGroupInvite();
+                setState(() => _invitingNearby = false);
+              },
+        child: Text(text.stopInviting),
+      ),
+    ] else ...[
+      Text(text.share),
+      Wrap(
+        spacing: 8,
+        children: [
+          FilledButton(
+            onPressed: _busy
+                ? null
+                : () => _run(() async {
+                    final invite = _host.createGroupInvite();
+                    await Clipboard.setData(ClipboardData(text: invite));
+                    if (mounted) setState(() => _copied = true);
+                  }),
+            child: Text(_copied ? text.copied : text.copy),
+          ),
+          OutlinedButton.icon(
+            icon: const Icon(Icons.radar),
+            onPressed: _busy
+                ? null
+                : () => _run(() {
+                    _host.createGroupInvite(nearby: true);
+                    setState(() {
+                      _invitingNearby = true;
+                      _copied = false;
+                    });
+                  }),
+            label: Text(text.inviteNearby),
           ),
         ],
-      ],
-    ),
-  );
+      ),
+    ],
+  ];
+
+  Widget _member(_Text text, ComputerGroup group, ComputerGroupMember member) {
+    final here = member.id == _host.id;
+    final canUse = !_busy && _host.permitsGroupWorkspace(member.id);
+    final connection = _connection;
+    final selected = connection?.selectedHostId == member.id;
+    final status = switch (connection) {
+      _
+          when _host.groupWorkspaceConnected(member.id) ||
+              connection?.peer?.remote == member.id =>
+        text.connected,
+      final current? when selected && current.busy => text.connecting,
+      final current?
+          when selected &&
+              current.error != null &&
+              _host.permitsGroupWorkspace(member.id) =>
+        text.unreachable,
+      _ => text.statusUnknown,
+    };
+    return Card.outlined(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              here ? text.thisComputer(member.name) : member.name,
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            Text(_fingerprint(member.id)),
+            if (!here) ...[
+              Text(status),
+              Wrap(
+                spacing: 8,
+                children: [
+                  if (connection != null)
+                    FilledButton(
+                      key: ValueKey(('open-computer', member.id)),
+                      onPressed: canUse && !connection.busy
+                          ? () => Navigator.pop(context, member.id)
+                          : null,
+                      child: Text(text.open),
+                    ),
+                  TextButton(
+                    onPressed: canUse
+                        ? () =>
+                              setState(() => _removing = (group.id, member.id))
+                        : null,
+                    child: Text(text.remove(member.name)),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _Text {
   _Text(BuildContext context)
     : zh = Localizations.localeOf(context).languageCode == 'zh';
   final bool zh;
-  String get title => zh ? '电脑信任组' : 'Computer group';
-  String get settings => zh ? '电脑信任组设置' : 'Computer group settings';
+  String get welcome => zh
+      ? '创建一个可信电脑组，或使用另一台电脑发出的邀请。'
+      : 'Create a group for your trusted computers or use an invite from another computer.';
   String get scope => zh
       ? '当前和未来的成员可以互相操作 BaoCode 工作区，包括运行智能体、处理审批、读取 BaoCode 可访问的项目外文件。每位成员都可以批准加入或从整个组移除其他成员。请仅与完全信任的电脑共享。'
       : 'Current and future members can operate one another’s BaoCode workspaces. They can run agents, answer approvals and read files BaoCode can access outside projects. Any member can approve new members or remove another computer from the whole group. Share only with computers you fully trust.';
-  String get listener => zh
-      ? '先启用电脑组连接。此操作不会启用手机或已有的一对一配对，也不会共享工作区，直到你确认创建或加入组。'
-      : 'Enable computer group connections first. This does not enable phones, existing one-to-one pairings or workspace access before you confirm creating or joining a group.';
-  String get enable => zh ? '启用电脑组连接' : 'Enable computer group connections';
+  String get paused =>
+      zh ? '这台电脑的组连接已暂停。' : 'Group connections are paused on this computer.';
+  String get enable => zh ? '恢复连接' : 'Resume connections';
   String get storage => zh
       ? '无法验证已保存的信任组。组访问已停用。'
       : 'Could not verify saved group history. Group access is disabled.';
-  String get groupKey => zh ? '组指纹' : 'Group fingerprint';
-  String get create => zh ? '创建电脑信任组' : 'Create computer group';
+  String get create => zh ? '创建组' : 'Create group';
   String get confirmCreate => zh ? '创建并信任组成员' : 'Create and trust group';
-  String get createInvite => zh ? '创建组邀请' : 'Create group invite';
-  String get invite => zh ? '电脑信任组邀请' : 'Computer group invite';
-  String get review => zh ? '查看组邀请' : 'Review group invite';
+  String get createInvite => zh ? '邀请电脑' : 'Invite computer';
+  String get useInvite => zh ? '使用邀请' : 'Use invite';
+  String get find => zh ? '查找电脑' : 'Find computer';
+  String get findHint => zh
+      ? '在另一台电脑上打开「我的电脑」，然后选择「邀请电脑 → 邀请附近的电脑」。'
+      : 'On the other computer, open My computers and choose Invite computer → Invite nearby.';
+  String get findFailed => zh
+      ? '无法搜索局域网。请改用邀请链接。'
+      : 'Could not search the local network. Use an invite link instead.';
+  String get searching => zh
+      ? '正在查找附近接受邀请的电脑…'
+      : 'Looking for nearby computers accepting requests…';
+  String get inviteNearby => zh ? '邀请附近的电脑' : 'Invite nearby';
+  String get invitingNearby => zh
+      ? '请在另一台电脑上选择「查找电脑」。关闭此窗口将停止附近邀请。'
+      : 'Choose Find computer on the other computer. Closing this window stops the nearby invite.';
+  String get inviteExpired =>
+      zh ? '附近邀请已过期。' : 'The nearby invite has expired.';
+  String get stopInviting => zh ? '停止附近邀请' : 'Stop inviting nearby';
+  String get invite => zh ? '邀请链接' : 'Invite link';
+  String get review => zh ? '查看邀请' : 'Review invite';
   String get compare => zh
       ? '请核对两台电脑上的校验码。只有一致时才继续。'
       : 'Compare this code on both computers. Continue only if the codes match.';
@@ -405,15 +591,16 @@ class _Text {
   String get approve => zh ? '批准加入组' : 'Approve group member';
   String get decline => zh ? '拒绝加入' : 'Decline group member';
   String get keepWaiting => zh ? '关闭窗口并继续等待' : 'Close and keep waiting';
-  String get close => zh ? '关闭' : 'Close';
-  String get cancel => zh ? '取消' : 'Cancel';
   String get confirmRemove => zh ? '从组中移除' : 'Remove from group';
   String get youRemoved => zh
       ? '这台电脑已被移出组。本机已关闭组访问。'
       : 'This computer was removed from the group. Group access is disabled here.';
   String get connected => zh ? '工作区已连接' : 'Workspace connected';
-  String get statusUnknown =>
-      zh ? '没有工作区连接，在线状态未知' : 'No workspace connection. Online status unknown.';
+  String get connecting => zh ? '正在连接…' : 'Connecting…';
+  String get unreachable =>
+      zh ? '工作区连接不可用' : 'Workspace connection unavailable';
+  String get statusUnknown => zh ? '在线状态未知' : 'Online status unknown';
+  String get access => zh ? '工作区权限' : 'Workspace permissions';
   String get sync => zh ? '同步成员变更' : 'Sync membership changes';
   String get pause =>
       zh ? '暂停本机的电脑组连接' : 'Pause group connections on this computer';
@@ -422,7 +609,7 @@ class _Text {
       : 'The group action could not be completed. Check the invite, connection and group status on both computers.';
   String get delivered =>
       zh ? '已收到已知相关电脑的确认。' : 'Acknowledged by the known affected computers.';
-  String open(String name) => zh ? '打开 $name' : 'Open $name';
+  String get open => zh ? '打开工作区' : 'Open workspace';
   String remove(String name) => zh ? '移除 $name' : 'Remove $name';
   String removed(String name) => zh ? '已移除 $name' : 'Removed $name';
   String thisComputer(String name) =>

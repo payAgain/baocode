@@ -10,6 +10,12 @@ class AppLocalizationsZh extends AppLocalizations {
   AppLocalizationsZh([String locale = 'zh']) : super(locale);
 
   @override
+  String get myComputers => '我的电脑';
+
+  @override
+  String get myComputersUnavailable => '此安装无法使用电脑连接。';
+
+  @override
   String get commonCancel => '取消';
 
   @override

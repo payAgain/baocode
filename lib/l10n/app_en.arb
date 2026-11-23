@@ -1,4 +1,6 @@
 {
+  "myComputers": "My computers",
+  "myComputersUnavailable": "Computer connections are unavailable on this installation.",
   "@@locale": "en",
   "commonCancel": "Cancel",
   "commonClose": "Close",

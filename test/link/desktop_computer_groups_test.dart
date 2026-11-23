@@ -18,9 +18,9 @@ void main() {
     'computer group sharing works with legacy Mobile connections off',
     () async {
       final (a, b) = await machines();
-      await b.client.pair((await a.host.beginPairing())!.uri);
-      await b.client.confirm();
-      expect(await b.client.peer!.call(LinkMethods.state), isA<Map>());
+      final phone = LinkIdentity.generate();
+      final mobile = await pairPhone(a, phone);
+      expect(await mobile.call(LinkMethods.state), isA<Map>());
       await Future.wait([a.host.setEnabled(false), b.host.setEnabled(false)]);
       await Future.wait([
         a.host.enableGroupConnections(),
@@ -49,55 +49,44 @@ void main() {
     },
   );
 
-  test(
-    'switching between group and legacy sharing closes the previous workspace',
-    () async {
-      final (a, b) = await machines();
-      await b.client.pair((await a.host.beginPairing())!.uri);
-      await b.client.confirm();
-      final original = b.client.peer!;
-      final legacyId = a.host.phones.single.id;
-      await a.host.createComputerGroup();
-      await join(a, b);
-
-      await b.client.selectGroupMember(a.host.id);
-      final group = b.client.peer!;
-      expect(original.isClosed, isTrue);
-      expect(group.remote, a.host.id);
-      expect(legacyId, isNot(b.host.id));
-      expect(await group.call(LinkMethods.state), isA<Map>());
-      await b.client.selectHost(a.host.id);
-      expect(group.isClosed, isTrue);
-      expect(b.client.groupSelected, isFalse);
-      expect(await b.client.peer!.call(LinkMethods.state), isA<Map>());
-      expect(a.host.phones.single.id, legacyId);
-    },
-  );
-
-  test('corrupt saved membership disables the group without changing a legacy pairing', () async {
+  test('retired desktop selection cannot disrupt a group workspace', () async {
     final (a, b) = await machines();
-    await b.client.pair((await a.host.beginPairing())!.uri);
-    await b.client.confirm();
-    final legacyId = a.host.phones.single.id;
     await a.host.createComputerGroup();
     await join(a, b);
-    final record = Map<String, Object?>.of(
-      a.platform.keptComputerGroup! as Map<String, Object?>,
-    );
-    final saved = (record['history']! as List<Object?>).toList();
-    final event = (saved.last! as List<Object?>).toList();
-    event[5] = 'X' * 86;
-    saved[saved.length - 1] = event;
-    a.platform.keptComputerGroup = {...record, 'history': saved};
-    await a.restart();
-    expect(a.host.computerGroupStorageError, isTrue);
-    expect(a.host.computerGroup, isNull);
-    expect(a.host.phones.single.id, legacyId);
     await b.client.selectGroupMember(a.host.id);
-    expect(b.client.peer, isNull);
+    final group = b.client.peer!;
     await b.client.selectHost(a.host.id);
-    expect(await b.client.peer!.call(LinkMethods.state), isA<Map>());
+    expect(b.client.peer, same(group));
+    expect(await group.call(LinkMethods.state), isA<Map>());
   });
+
+  test(
+    'corrupt saved membership disables the group without changing Mobile Link',
+    () async {
+      final (a, b) = await machines();
+      final phone = LinkIdentity.generate();
+      await pairPhone(a, phone);
+      await a.host.createComputerGroup();
+      await join(a, b);
+      final record = Map<String, Object?>.of(
+        a.platform.keptComputerGroup! as Map<String, Object?>,
+      );
+      final saved = (record['history']! as List<Object?>).toList();
+      final event = (saved.last! as List<Object?>).toList();
+      event[5] = 'X' * 86;
+      saved[saved.length - 1] = event;
+      a.platform.keptComputerGroup = {...record, 'history': saved};
+      await a.restart();
+      expect(a.host.computerGroupStorageError, isTrue);
+      expect(a.host.computerGroup, isNull);
+      expect(a.host.phones.single.id, phone.id);
+      await b.client.selectGroupMember(a.host.id);
+      expect(b.client.peer, isNull);
+      final mobile = await connectPhone(a, phone);
+      await mobile.call(LinkMethods.hello);
+      expect(await mobile.call(LinkMethods.state), isA<Map>());
+    },
+  );
 
   test(
     'a stale sponsor cannot introduce a member after known removal',
@@ -197,30 +186,46 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    await tap('Computer group settings');
-    await tap('Create computer group');
+    Future<void> entry(Type pane) async {
+      await tester.tap(
+        find
+            .descendant(
+              of: find.byType(pane),
+              matching: find.text('My computers'),
+            )
+            .hitTestable(),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> settings() => entry(MobileSettingsPage);
+    Future<void> workbench() => entry(Workbench);
+
+    await settings();
+    await tap('Create group');
     expect(find.textContaining('answer approvals'), findsWidgets);
     expect(b.host.computerGroup, isNull);
     await tap('Create and trust group');
-    await tap('Create group invite');
+    await tap('Invite computer');
     await tap('Copy invite');
     expect(clipboard, startsWith('baocode-group://join/'));
     final invite = clipboard!;
     await tap('Close');
-    await tap('Switch to remote workspace');
-    await tap('Computer group');
+    await workbench();
+    await tap('Use invite');
     await tester.enterText(
       find.byKey(const ValueKey('computer-group-invite')),
       invite,
     );
-    await tap('Review group invite');
+    await tester.pump();
+    await tap('Review invite');
     expect(find.textContaining('answer approvals'), findsWidgets);
     expect(a.host.computerGroup, isNull);
     expect(b.host.pendingGroupApproval, isNull);
     await tap('Join and share workspace');
     expect(b.host.pendingGroupApproval, isNotNull);
     await tap('Close and keep waiting');
-    await tap('Computer group settings');
+    await settings();
     expect(find.textContaining('answer approvals'), findsWidgets);
     await tap('Approve group member');
     expect(
@@ -228,12 +233,12 @@ void main() {
       unorderedEquals([a.host.id, b.host.id]),
     );
     await tap('Close');
-    await tap('Computer group');
-    await tap('Open ${b.name}');
+    await workbench();
+    await tap('Open workspace');
     final peer = a.client.peer!;
     expect(peer.remote, b.host.id);
     expect(await peer.call(LinkMethods.state), isA<Map>());
-    await tap('Computer group settings');
+    await settings();
     await tap('Remove ${a.name}');
     expect(peer.isClosed, isFalse);
     await tap('Remove from group');
@@ -250,13 +255,9 @@ void main() {
     () async {
       final (a, b) = await machines();
       final c = Machine(a.network, 'Third Mac');
-      final d = Machine(a.network, 'Legacy Mac');
       addTearDown(c.close);
-      addTearDown(d.close);
-      await Future.wait([c.host.load(), d.host.load()]);
-      await d.client.pair((await a.host.beginPairing())!.uri);
-      await d.client.confirm();
-      final unrelated = d.client.peer!;
+      await c.host.load();
+      final unrelated = await pairPhone(a, LinkIdentity.generate());
 
       await a.host.createComputerGroup();
       await join(a, b);
@@ -353,7 +354,7 @@ void main() {
       for (final (viewer, owner) in [(a, c), (c, a)]) {
         expect(viewer.host.computerGroup!.active.keys, contains(owner.host.id));
         expect(viewer.client.savedHosts, isEmpty);
-        expect(owner.host.desktopGrants, isEmpty);
+        expect(owner.platform.kept['desktopGrants'], isEmpty);
         expect(owner.host.phones, isEmpty);
         await viewer.client.selectGroupMember(owner.host.id);
         final peer = viewer.client.peer;
@@ -399,4 +400,26 @@ Future<void> join(Machine sponsor, Machine joiner) async {
   expect(sponsor.host.computerGroup!.active, isNot(contains(joiner.host.id)));
   await sponsor.host.approveGroupJoin(pending);
   await joining;
+}
+
+Future<LinkPeer> connectPhone(Machine owner, LinkIdentity identity) async {
+  final node = owner.network.node(identity.id);
+  addTearDown(node.close);
+  final peer = await LinkPeer.connect(
+    await node.connect(LinkAddress(owner.host.id)),
+  );
+  addTearDown(peer.close);
+  return peer;
+}
+
+Future<LinkPeer> pairPhone(Machine owner, LinkIdentity identity) async {
+  final offer = (await owner.host.beginPairing())!;
+  final phone = await connectPhone(owner, identity);
+  await phone.call(LinkMethods.hello, {
+    'token': encodeKey(offer.token),
+    'system': 'iOS 26.1',
+    'name': 'iPhone',
+  });
+  await phone.call(LinkMethods.confirm);
+  return phone;
 }

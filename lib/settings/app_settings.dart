@@ -162,7 +162,11 @@ class AppSettings {
   );
 
   /// [section]'s page of the settings dialog.
-  Widget buildPage(BuildContext context, SettingsSection section) {
+  Widget buildPage(
+    BuildContext context,
+    SettingsSection section, {
+    void Function(BuildContext)? onMyComputers,
+  }) {
     switch (section) {
       case SettingsSection.general:
         return GeneralSettingsPage(
@@ -195,7 +199,10 @@ class AppSettings {
         return SshSettingsPage(workspace: workspace);
       case SettingsSection.mobile:
         return switch (link) {
-          final link? => MobileSettingsPage(host: link),
+          final link? => MobileSettingsPage(
+            host: link,
+            onMyComputers: onMyComputers,
+          ),
           null => SettingsPage(
             title: context.l10n.settingsSectionMobile,
             description: context.l10n.mobileSettingsDescription,
