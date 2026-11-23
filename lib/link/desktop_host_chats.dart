@@ -17,6 +17,8 @@ class DesktopHostChat {
     required this.kind,
     this.projectId,
     this.updatedAt,
+    this.pinned = false,
+    this.provisional = false,
   });
 
   final String id;
@@ -24,6 +26,8 @@ class DesktopHostChat {
   final String kind;
   final String? projectId;
   final DateTime? updatedAt;
+  final bool pinned;
+  final bool provisional;
 
   (String, String) get _key => (kind, id);
 }
@@ -72,6 +76,8 @@ class DesktopHostChats extends ChangeNotifier {
   Map<String, String> _botNames = const {};
   DesktopHostChat? _selected;
   _HostView? _view;
+  DesktopHostChat? _unlistedDraft;
+  Object? _creating;
   final _controls = Expando<DesktopHostSessionControls>();
   _PendingSend? _sending;
   final Map<(String, String), String> _sendErrors = {};
@@ -137,6 +143,7 @@ class DesktopHostChats extends ChangeNotifier {
   void _forget() {
     _disconnect();
     _host = null;
+    _unlistedDraft = null;
     _selected = null;
     _projects = const [];
     _chats = const [];
@@ -148,6 +155,7 @@ class DesktopHostChats extends ChangeNotifier {
   void _disconnect() {
     _closeView();
     _binding = null;
+    _creating = null;
     _peer = null;
     unawaited(_events?.cancel());
     _events = null;
@@ -201,6 +209,7 @@ class DesktopHostChats extends ChangeNotifier {
       String title, {
       String? projectId,
       DateTime? updatedAt,
+      bool pinned = false,
     }) {
       if (id.isEmpty) return;
       entries[(kind, id)] = DesktopHostChat(
@@ -209,6 +218,7 @@ class DesktopHostChats extends ChangeNotifier {
         kind: kind,
         projectId: projectId,
         updatedAt: updatedAt,
+        pinned: pinned,
       );
     }
 
@@ -219,6 +229,7 @@ class DesktopHostChats extends ChangeNotifier {
           session.id,
           session.title,
           projectId: session.project,
+          pinned: session.pinned,
           updatedAt: session.updatedAt.millisecondsSinceEpoch > 0
               ? session.updatedAt
               : null,
@@ -230,6 +241,16 @@ class DesktopHostChats extends ChangeNotifier {
     }
     for (final group in state.groups) {
       add('group', group.id, group.name);
+    }
+    // The host deliberately omits an untouched draft until the first send.
+    if (_unlistedDraft case final draft?) {
+      if (entries.containsKey(draft._key) ||
+          !projects.contains(draft.projectId) ||
+          botIds.contains(draft.id)) {
+        _unlistedDraft = null;
+      } else if (_selected?._key == draft._key) {
+        entries[draft._key] = draft;
+      }
     }
     _chats = List.unmodifiable(entries.values);
     _loadingState = false;
@@ -264,6 +285,56 @@ class DesktopHostChats extends ChangeNotifier {
   String? _target(DesktopHostChat chat) =>
       chat.kind == 'bot' ? _botSessions[chat.id] : chat.id;
 
+  Future<void> createInProject(String projectId, String placeholder) async {
+    final peer = _peer;
+    if (peer == null ||
+        peer.isClosed ||
+        busy ||
+        _creating != null ||
+        !_projects.any((p) => p.id == projectId)) {
+      return;
+    }
+    final request = _creating = Object();
+    try {
+      final result = await peer.call(LinkMethods.draft, {'project': projectId});
+      if (!identical(request, _creating) ||
+          !identical(peer, _peer) ||
+          !_projects.any((p) => p.id == projectId)) {
+        return;
+      }
+      if (result case {'session': final String id} when id.isNotEmpty) {
+        final existing = _chats
+            .where(
+              (c) =>
+                  c.kind == 'project' && c.id == id && c.projectId == projectId,
+            )
+            .firstOrNull;
+        final chat =
+            existing ??
+            DesktopHostChat(
+              id: id,
+              kind: 'project',
+              projectId: projectId,
+              title: placeholder,
+              provisional: true,
+            );
+        if (existing == null) {
+          final old = _unlistedDraft;
+          _unlistedDraft = chat;
+          _chats = List.unmodifiable([
+            ..._chats.where((c) => !identical(c, old)),
+            chat,
+          ]);
+        }
+        await open(chat);
+      } else {
+        throw const FormatException('Missing host session');
+      }
+    } finally {
+      if (identical(_creating, request)) _creating = null;
+    }
+  }
+
   Future<void> open(DesktopHostChat chat) async {
     final peer = _peer;
     final current = _chats
@@ -277,6 +348,7 @@ class DesktopHostChats extends ChangeNotifier {
   }
 
   void closeChat() {
+    _creating = null;
     _closeView();
     _selected = null;
     notifyListeners();
