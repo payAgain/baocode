@@ -740,7 +740,7 @@ void main() {
         await tester.tap(find.byTooltip('Group settings'));
         await tester.pumpAndSettle();
         expect(find.text('Conversation passes'), findsOneWidget);
-        expect(find.text('Default lead'), findsNothing);
+        expect(find.text('Default lead'), findsOneWidget);
         await _enter(tester, 'Conversation passes', '6');
         await _enter(tester, 'Rules', 'Synthetic group rules');
         await _enter(tester, 'Reply delay (seconds)', '4');
