@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../chat/chat_history_view.dart';
 import '../chat/chat_width.dart';
+import '../chat/widgets/chat_minimap.dart';
 import '../chat/host_transcript_scope.dart';
 import '../chat/panels/reply_suggestion_bar.dart';
 import '../theme/app_theme.dart';
@@ -32,12 +33,13 @@ class DesktopHostProjectHistory extends StatelessWidget {
       );
     }
     final history = HostTranscriptScope(
-      child: ValueListenableBuilder<double>(
-        valueListenable: ChatWidth.current,
-        builder: (context, width, _) => ChatHistoryView(
+      child: ListenableBuilder(
+        listenable: Listenable.merge([ChatWidth.current, ChatMinimap.enabled]),
+        builder: (context, _) => ChatHistoryView(
           key: ObjectKey(feed),
           feed: feed,
-          maxContentWidth: width,
+          maxContentWidth: ChatWidth.current.value,
+          minimap: ChatMinimap.enabled.value,
           underTitle: true,
           autoLoadEarlier: false,
           earlierEnabled: earlierEnabled,

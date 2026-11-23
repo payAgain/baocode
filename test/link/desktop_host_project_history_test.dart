@@ -6,6 +6,9 @@ import 'package:baocode/chat/chat_models.dart';
 import 'package:baocode/chat/chat_session.dart' show ComposerMessage, UserPlace;
 import 'package:baocode/chat/composer/composer_draft.dart';
 import 'package:baocode/chat/widgets/fold_line.dart';
+import 'package:baocode/chat/widgets/chat_minimap.dart';
+import 'package:baocode/link/desktop_host_project_history.dart';
+import 'package:baocode/link/desktop_host_project_history_feed.dart';
 import 'package:baocode/chat/widgets/turn_footer.dart';
 import 'package:baocode/chat/widgets/user_message_bubble.dart';
 import 'package:baocode/link/chat_codec.dart';
@@ -53,6 +56,58 @@ final _items = <ChatItem>[
 ];
 
 void main() {
+  testWidgets(
+    'left preview navigates remote history and follows appearance settings',
+    (tester) async {
+      tester.view.physicalSize = const Size(900, 540);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final enabled = ChatMinimap.enabled.value;
+      addTearDown(() => ChatMinimap.enabled.value = enabled);
+      ChatMinimap.enabled.value = true;
+      final feed =
+          DesktopHostProjectHistoryFeed(
+              earlier: () async {},
+              paging: () => false,
+            )
+            ..replaceTail(0, [
+              for (var i = 0; i < 40; i++) ...[
+                UserMessageItem(text: 'Question $i'),
+                AssistantTextItem('Reply $i'),
+              ],
+            ])
+            ..publish(live: false, earlier: false, interaction: false);
+      addTearDown(feed.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: DesktopHostProjectHistory(feed: feed, earlierEnabled: true),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final strip = find.descendant(
+        of: find.byType(ChatMinimap),
+        matching: find.byType(CustomPaint),
+      );
+      expect(strip, findsOneWidget);
+      final track = tester.getRect(strip);
+      expect(
+        track.center.dx,
+        lessThan(tester.getCenter(find.byType(ChatHistoryView)).dx),
+      );
+      final position = tester
+          .state<ScrollableState>(find.byType(Scrollable).first)
+          .position;
+      expect(position.pixels, position.maxScrollExtent);
+      await tester.tapAt(track.topCenter + const Offset(0, 4));
+      await tester.pumpAndSettle();
+      expect(position.pixels, lessThan(position.maxScrollExtent * .1));
+      ChatMinimap.enabled.value = false;
+      await tester.pumpAndSettle();
+      expect(find.byType(ChatMinimap), findsNothing);
+    },
+  );
   testWidgets(
     'project open renders the same native turn rows and copy as local history',
     (tester) async {
