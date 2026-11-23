@@ -186,9 +186,17 @@ void main() {
     try {
       await fixture.select(tester, 'Fixture bot');
       expect(fixture.requests(LinkMethods.image), isEmpty);
-      expect(find.text('Image: private.png'), findsOneWidget);
-      expect(find.textContaining('Image:'), findsOneWidget);
-      await tester.tap(find.text('Image: private.png'));
+      final previews = find.descendant(
+        of: find.byType(TextButton),
+        matching: find.textContaining('Image:'),
+      );
+      final privatePreview = find.widgetWithText(
+        TextButton,
+        'Image: private.png',
+      );
+      expect(previews, findsOneWidget);
+      expect(privatePreview, findsOneWidget);
+      await tester.tap(privatePreview);
       await tester.pump();
       expect(fixture.requests(LinkMethods.image).single, {
         'bot': _bot.id,

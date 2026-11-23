@@ -3,6 +3,7 @@ import 'dart:collection';
 import 'dart:convert';
 
 import 'package:bao_link/bao_link.dart';
+import 'package:bao_markdown/bao_markdown.dart';
 import 'package:flutter/foundation.dart';
 
 import '../chat/chat_models.dart';
@@ -921,7 +922,7 @@ class DesktopHostChats extends ChangeNotifier {
     }
     for (final (:tag, :text, :ref) in ChatCodec.botPartsOf(visible)) {
       if (tag != ChatCodec.botSayTag) continue;
-      final shown = ChatCodec.withoutVoiceCues(text);
+      final shown = _botMarkdown(text);
       if (shown.isNotEmpty) yield (text: shown, ref: ref ?? item.ref);
     }
   }
@@ -980,7 +981,7 @@ class DesktopHostChats extends ChangeNotifier {
             for (final (tag, words) in ChatCodec.botParts(_visibleText(text))) {
               if (tag != ChatCodec.botSayTag) continue;
               yield* _lines(
-                [ChatCodec.withoutVoiceCues(words)],
+                [_botMarkdown(words)],
                 sender,
                 images: DesktopRemoteImage.message(markdown: words),
               );
@@ -1030,6 +1031,48 @@ class DesktopHostChats extends ChangeNotifier {
       .replaceAll(_hiddenNotes, '')
       .replaceAll(imageReferencePattern, '')
       .trim();
+
+  // A lowercase bracketed label also looks like a speech cue. Only remove
+  // cues in prose, keeping Markdown locations and code indentation intact.
+  static String _botMarkdown(String text) {
+    final cue = ChatCodec.voiceCue;
+    if (!cue.hasMatch(text)) return text.trim();
+    final lines = MdLines(text);
+    final blocks = MdBlocks(lines);
+    bool protects(MdInline run, Match match) =>
+        run.start <= match.start &&
+        match.end <= run.end &&
+        switch (run.kind) {
+          MdInlineKind.strong ||
+          MdInlineKind.emphasis ||
+          MdInlineKind.strongEmphasis ||
+          MdInlineKind.strike => run.children.any(
+            (child) => protects(child, match),
+          ),
+          _ => true,
+        };
+    String stripLine(int i) {
+      final line = lines.line(i);
+      final info = blocks.info(i);
+      if ((!info.hasInline && !info.isTable) || !cue.hasMatch(line)) {
+        return line;
+      }
+      final inlines = parseInline(
+        line,
+        info.contentStart,
+        info.contentEnd,
+        definitions: blocks.definitions,
+      );
+      return line.replaceAllMapped(
+        cue,
+        (match) => inlines.any((run) => protects(run, match)) ? match[0]! : '',
+      );
+    }
+
+    return [for (var i = 0; i < lines.lineCount; i++) stripLine(i)]
+        .join('\n')
+        .trim();
+  }
 
   static String _quotePreview(String text) {
     final line = text.replaceAll(RegExp(r'\s+'), ' ').trim();
