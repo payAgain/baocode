@@ -70,20 +70,10 @@ void main() {
     final (viewer, first, second) = await computers();
     await pumpWorkbench(tester, viewer);
     await tap(tester, 'My computers');
-    final firstCard = find.ancestor(
-      of: find.byKey(ValueKey(('open-computer', first.host.id))),
-      matching: find.byType(Card),
-    );
     Future<void> removeFirst() async {
-      await tester.tap(
-        find
-            .descendant(
-              of: firstCard,
-              matching: find.text('Remove Shared computer'),
-            )
-            .hitTestable(),
-      );
+      await tester.tap(find.byKey(ValueKey(('computer-menu', first.host.id))));
       await tester.pumpAndSettle();
+      await tap(tester, 'Remove Shared computer');
       expect(find.textContaining('from the whole group?'), findsOneWidget);
       expect(find.text(first.host.fingerprint), findsOneWidget);
     }
