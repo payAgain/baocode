@@ -36,11 +36,16 @@ class UserMessageBubble extends StatefulWidget {
     required this.text,
     this.images = const [],
     this.onEdit,
+    this.textOnly = false,
   });
 
   final String text;
   final List<ImageAttachment> images;
   final VoidCallback? onEdit;
+
+  /// Show the whole peer-supplied prompt without interpreting composer tokens
+  /// or attachments against the local workspace.
+  final bool textOnly;
 
   /// Its corners; what answers it is inset this much at either side.
   static const radius = 8.0;
@@ -206,7 +211,13 @@ class _UserMessageBubbleState extends State<UserMessageBubble> {
   static const _fittedWidth = 0.85;
 
   Widget _buildBubble(BuildContext context, {required bool fitted}) {
-    final vocabulary = ComposerVocabulary.of(context);
+    final span = widget.textOnly
+        ? inlineCodeSpan(widget.text, _messageStyle)
+        : _messageSpan(
+            widget.text,
+            ComposerVocabulary.of(context),
+            widget.images,
+          );
     return Listener(
       onPointerDown: _handleDown,
       onPointerUp: _handleUp,
@@ -238,12 +249,10 @@ class _UserMessageBubbleState extends State<UserMessageBubble> {
             collapsedHeight: _lineHeight * _collapsedLines,
             // All of it while it holds the find's match at hand, which may
             // be in the lines it hides.
-            collapseAbove: ChatFindRow.holdsCurrent(context)
+            collapseAbove: widget.textOnly || ChatFindRow.holdsCurrent(context)
                 ? double.infinity
                 : _lineHeight * (_collapsedLines + 1),
-            content: InlineCodeText(
-              _messageSpan(widget.text, vocabulary, widget.images),
-            ),
+            content: InlineCodeText(span),
             overlay: const _CollapsedOverlay(),
           ),
         ),

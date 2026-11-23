@@ -1,7 +1,10 @@
 import 'dart:async';
 
 import 'package:bao_link/bao_link.dart';
+import 'package:bao_markdown/bao_markdown.dart';
+import 'package:baocode/chat/composer/composer_presentation.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
+import 'package:baocode/link/desktop_host_composer.dart';
 import 'package:baocode/link/desktop_host_connection.dart';
 import 'package:baocode/link/desktop_host_page.dart';
 import 'package:flutter/material.dart';
@@ -228,10 +231,7 @@ void main() {
     await tester.pump();
     final bot = find.text('Helper bot');
     expect(bot.hitTestable(), findsOneWidget);
-    expect(
-      tester.getRect(bot).right,
-      lessThan(tester.getRect(find.byType(TextField)).left),
-    );
+    expect(tester.getRect(bot).right, lessThan(tester.getRect(_composer).left));
     expect(tester.getRect(switcher), switcherBounds);
     expect(find.text('Pairing link'), findsNothing);
 
@@ -308,19 +308,16 @@ void main() {
     await _pumpPage(tester, connection, chats: chats, scale: 2);
     await tester.tap(find.text('Project chat'));
     await tester.pump();
-    await tester.enterText(find.byType(TextField), 'Unsent');
-    final composer = tester.state<EditableTextState>(find.byType(EditableText));
+    await _enterDraft(tester, 'Unsent');
+    final composer = _editor(tester);
 
     tester.view.physicalSize = const Size(300, 640);
     await tester.pump();
     expect(find.text('Helper bot'), findsNothing);
     expect(find.byTooltip('Back to host chats').hitTestable(), findsOneWidget);
     expect(find.text('Switch to local').hitTestable(), findsOneWidget);
-    expect(find.text('Unsent'), findsOneWidget);
-    expect(
-      tester.state<EditableTextState>(find.byType(EditableText)),
-      same(composer),
-    );
+    expect(_editor(tester).controller.text, 'Unsent');
+    expect(_editor(tester), same(composer));
     expect(chats.opens, ['project']);
     expect(chats.closes, 0);
     expect(tester.takeException(), isNull);
@@ -352,27 +349,20 @@ void main() {
     await _pumpPage(tester, connection, chats: chats);
     await tester.tap(find.text('Project chat'));
     await tester.pump();
-    await tester.enterText(find.byType(TextField), '  My message  ');
-    await tester.pump();
-    await tester.tap(find.text('Send'));
-    await tester.tap(find.text('Send'));
+    await _enterDraft(tester, '  My message  ');
+    await tester.tap(_sendButton);
+    await tester.tap(_sendButton);
     await tester.pump();
     expect(chats.sends, ['My message']);
     result.completeError(const FormatException('Could not send.'));
     await tester.pump();
     expect(find.text('Could not send.'), findsOneWidget);
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text,
-      '  My message  ',
-    );
+    expect(_editor(tester).controller.text, '  My message  ');
 
-    await tester.tap(find.text('Send'));
+    await tester.tap(_sendButton);
     await tester.pump();
     expect(chats.sends, ['My message', 'My message']);
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text,
-      isEmpty,
-    );
+    expect(_editor(tester).controller.text, isEmpty);
   });
 
   testWidgets('restores an offline draft only within the same host chat', (
@@ -386,15 +376,15 @@ void main() {
     await _pumpPage(tester, connection, chats: chats);
     await tester.tap(find.text('Project chat'));
     await tester.pump();
-    await tester.enterText(find.byType(TextField), 'A private draft');
+    await _enterDraft(tester, 'A private draft');
 
     connection.disconnect();
     await tester.pump();
     expect(find.text('Host offline'), findsOneWidget);
-    expect(find.byType(TextField), findsNothing);
+    expect(_composer, findsNothing);
     await tester.tap(find.text('Reconnect'));
     await tester.pump();
-    expect(find.text('A private draft'), findsOneWidget);
+    expect(_editor(tester).controller.text, 'A private draft');
 
     connection.disconnect(revoked: true);
     // The workbench resets the chat catalog on revocation.
@@ -409,10 +399,7 @@ void main() {
     // Another host may have a chat with the same public ID.
     await tester.tap(find.text('Project chat'));
     await tester.pump();
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text,
-      isEmpty,
-    );
+    expect(_editor(tester).controller.text, isEmpty);
   });
 
   testWidgets('catalog navigation retains independent chat drafts', (
@@ -427,20 +414,20 @@ void main() {
     await _pumpPage(tester, connection, chats: chats);
     await tester.tap(find.text('Project chat'));
     await tester.pump();
-    await tester.enterText(find.byType(TextField), 'Unsent project notes');
+    await _enterDraft(tester, 'Unsent project notes');
     await tester.tap(find.byTooltip('Back to host chats'));
     await tester.pump();
 
     await tester.tap(find.text('Helper bot'));
     await tester.pump();
-    expect(find.text('Unsent project notes'), findsNothing);
-    await tester.enterText(find.byType(TextField), 'Unsent bot notes');
+    expect(_editor(tester).controller.text, isEmpty);
+    await _enterDraft(tester, 'Unsent bot notes');
     await tester.tap(find.byTooltip('Back to host chats'));
     await tester.pump();
 
     await tester.tap(find.text('Project chat'));
     await tester.pump();
-    expect(find.text('Unsent project notes'), findsOneWidget);
+    expect(_editor(tester).controller.text, 'Unsent project notes');
     expect(chats.sends, isEmpty);
   });
 
@@ -466,7 +453,7 @@ void main() {
     await _pumpPage(tester, connection, chats: chats, onBack: () => back++);
     await tester.tap(find.text('Project chat'));
     await tester.pump();
-    await tester.enterText(find.byType(TextField), 'Draft kept in memory');
+    await _enterDraft(tester, 'Draft kept in memory');
     await tester.tap(find.text('Switch to local'));
     await tester.pump();
     expect(chats.selected, isNull);
@@ -477,7 +464,7 @@ void main() {
     expect(chats.selected, isNull);
     await tester.tap(find.text('Project chat'));
     await tester.pump();
-    expect(find.text('Draft kept in memory'), findsOneWidget);
+    expect(_editor(tester).controller.text, 'Draft kept in memory');
     expect(chats.sends, isEmpty);
   });
 
@@ -494,16 +481,15 @@ void main() {
     await _pumpPage(tester, connection, chats: chats);
     await tester.tap(find.text('Project chat'));
     await tester.pump();
-    await tester.enterText(find.byType(TextField), 'Check before retrying');
-    await tester.pump();
-    await tester.tap(find.text('Send'));
+    await _enterDraft(tester, 'Check before retrying');
+    await tester.tap(_sendButton);
     connection.disconnect();
     await tester.pump();
     await tester.tap(find.text('Reconnect'));
     await tester.pump();
     reply.complete();
     await tester.pumpAndSettle();
-    expect(find.text('Check before retrying'), findsOneWidget);
+    expect(_editor(tester).controller.text, 'Check before retrying');
     expect(chats.sends, ['Check before retrying']);
   });
 
@@ -577,6 +563,31 @@ void main() {
     expect(chats.opens, ['project']);
     expect(chats.selected, isNull);
   });
+}
+
+final _hostComposer = find.byType(DesktopHostComposer);
+final _composer = find.descendant(
+  of: _hostComposer,
+  matching: find.byType(MarkdownEditor),
+);
+final _sendButton = find.descendant(
+  of: _hostComposer,
+  matching: find.byType(ComposerSendButton),
+);
+
+MarkdownEditorState _editor(WidgetTester tester) =>
+    tester.state<MarkdownEditorState>(_composer);
+
+Future<void> _enterDraft(WidgetTester tester, String text) async {
+  await tester.tap(_composer);
+  await tester.pump();
+  tester.testTextInput.updateEditingValue(
+    TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    ),
+  );
+  await tester.pump();
 }
 
 Future<void> _pumpPage(

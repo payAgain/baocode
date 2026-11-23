@@ -5,11 +5,19 @@ import 'package:bao_link/bao_link.dart' show ProjectInfo;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../ide/ide_list.dart' show IdeListRow;
+import '../theme/codicons.dart';
+import '../chat/chat_column.dart';
+import '../chat/chat_width.dart';
+import '../workspace/islands.dart';
 import '../settings/pages/settings_widgets.dart'
     show SettingsColors, SettingsText;
 import '../settings/user_settings.dart' show GlobalStorage;
 import '../theme/app_theme.dart' show AppColors;
+import '../chat/widgets/markdown_view.dart';
+import '../chat/widgets/user_message_bubble.dart';
 import 'desktop_host_chats.dart';
+import 'desktop_host_composer.dart';
 import 'desktop_host_connection.dart';
 
 typedef DesktopHostChatKey = ({String kind, String id});
@@ -370,7 +378,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
       builder: (context, _) {
         _queueRestore();
         return Material(
-          color: AppColors.code,
+          color: AppColors.windowCanvas,
           child: LayoutBuilder(
             builder: (context, constraints) {
               final code = _connection.pendingCode ?? _confirmingCode;
@@ -454,12 +462,19 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     );
   }
 
-  Widget _contentPane(Widget child) => Center(
-    child: ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 792),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: child,
+  Widget _contentPane(Widget child) => Padding(
+    padding: const EdgeInsets.all(Islands.gap),
+    child: Island(
+      color: AppColors.background,
+      child: ValueListenableBuilder<double>(
+        valueListenable: ChatWidth.current,
+        child: Material(type: MaterialType.transparency, child: child),
+        builder: (context, width, pane) => ChatColumn(
+          maxWidth: width,
+          left: Islands.inset,
+          right: Islands.inset,
+          child: pane,
+        ),
       ),
     ),
   );
@@ -538,22 +553,20 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
             if (entry.key == 'project' && host != null)
               for (final folder in folders) ...[
                 SliverToBoxAdapter(
-                  child: ListTile(
+                  child: _CatalogRow(
                     key: ValueKey(('folder', folder.id)),
-                    dense: true,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-                    leading: const Icon(Icons.folder_outlined, size: 19),
-                    title: Text(folder.name, style: SettingsText.label),
-                    trailing: Icon(
-                      _collapsedFolders.contains((host, folder.id))
-                          ? Icons.chevron_right
-                          : Icons.expand_more,
-                      size: 18,
-                    ),
+                    label: folder.name,
+                    icon: _collapsedFolders.contains((host, folder.id))
+                        ? Codicons.folder
+                        : Codicons.folderOpened,
+                    trailing: _collapsedFolders.contains((host, folder.id))
+                        ? Codicons.chevronRight
+                        : Codicons.chevronDown,
                     onTap: () => setState(() {
                       final key = (host, folder.id);
-                      if (!_collapsedFolders.remove(key))
+                      if (!_collapsedFolders.remove(key)) {
                         _collapsedFolders.add(key);
+                      }
                     }),
                   ),
                 ),
@@ -573,30 +586,17 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     itemBuilder: (context, index) {
       final chat = chats[index];
       final selected = _chats.selected;
-      return ListTile(
+      return _CatalogRow(
         key: ValueKey((chat.kind, chat.id)),
-        dense: true,
         selected: selected?.kind == chat.kind && selected?.id == chat.id,
-        selectedTileColor: SettingsColors.card,
-        enabled: !_busy && !_chatBusy,
-        onTap: () => _openChat(chat),
-        contentPadding: EdgeInsets.only(
-          left: chat.kind == 'project' ? 36 : 12,
-          right: 12,
-        ),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-        leading: Icon(switch (chat.kind) {
-          'project' => Icons.chat_bubble_outline,
+        onTap: _busy || _chatBusy ? null : () => _openChat(chat),
+        indent: chat.kind == 'project' ? 24 : 0,
+        icon: switch (chat.kind) {
+          'project' => Codicons.commentDiscussion,
           'bot' => Icons.smart_toy_outlined,
           _ => Icons.groups_outlined,
-        }, size: 19),
-        title: Text(
-          chat.title,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: SettingsText.label,
-        ),
-        trailing: const Icon(Icons.chevron_right, size: 18),
+        },
+        label: chat.title,
       );
     },
   );
@@ -686,6 +686,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                     return _MessageBubble(
                       message: message,
                       sender: message.mine ? text.you : message.sender,
+                      group: chat.kind == 'group',
                     );
                   },
                 ),
@@ -792,7 +793,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   );
 }
 
-class _HostComposer extends StatefulWidget {
+class _HostComposer extends StatelessWidget {
   const _HostComposer({
     super.key,
     required this.initialDraft,
@@ -807,66 +808,67 @@ class _HostComposer extends StatefulWidget {
   final Future<bool> Function(String) onSend;
 
   @override
-  State<_HostComposer> createState() => _HostComposerState();
-}
-
-class _HostComposerState extends State<_HostComposer> {
-  late final _draft = TextEditingController(text: widget.initialDraft);
-  int _revision = 0;
-
-  @override
-  void dispose() {
-    _draft.dispose();
-    super.dispose();
-  }
-
-  Future<void> _send() async {
-    final revision = _revision;
-    if (await widget.onSend(_draft.text) && mounted && _revision == revision) {
-      _draft.clear();
-      widget.onChanged('');
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
     final text = _HostText(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _draft,
-              onChanged: (draft) {
-                _revision++;
-                widget.onChanged(draft);
-              },
-              minLines: 1,
-              maxLines: 3,
-              style: SettingsText.label,
-              decoration: InputDecoration(
-                labelText: text.message,
-                isDense: true,
-                border: const OutlineInputBorder(),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          ValueListenableBuilder<TextEditingValue>(
-            valueListenable: _draft,
-            builder: (context, value, _) => FilledButton(
-              onPressed: widget.busy || value.text.trim().isEmpty
-                  ? null
-                  : _send,
-              child: Text(text.send),
-            ),
-          ),
-        ],
-      ),
+    return DesktopHostComposer(
+      initialDraft: initialDraft,
+      busy: busy,
+      placeholder: text.message,
+      sendLabel: text.send,
+      onChanged: onChanged,
+      onSend: onSend,
     );
   }
+}
+
+class _CatalogRow extends StatelessWidget {
+  const _CatalogRow({
+    super.key,
+    required this.label,
+    required this.icon,
+    this.trailing,
+    this.selected = false,
+    this.indent = 0,
+    this.onTap,
+  });
+  final String label;
+  final IconData icon;
+  final IconData? trailing;
+  final bool selected;
+  final double indent;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    selected: selected,
+    enabled: onTap != null,
+    child: IdeListRow(
+      height: 32,
+      onTap: onTap,
+      selected: selected,
+      tooltip: label,
+      builder: (context, hovered) => Padding(
+        padding: EdgeInsets.only(left: 8 + indent, right: 8),
+        child: Row(
+          children: [
+            Icon(icon, size: 15, color: AppColors.textFaint),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 13, color: AppColors.textPrimary),
+              ),
+            ),
+            if (trailing != null)
+              Icon(trailing, size: 13, color: AppColors.textFaint),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class _HostHeading extends StatelessWidget {
@@ -903,34 +905,36 @@ class _HostHeading extends StatelessWidget {
 }
 
 class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message, required this.sender});
+  const _MessageBubble({
+    required this.message,
+    required this.sender,
+    required this.group,
+  });
 
   final DesktopHostMessage message;
   final String sender;
+  final bool group;
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: EdgeInsetsDirectional.only(
-      start: message.mine ? 24 : 0,
-      end: message.mine ? 0 : 24,
-      bottom: 10,
-    ),
-    child: Align(
-      alignment: message.mine
-          ? AlignmentDirectional.centerEnd
-          : AlignmentDirectional.centerStart,
-      child: _HostCard(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (sender.isNotEmpty) ...[
-              Text(sender, style: SettingsText.heading),
-              const SizedBox(height: 4),
-            ],
-            SelectableText(message.text, style: SettingsText.label),
+    padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+    child: SelectionArea(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (group && sender.isNotEmpty) ...[
+            Text(
+              sender,
+              style: SettingsText.heading,
+              textAlign: message.mine ? TextAlign.end : TextAlign.start,
+            ),
+            const SizedBox(height: 4),
           ],
-        ),
+          if (message.mine)
+            UserMessageBubble(text: message.text, textOnly: true)
+          else
+            MarkdownView(message.text, textOnly: true),
+        ],
       ),
     ),
   );

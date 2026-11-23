@@ -30,12 +30,15 @@ import 'will_change_paint.dart';
 /// (and task lists), code blocks, quotes, tables, rules, and inline
 /// strong, emphasis, strikethrough, code, links and TeX math.
 class MarkdownView extends StatefulWidget {
-  const MarkdownView(this.data, {super.key, this.style});
+  const MarkdownView(this.data, {super.key, this.style, this.textOnly = false});
 
   final String data;
 
   /// [baseStyle] when null.
   final TextStyle? style;
+
+  /// Render peer-provided markdown without file, link, or media integrations.
+  final bool textOnly;
 
   static TextStyle get baseStyle =>
       TextStyle(color: AppColors.text, fontSize: 13.5, height: 1.6);
@@ -63,8 +66,6 @@ class MarkdownView extends StatefulWidget {
     inlineSyntaxes: inlineSyntaxes,
     encodeHtml: false,
   );
-
-  static final _document = document(tags: true);
 
   /// [markdown]'s text as a copy of it shown takes it, for what of it is
   /// not built: each block on a line of its own, a list's markers, a
@@ -143,7 +144,7 @@ class MarkdownView extends StatefulWidget {
       }
     }
 
-    _document.parse(markdown).forEach(visit);
+    document(tags: true).parse(markdown).forEach(visit);
     end();
     return lines.join('\n');
   }
@@ -205,6 +206,7 @@ class _MarkdownViewState extends State<MarkdownView> {
     final from = (
       widget.data,
       widget.style,
+      widget.textOnly,
       themeColors,
       WorkbenchThemeScope.restyles,
     );
@@ -214,7 +216,12 @@ class _MarkdownViewState extends State<MarkdownView> {
   }
 
   Widget _build(BuildContext context) {
-    final from = (widget.style, themeColors, WorkbenchThemeScope.restyles);
+    final from = (
+      widget.style,
+      widget.textOnly,
+      themeColors,
+      WorkbenchThemeScope.restyles,
+    );
     if (from != _segmentsFrom) _segments = const [];
     _segmentsFrom = from;
     final old = _segments;
@@ -248,7 +255,7 @@ class _MarkdownViewState extends State<MarkdownView> {
               ),
       );
     }
-    final files = FileOpenScope.maybeOf(context);
+    final files = widget.textOnly ? null : FileOpenScope.maybeOf(context);
     if (files != null) {
       for (final segment in _segments) {
         for (final src in _imageSources(segment.nodes)) {
@@ -258,11 +265,13 @@ class _MarkdownViewState extends State<MarkdownView> {
         }
       }
     }
-    return Column(
+    final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: children,
     );
+    // Code blocks otherwise pick up a local syntax worker from this scope.
+    return widget.textOnly ? CodeCitationScope(child: content) : content;
   }
 
   /// Segments parsed lately, by their text, the latest last: a message
@@ -275,7 +284,9 @@ class _MarkdownViewState extends State<MarkdownView> {
   /// reply streams in: each would be kept a moment, the others pushed out).
   static List<md.Node> _parse(String text, {required bool keep}) {
     if (_parsed.remove(text) case final nodes?) return _parsed[text] = nodes;
-    final nodes = MarkdownView._document.parse(text);
+    // The parser retains link and footnote definitions. Keep them inside
+    // this message so peer content cannot influence another transcript.
+    final nodes = MarkdownView.document(tags: true).parse(text);
     if (endsInOpenFence(text)) _markWriting(nodes);
     if (keep) {
       _parsed[text] = nodes;
@@ -288,6 +299,13 @@ class _MarkdownViewState extends State<MarkdownView> {
     final _Segment(text: data, :nodes) = segment;
     final style = widget.style;
     final baseStyle = MarkdownView.baseStyle;
+    if (widget.textOnly) {
+      return MarkdownBlocks(
+        nodes: nodes,
+        style: style ?? baseStyle,
+        options: const MarkdownOptions(textOnly: true),
+      );
+    }
     // In a chat whose files open (see FileOpenScope): links to them, and
     // inline code naming one once it is known to be there.
     final files = FileOpenScope.maybeOf(context);
@@ -593,6 +611,7 @@ class MarkdownOptions {
     this.headingRules = false,
     this.gap = 8,
     this.headingGap = 12,
+    this.textOnly = false,
     this.link,
     this.code,
     this.linkIcon,
@@ -611,6 +630,9 @@ class MarkdownOptions {
   /// The space between blocks, and before and after a heading.
   final double gap;
   final double headingGap;
+
+  /// Render links, images, and path-backed blocks as inert content.
+  final bool textOnly;
 
   /// What a tap on a link to `href` does; web and mail links open in the
   /// browser when null, others nothing.
@@ -742,11 +764,23 @@ Widget? _block(md.Node node, TextStyle style, MarkdownOptions options) {
           ? text.substring(0, text.length - 1)
           : text;
       if (CodeCitation.parse(language) case final citation?) {
+        if (options.textOnly) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                '[Host file: ${citation.path}, ${citation.lines}]',
+                style: style,
+              ),
+              MarkdownCodeBlock(code: body),
+            ],
+          );
+        }
         return CodeCitationCard(citation: citation, code: body);
       }
       // `python title="a.py"`: the language is the first word.
       final name = language?.trim().split(RegExp(r'\s')).first;
-      if (name?.toLowerCase() == 'mermaid') {
+      if (!options.textOnly && name?.toLowerCase() == 'mermaid') {
         return MermaidCodeBlock(
           code: body,
           writing: node.attributes.containsKey(_writingAttribute),
@@ -1070,7 +1104,7 @@ InlineSpan _inline(md.Node node, MarkdownOptions options) {
   List<InlineSpan> inner() => [
     for (final child in children) _inline(child, options),
   ];
-  if (node.tag == 'a') {
+  if (node.tag == 'a' && !options.textOnly) {
     final href = node.attributes['href'];
     if (options.fileTag?.call(href, _unescape(node.textContent))
         case final tag?) {
@@ -1119,6 +1153,17 @@ InlineSpan _inline(md.Node node, MarkdownOptions options) {
         style: MarkdownView.codeStyle,
       ),
     },
+    'a' when options.textOnly => TextSpan(
+      children: [
+        ...inner(),
+        if (_unescape(node.attributes['href'] ?? '') case final href
+            when href.isNotEmpty && href != _unescape(node.textContent))
+          TextSpan(
+            text: ' ($href)',
+            style: TextStyle(color: AppColors.textMuted),
+          ),
+      ],
+    ),
     'a' => switch ((options.link ?? _linkRecognizer)(node.attributes['href'])) {
       final recognizer? => TextSpan(
         style: TextStyle(color: AppColors.accent),
@@ -1141,6 +1186,12 @@ InlineSpan _inline(md.Node node, MarkdownOptions options) {
       ),
     ),
     'br' => const TextSpan(text: '\n'),
+    'img' when options.textOnly => TextSpan(
+      text: switch (_unescape(node.attributes['alt'] ?? '').trim()) {
+        '' => '[Image]',
+        final alt => '[Image: $alt]',
+      },
+    ),
     'img' => switch (options.image) {
       final image? => WidgetSpan(
         child: image(
