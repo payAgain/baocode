@@ -9,6 +9,7 @@ import '../../theme/app_theme.dart';
 import '../../theme/workbench_theme.dart' show themeColors;
 import '../chat_models.dart';
 import '../floating/hover_tooltip.dart';
+import '../host_transcript_scope.dart';
 import '../side_panel/file_link.dart';
 import '../side_panel/file_link_menu.dart';
 import '../side_panel/file_open.dart';
@@ -148,11 +149,9 @@ class ToolCallRow extends StatelessWidget {
     final todo = kind == ToolKind.todo
         ? todoStep(tool, input, target, output: output, l10n: context.l10n)
         : null;
-    final isWebSearch =
-        kind == ToolKind.web && isWebSearchTool(tool: tool, target: target);
-    final fetchSite = kind == ToolKind.web && !isWebSearch
-        ? webFetchSite(target)
-        : null;
+    final webIcons = kind == ToolKind.web && !HostTranscriptScope.of(context);
+    final isWebSearch = webIcons && isWebSearchTool(tool: tool, target: target);
+    final fetchSite = webIcons && !isWebSearch ? webFetchSite(target) : null;
     final searchIcons = isWebSearch && status != ToolStatus.failed
         ? [
             for (final site in webSearchResultSites(output))

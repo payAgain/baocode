@@ -1,10 +1,12 @@
 import 'dart:io';
 
 import 'package:bao_link/bao_link.dart';
+import 'package:baocode/chat/chat_history_view.dart';
 import 'package:baocode/chat/side_panel/file_open.dart';
 import 'package:baocode/chat/widgets/code_citation.dart';
 import 'package:baocode/chat/widgets/markdown_view.dart';
 import 'package:baocode/chat/widgets/mermaid_code_block.dart';
+import 'package:baocode/chat/widgets/turn_footer.dart';
 import 'package:baocode/chat/widgets/user_message_bubble.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_host_connection.dart';
@@ -46,14 +48,28 @@ void main() {
       tester,
       [
         {'t': 'user', 'text': 'Run the checks'},
-        {'t': 'text', 'text': reply},
+        {
+          't': 'text',
+          'text':
+              '$reply\n<reply_suggestion>Legacy suggestion</reply_suggestion>',
+        },
       ],
       () async {
-        expect(find.byType(UserMessageBubble), findsOneWidget);
+        expect(find.byType(ChatHistoryView), findsOneWidget);
+        // Native history also builds a sticky copy, outside the hit test.
+        final prompt = find.byType(UserMessageBubble).hitTestable();
+        expect(prompt, findsOneWidget);
+        expect(tester.widget<UserMessageBubble>(prompt).text, 'Run the checks');
         expect(find.byType(MarkdownView), findsOneWidget);
         expect(find.text('Results', findRichText: true), findsOneWidget);
         expect(find.byType(MarkdownCodeBlock), findsOneWidget);
         expect(find.text(reply, findRichText: true), findsNothing);
+        expect(find.text('Legacy suggestion'), findsNothing);
+        final footer = tester.widget<TurnFooter>(find.byType(TurnFooter));
+        expect(footer.answer, reply);
+        expect(footer.worked, isNull);
+        expect(footer.usage, isNull);
+        expect(find.byTooltip('Copy reply').hitTestable(), findsOneWidget);
       },
     );
   });
@@ -127,6 +143,22 @@ graph TD; a-->b;
           expect(find.byType(Image), findsNothing);
           expect(find.byType(CodeCitationCard), findsNothing);
           expect(find.byType(MermaidCodeBlock), findsNothing);
+          expect(accessed, isEmpty);
+
+          await tester.tap(find.byType(UserMessageBubble).hitTestable());
+          await tester.pumpAndSettle();
+          final viewer = find.byType(UserMessageViewer);
+          expect(viewer, findsOneWidget);
+          expect(
+            find.descendant(
+              of: viewer,
+              matching: find.textContaining(
+                '@lib/client.dart',
+                findRichText: true,
+              ),
+            ),
+            findsOneWidget,
+          );
           expect(accessed, isEmpty);
         },
         wrap: (child) => CodeCitationScope(
@@ -293,6 +325,51 @@ graph TD; a-->b;
     );
     expect(earlierRequest, containsPair('before', 2));
   });
+
+  testWidgets('older Windows project history loads earlier turns on request', (
+    tester,
+  ) async {
+    final requests = <(String, Map<String, Object?>)>[];
+    await _withHost(
+      tester,
+      [
+        {'t': 'user', 'text': 'Current prompt'},
+        {'t': 'a-future-item-type', 'text': 'Unknown item'},
+        {'t': 'text', 'text': 'Current reply'},
+      ],
+      () async {
+        expect(requests, isEmpty);
+        final load = find.text('Load earlier messages').hitTestable();
+        expect(load, findsOneWidget);
+        await tester.tap(load);
+        await tester.pumpAndSettle();
+        expect(requests.single.$1, LinkMethods.earlier);
+        expect(requests.single.$2['session'], _session);
+        final older = find.text('Earlier reply');
+        final current = find.text('Current reply');
+        expect(older, findsOneWidget);
+        expect(current, findsOneWidget);
+        expect(
+          tester.getTopLeft(older).dy,
+          lessThan(tester.getTopLeft(current).dy),
+        );
+        expect(find.byType(TurnFooter), findsNWidgets(2));
+        expect(find.text('Unknown item'), findsNothing);
+        expect(load, findsNothing);
+      },
+      earlier: true,
+      onRequest: (method, params) {
+        requests.add((method, params));
+        return {
+          'items': [
+            {'t': 'user', 'text': 'Earlier prompt'},
+            {'t': 'text', 'text': 'Earlier reply'},
+          ],
+          'earlier': false,
+        };
+      },
+    );
+  });
 }
 
 Future<void> _withHost(
@@ -301,6 +378,7 @@ Future<void> _withHost(
   Future<void> Function() exercise, {
   Widget Function(Widget child)? wrap,
   LinkState? catalog,
+  bool? earlier,
   LinkRequestHandler? onRequest,
 }) async {
   tester.view.physicalSize = const Size(800, 1100);
@@ -314,12 +392,14 @@ Future<void> _withHost(
     hostWire,
     onRequest: (method, params) => switch (method) {
       LinkMethods.state => (catalog ?? _catalog).toJson(),
-      LinkMethods.open => LinkSessionUpdate(
-        session: _session,
-        start: 0,
-        count: history.length,
-        items: history,
-      ).toJson(),
+      // Older Windows shape: no live flag, choices or context metadata.
+      LinkMethods.open => {
+        'session': _session,
+        'start': 0,
+        'count': history.length,
+        'items': history,
+        'earlier': ?earlier,
+      },
       LinkMethods.close => null,
       _ when onRequest != null => onRequest(method, params),
       _ => throw StateError('Unexpected host request: $method'),

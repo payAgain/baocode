@@ -23,13 +23,15 @@ class ReplySuggestionBar extends StatefulWidget {
     super.key,
     required this.suggestions,
     required this.onPick,
-    required this.onSend,
+    this.onSend,
     this.playKey,
   });
 
   final List<String> suggestions;
   final ValueChanged<String> onPick;
-  final ValueChanged<String> onSend;
+
+  /// Null where choosing a suggestion can only fill a draft.
+  final ValueChanged<String>? onSend;
 
   /// What they are shown for (a conversation's, and these suggestions):
   /// played in once for each; null, each time.
@@ -114,7 +116,10 @@ class _ReplySuggestionBarState extends State<ReplySuggestionBar>
               child: _Pill(
                 text: said,
                 onTap: () => widget.onPick(said),
-                onDoubleTap: () => widget.onSend(said),
+                onDoubleTap: switch (widget.onSend) {
+                  final send? => () => send(said),
+                  _ => null,
+                },
               ),
             ),
         ],
@@ -166,7 +171,7 @@ class _Pill extends StatefulWidget {
 
   final String text;
   final VoidCallback onTap;
-  final VoidCallback onDoubleTap;
+  final VoidCallback? onDoubleTap;
 
   @override
   State<_Pill> createState() => _PillState();
@@ -180,9 +185,10 @@ class _PillState extends State<_Pill> {
   void _click() {
     final at = _clock.elapsed;
     final before = _clickedAt;
-    if (before != null && at - before <= kDoubleTapTimeout) {
+    final send = widget.onDoubleTap;
+    if (send != null && before != null && at - before <= kDoubleTapTimeout) {
       _clickedAt = null;
-      widget.onDoubleTap();
+      send();
     } else {
       _clickedAt = at;
       widget.onTap();
@@ -192,42 +198,45 @@ class _PillState extends State<_Pill> {
   @override
   Widget build(BuildContext context) {
     final line = widget.text.replaceAll(RegExp(r'\s+'), ' ').trim();
-    return IdeHover(
-      message: context.l10n.replySuggestionHint,
-      position: IdeHoverPosition.above,
-      child: HoverBuilder(
-        builder: (context, hovered) => GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: _click,
-          child: MouseRegion(
-            cursor: SystemMouseCursors.click,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              curve: Curves.easeOut,
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                // Hovered, the hover's tint over the fill, not in its
-                // place: the tint is faint, and on its way to it the
-                // fill would turn see-through, the page dark through it.
-                color: hovered
-                    ? Color.alphaBlend(
-                        AppColors.bubbleHover,
-                        AppColors.bubbleFill,
-                      )
-                    : AppColors.bubbleFill,
-                // A pill on one line; on more, its corners as round.
-                borderRadius: BorderRadius.circular(13),
-                border: Border.all(color: AppColors.bubbleBorder()),
-              ),
-              child: Text(
-                line,
-                style: TextStyle(color: AppColors.text, fontSize: 12.5),
-              ),
+    final pill = HoverBuilder(
+      builder: (context, hovered) => GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _click,
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            curve: Curves.easeOut,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              // Hovered, the hover's tint over the fill, not in its
+              // place: the tint is faint, and on its way to it the
+              // fill would turn see-through, the page dark through it.
+              color: hovered
+                  ? Color.alphaBlend(
+                      AppColors.bubbleHover,
+                      AppColors.bubbleFill,
+                    )
+                  : AppColors.bubbleFill,
+              // A pill on one line; on more, its corners as round.
+              borderRadius: BorderRadius.circular(13),
+              border: Border.all(color: AppColors.bubbleBorder()),
+            ),
+            child: Text(
+              line,
+              style: TextStyle(color: AppColors.text, fontSize: 12.5),
             ),
           ),
         ),
       ),
     );
+    return widget.onDoubleTap == null
+        ? pill
+        : IdeHover(
+            message: context.l10n.replySuggestionHint,
+            position: IdeHoverPosition.above,
+            child: pill,
+          );
   }
 }
 

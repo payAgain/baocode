@@ -1,9 +1,15 @@
+import 'dart:async';
+
 import 'package:bao_markdown/bao_markdown.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../chat/chat_keys.dart';
 import '../chat/composer/composer_presentation.dart';
+import '../chat/floating/floating_registry.dart';
+import '../l10n/l10n.dart';
+import 'desktop_host_controls.dart';
+import 'desktop_host_session_controls.dart';
 
 /// The normal chat editor and send controls for a host conversation.
 /// Draft storage and delivery belong to the caller. Key the composer by
@@ -17,6 +23,7 @@ class DesktopHostComposer extends StatefulWidget {
     required this.sendLabel,
     required this.onChanged,
     required this.onSend,
+    this.controls,
   });
 
   final String initialDraft;
@@ -24,6 +31,7 @@ class DesktopHostComposer extends StatefulWidget {
   final String placeholder;
   final String sendLabel;
   final ValueChanged<String> onChanged;
+  final DesktopHostSessionControls? controls;
 
   /// True only for a confirmed send in the current host conversation.
   /// Report failed and uncertain delivery to the caller's UI and return false.
@@ -55,6 +63,23 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
   }
 
   @override
+  void didUpdateWidget(DesktopHostComposer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final suggested = widget.initialDraft;
+    // The open project may fill an empty draft from a suggested reply.
+    // Ordinary parent refreshes already reflect the editor's text.
+    if (suggested.isEmpty || suggested == _draft.text) {
+      return;
+    }
+    if (_draft.isComposing || _draft.text.trim().isNotEmpty) {
+      widget.onChanged(_draft.text);
+      return;
+    }
+    _draft.replace(0, _draft.length, suggested);
+    _focus.requestFocus();
+  }
+
+  @override
   void dispose() {
     _draft.dispose();
     _focus.dispose();
@@ -70,11 +95,15 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
 
   bool get _canSend =>
       !widget.busy &&
+      widget.controls?.live != true &&
       !_sending &&
       !_draft.isComposing &&
       _draft.text.trim().isNotEmpty;
 
   KeyEventResult _handleKey(KeyEvent event) {
+    if (!_draft.isComposing && event is! KeyUpEvent) {
+      if (FloatingRegistry.handleKey(event) case final result?) return result;
+    }
     final key = event.logicalKey;
     final keyboard = HardwareKeyboard.instance;
     if ((key != LogicalKeyboardKey.enter &&
@@ -145,17 +174,44 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
           ),
           Padding(
             padding: composerToolbarPadding,
-            child: Align(
-              alignment: AlignmentDirectional.centerEnd,
-              child: ListenableBuilder(
-                listenable: _draft,
-                builder: (context, _) => ComposerSendButton(
-                  tooltip: widget.sendLabel,
-                  onSend: _canSend ? _send : null,
+            child: Row(
+              children: [
+                Expanded(
+                  child: DesktopHostPickers(
+                    controls: widget.controls,
+                    focusNode: _focus,
+                  ),
                 ),
-              ),
+                const SizedBox(width: 8),
+                ListenableBuilder(
+                  listenable: _draft,
+                  builder: (context, _) {
+                    final controls = widget.controls;
+                    if (controls == null || !controls.showStop) {
+                      return ComposerSendButton(
+                        tooltip: widget.sendLabel,
+                        onSend: _canSend ? _send : null,
+                      );
+                    }
+                    return IgnorePointer(
+                      ignoring: !controls.canStop,
+                      child: Opacity(
+                        opacity: controls.canStop ? 1 : .5,
+                        child: ComposerSendButton(
+                          tooltip: context.l10n.composerStop,
+                          onSend: null,
+                          onStop: () => unawaited(controls.stop()),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
             ),
           ),
+          if (widget.controls case final controls?
+              when controls.choiceFailed || controls.stopFailed)
+            DesktopHostActionError(controls: controls),
         ],
       ),
     ),

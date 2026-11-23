@@ -75,6 +75,7 @@ class StepFolds {
     int count,
     ChatItem Function(int index) itemAt, {
     required bool live,
+    bool untimedFooters = false,
   }) {
     final items = [for (var i = 0; i < count; i++) itemAt(i)];
     final steps = List<StepFold?>.filled(count, null);
@@ -127,14 +128,17 @@ class StepFolds {
       final prompt = prompts[t];
       final message = items[prompt] as UserMessageItem;
       final worked = message.worked;
-      if (worked == null) continue;
       var last = t + 1 < prompts.length ? prompts[t + 1] - 1 : count - 1;
       while (last > prompt && items[last] is UserMessageItem) {
         last--;
       }
       // Ending in thoughts, it ends at the row they show in.
-      if (last > prompt) turnEnds[thoughtOf[last] ?? last] = prompt;
-      if (last <= prompt) continue;
+      if (last > prompt &&
+          (worked != null ||
+              (untimedFooters && items[last] is AssistantTextItem))) {
+        turnEnds[thoughtOf[last] ?? last] = prompt;
+      }
+      if (worked == null || last <= prompt) continue;
       // The answer: the words after its last step, thoughts among them.
       // Stopped with none, all of it folds but what was said of why (an
       // error); ended so on its own, it shows as it is.

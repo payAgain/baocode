@@ -4,6 +4,7 @@ import 'package:bao_link/bao_link.dart';
 import 'package:bao_remote/claude.dart' show ClaudeHistoryPage;
 import 'package:baocode/bots/bot_folders.dart';
 import 'package:baocode/bots/bots.dart';
+import 'package:baocode/chat/chat_models.dart';
 import 'package:baocode/kernel/agent_kernel.dart';
 import 'package:baocode/kernel/claude_code/claude_code_kernel.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
@@ -109,6 +110,7 @@ void main() {
     await pumpEventQueue();
     expect(chats.projects.map((p) => p.id), [a.id, b.id]);
     expect(chats.chats.single.projectId, b.id);
+    expect(chats.chats.single.updatedAt, DateTime(2026));
     expect(chats.chats.single.id, 'kept');
     chats.reset();
     expect(chats.projects, isEmpty);
@@ -210,6 +212,12 @@ void main() {
       await desktop.open(projectChat);
       await pumpEventQueue();
       expect(_texts(desktop), ['saved project prompt']);
+      final history = desktop.projectHistory!;
+      expect(history.itemCount, 1);
+      expect(
+        (history.itemAt(0) as UserMessageItem).text,
+        'saved project prompt',
+      );
       await otherClient.call(LinkMethods.open, {'session': projectChat.id});
       final projectEvent = _eventContaining(
         otherClient,
@@ -220,12 +228,20 @@ void main() {
       await projectEvent;
       await pumpEventQueue();
       expect(_texts(desktop), contains('desktop project prompt'));
+      expect(desktop.projectHistory, same(history));
+      expect(
+        [for (var i = 0; i < history.itemCount; i++) history.itemAt(i)]
+            .whereType<UserMessageItem>()
+            .map((item) => item.text),
+        contains('desktop project prompt'),
+      );
 
       await desktop.open(
         desktop.chats.singleWhere((chat) => chat.kind == 'bot'),
       );
       await pumpEventQueue();
       expect(_texts(desktop), ['private prompt', 'private reply']);
+      expect(desktop.projectHistory, isNull);
       await desktop.earlier();
       expect(_texts(desktop), [
         'older private prompt',
@@ -246,6 +262,7 @@ void main() {
         desktop.chats.singleWhere((chat) => chat.kind == 'group'),
       );
       expect(_texts(desktop), [for (var i = 1; i < 51; i++) 'room history $i']);
+      expect(desktop.projectHistory, isNull);
       expect(desktop.hasEarlier, isTrue);
       await desktop.earlier();
       expect(desktop.hasEarlier, isFalse);

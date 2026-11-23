@@ -34,6 +34,14 @@ abstract interface class ChatFeed implements Listenable {
   VoidCallback? stopAt(int index);
 }
 
+/// A transcript that can prepend an older page without replacing its rows.
+abstract interface class PagedChatFeed implements ChatFeed {
+  bool get hasEarlierHistory;
+  bool get loadingEarlier;
+  int get prependedCount;
+  Future<void> loadEarlier();
+}
+
 /// The conversation of a subagent in [session], found by [path]: the ids of
 /// the subagents leading to it, outermost first. What it was asked comes
 /// first, as a message to it; its report last, as its answer. While it

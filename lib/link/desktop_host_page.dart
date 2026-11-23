@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:bao_link/bao_link.dart' show ProjectInfo;
+import 'package:bao_link/bao_link.dart' show LinkMethods, ProjectInfo;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +9,12 @@ import '../ide/ide_list.dart' show IdeListRow;
 import '../theme/codicons.dart';
 import '../chat/chat_column.dart';
 import '../chat/chat_width.dart';
+import '../l10n/l10n.dart';
+import '../sidebar/sidebar.dart' show relativeTime;
+import '../sidebar/sidebar_times.dart';
+import '../chat/widgets/conversation_card_header.dart';
+import '../chat/widgets/inline_rename_field.dart';
+import '../chat/widgets/hover_scroll_text.dart';
 import '../workspace/islands.dart';
 import '../settings/pages/settings_widgets.dart'
     show SettingsColors, SettingsText;
@@ -19,6 +25,10 @@ import '../chat/widgets/user_message_bubble.dart';
 import 'desktop_host_chats.dart';
 import 'desktop_host_composer.dart';
 import 'desktop_host_connection.dart';
+import 'desktop_host_controls.dart';
+import 'desktop_host_project_history.dart';
+import 'desktop_host_session_controls.dart';
+import 'desktop_remote_rail.dart';
 
 typedef DesktopHostChatKey = ({String kind, String id});
 
@@ -80,6 +90,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   final _invite = TextEditingController();
   final _inviteFocus = FocusNode();
   bool _working = false;
+  bool _sidebarHidden = false;
   bool _openingInvite = false;
   bool _leaving = false;
   bool _confirmingForget = false;
@@ -394,52 +405,68 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
               );
               final conversation = host == null || selected == null
                   ? Center(child: _Notice(text.chooseChat))
+                  : selected.kind == 'project'
+                  ? DesktopRemoteRail(
+                      peer: _connection.peer!,
+                      chat: selected,
+                      child: _conversation(
+                        text,
+                        host,
+                        selected,
+                        error,
+                        wide: wide,
+                      ),
+                    )
                   : _conversation(text, host, selected, error, wide: wide);
+              final switcher = Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                child: Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 16,
+                  runSpacing: 4,
+                  children: [
+                    FilledButton.icon(
+                      onPressed: _back,
+                      icon: const Icon(Icons.arrow_back),
+                      label: Text(
+                        text.switchToLocal,
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                    Semantics(
+                      header: true,
+                      child: Text(
+                        text.title,
+                        style: SettingsText.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              );
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 8,
-                    ),
-                    child: Wrap(
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      spacing: 16,
-                      runSpacing: 4,
-                      children: [
-                        FilledButton.icon(
-                          onPressed: _back,
-                          icon: const Icon(Icons.arrow_back),
-                          label: Text(
-                            text.switchToLocal,
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                        Semantics(
-                          header: true,
-                          child: Text(
-                            text.title,
-                            style: SettingsText.title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const Divider(height: 1),
+                  if (!wide) switcher,
+                  if (!wide) const Divider(height: 1),
                   Expanded(
                     child: Row(
                       children: [
-                        if (wide) ...[
+                        if (wide && (!_sidebarHidden || selected == null)) ...[
                           SizedBox(
                             width: 280,
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 12,
                               ),
-                              child: catalog,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  switcher,
+                                  Expanded(child: catalog),
+                                ],
+                              ),
                             ),
                           ),
                           const VerticalDivider(width: 1),
@@ -448,6 +475,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                           key: const ValueKey('host-content'),
                           child: _contentPane(
                             wide || selected != null ? conversation : catalog,
+                            session: selected != null,
                           ),
                         ),
                       ],
@@ -462,20 +490,24 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     );
   }
 
-  Widget _contentPane(Widget child) => Padding(
+  Widget _contentPane(Widget child, {required bool session}) => Padding(
     padding: const EdgeInsets.all(Islands.gap),
     child: Island(
       color: AppColors.background,
-      child: ValueListenableBuilder<double>(
-        valueListenable: ChatWidth.current,
-        child: Material(type: MaterialType.transparency, child: child),
-        builder: (context, width, pane) => ChatColumn(
-          maxWidth: width,
-          left: Islands.inset,
-          right: Islands.inset,
-          child: pane,
-        ),
+      child: Material(
+        type: MaterialType.transparency,
+        child: session ? child : _column(child),
       ),
+    ),
+  );
+  Widget _column(Widget child) => ValueListenableBuilder<double>(
+    valueListenable: ChatWidth.current,
+    child: child,
+    builder: (context, width, pane) => ChatColumn(
+      maxWidth: width,
+      left: Islands.inset,
+      right: Islands.inset,
+      child: pane,
     ),
   );
 
@@ -597,34 +629,49 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
           _ => Icons.groups_outlined,
         },
         label: chat.title,
+        updatedAt: chat.updatedAt,
       );
     },
   );
 
-  Widget _host(_HostText text) => _HostCard(
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _host(_HostText text) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    child: Row(
       children: [
-        Text(_connection.hostName ?? text.host, style: SettingsText.title),
-        const SizedBox(height: 6),
-        _Notice(_online ? text.online : text.offline),
-        const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            if (!_online)
-              FilledButton(
-                onPressed: _busy
-                    ? null
-                    : () => _runConnection((c) => c.reconnect()),
-                child: Text(text.reconnect),
+        const Icon(Codicons.deviceDesktop, size: 16),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                _connection.hostName ?? text.host,
+                style: SettingsText.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
-            OutlinedButton(
-              onPressed: _busy ? null : () => _forget(text),
-              child: Text(text.forget),
-            ),
+              Text(
+                _online ? text.online : text.offline,
+                style: SettingsText.description,
+              ),
+            ],
+          ),
+        ),
+        if (!_online)
+          TextButton(
+            onPressed: _busy
+                ? null
+                : () => _runConnection((c) => c.reconnect()),
+            child: Text(text.reconnect),
+          ),
+        PopupMenuButton<String>(
+          tooltip: text.hostOptions,
+          enabled: !_busy,
+          iconSize: 16,
+          itemBuilder: (_) => [
+            PopupMenuItem(value: 'forget', child: Text(text.forget)),
           ],
+          onSelected: (_) => _forget(text),
         ),
       ],
     ),
@@ -647,63 +694,144 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
       key: ValueKey(chatKey),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SizedBox(height: 8),
-        _HostHeading(
-          title: chat.title,
-          tooltip: wide ? text.closeChat : text.backToChats,
-          icon: wide ? Icons.close : Icons.list_alt_outlined,
-          onBack: _closeChat,
-        ),
-        if (connectionError != null) _Notice(connectionError, isError: true),
-        if (_chatBusy) _Progress(text.working),
-        if (error != null) _Notice(error, isError: true),
-        const Divider(height: 1),
-        Expanded(
-          child: messages.isEmpty && !hasEarlier
-              ? Center(
-                  child: !_chatBusy && error == null
-                      ? _Notice(text.emptyChat)
-                      : null,
-                )
-              : ListView.builder(
-                  // Keep the newest replies visible when at the bottom, even
-                  // when loading older messages or the host is streaming.
-                  reverse: true,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  itemCount: messages.length + (hasEarlier ? 1 : 0),
-                  itemBuilder: (context, index) {
-                    if (index == messages.length) {
-                      return Center(
-                        child: TextButton(
-                          onPressed: _busy || _chatBusy
-                              ? null
-                              : () => _runChat((c) => c.earlier()),
-                          child: Text(text.earlier),
-                        ),
-                      );
+        ConversationCardHeader(
+          title: _RemoteTitle(
+            title: chat.title,
+            onRename: chat.kind != 'project' || !_online || _busy || _chatBusy
+                ? null
+                : (value) {
+                    final peer = connection.peer;
+                    if (peer == null ||
+                        peer.remote != host ||
+                        _chats.selected?.id != chat.id ||
+                        _chats.selected?.kind != 'project') {
+                      return;
                     }
-                    final message = messages[messages.length - 1 - index];
-                    return _MessageBubble(
-                      message: message,
-                      sender: message.mine ? text.you : message.sender,
-                      group: chat.kind == 'group',
+                    unawaited(
+                      _runChat((_) async {
+                        await peer.call(LinkMethods.rename, {
+                          'session': chat.id,
+                          'title': value,
+                        });
+                      }),
                     );
                   },
+          ),
+          trailing: [
+            if (wide) ...[
+              if (_sidebarHidden)
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: text.switchToLocal,
+                  icon: const Icon(Codicons.deviceDesktop, size: 16),
+                  onPressed: _back,
                 ),
+              IconButton(
+                key: const ValueKey('host-toggle-sidebar'),
+                visualDensity: VisualDensity.compact,
+                tooltip: text.sidebar,
+                icon: const Icon(Codicons.layoutSidebarLeft, size: 16),
+                onPressed: () =>
+                    setState(() => _sidebarHidden = !_sidebarHidden),
+              ),
+            ],
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              tooltip: wide ? text.closeChat : text.backToChats,
+              onPressed: _closeChat,
+              icon: Icon(
+                wide ? Icons.close : Icons.list_alt_outlined,
+                size: 16,
+              ),
+            ),
+          ],
         ),
-        const Divider(height: 1),
-        _HostComposer(
-          key: ObjectKey(connection),
-          initialDraft: drafts[chatKey] ?? '',
-          busy: _busy || _chatBusy,
-          onChanged: (draft) {
-            if (draft.isEmpty) {
-              drafts.remove(chatKey);
-            } else {
-              drafts[chatKey] = draft;
-            }
-          },
-          onSend: (draft) => _send(chatKey, draft),
+        Expanded(
+          child: _column(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (connectionError != null)
+                  _Notice(connectionError, isError: true),
+                if (_chatBusy) _Progress(text.working),
+                if (error != null) _Notice(error, isError: true),
+                const Divider(height: 1),
+                Expanded(
+                  child: chat.kind == 'project' && _chats.projectHistory != null
+                      ? DesktopHostProjectHistory(
+                          feed: _chats.projectHistory!,
+                          earlierEnabled: !_busy && !_chatBusy,
+                          emptyLabel: !_chatBusy && error == null
+                              ? text.emptyChat
+                              : null,
+                          onPickReply: _busy || _chatBusy
+                              ? null
+                              : (reply) {
+                                  if (_busy ||
+                                      _chatBusy ||
+                                      (drafts[chatKey]?.trim().isNotEmpty ??
+                                          false)) {
+                                    return;
+                                  }
+                                  setState(() => drafts[chatKey] = reply);
+                                },
+                        )
+                      : messages.isEmpty && !hasEarlier
+                      ? Center(
+                          child: !_chatBusy && error == null
+                              ? _Notice(text.emptyChat)
+                              : null,
+                        )
+                      : ListView.builder(
+                          // Keep the newest replies visible when at the bottom, even
+                          // when loading older messages or the host is streaming.
+                          reverse: true,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          itemCount: messages.length + (hasEarlier ? 1 : 0),
+                          itemBuilder: (context, index) {
+                            if (index == messages.length) {
+                              return Center(
+                                child: TextButton(
+                                  onPressed: _busy || _chatBusy
+                                      ? null
+                                      : () => _runChat((c) => c.earlier()),
+                                  child: Text(text.earlier),
+                                ),
+                              );
+                            }
+                            final message =
+                                messages[messages.length - 1 - index];
+                            return _MessageBubble(
+                              message: message,
+                              sender: message.mine ? text.you : message.sender,
+                              group: chat.kind == 'group',
+                            );
+                          },
+                        ),
+                ),
+                const Divider(height: 1),
+                _HostComposer(
+                  key: ObjectKey(connection),
+                  initialDraft: drafts[chatKey] ?? '',
+                  busy: _busy || _chatBusy,
+                  controls: _chats.sessionControls,
+                  project: chat.kind == 'project'
+                      ? _chats.projects
+                            .where((p) => p.id == chat.projectId)
+                            .firstOrNull
+                      : null,
+                  onChanged: (draft) {
+                    if (draft.isEmpty) {
+                      drafts.remove(chatKey);
+                    } else {
+                      drafts[chatKey] = draft;
+                    }
+                  },
+                  onSend: (draft) => _send(chatKey, draft),
+                ),
+              ],
+            ),
+          ),
         ),
       ],
     );
@@ -800,23 +928,79 @@ class _HostComposer extends StatelessWidget {
     required this.busy,
     required this.onChanged,
     required this.onSend,
+    this.controls,
+    this.project,
   });
 
   final String initialDraft;
   final bool busy;
   final ValueChanged<String> onChanged;
   final Future<bool> Function(String) onSend;
+  final DesktopHostSessionControls? controls;
+  final ProjectInfo? project;
 
   @override
   Widget build(BuildContext context) {
     final text = _HostText(context);
-    return DesktopHostComposer(
-      initialDraft: initialDraft,
-      busy: busy,
-      placeholder: text.message,
-      sendLabel: text.send,
-      onChanged: onChanged,
-      onSend: onSend,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        DesktopHostComposer(
+          initialDraft: initialDraft,
+          busy: busy,
+          placeholder: text.message,
+          sendLabel: text.send,
+          onChanged: onChanged,
+          onSend: onSend,
+          controls: controls,
+        ),
+        DesktopHostSessionFooter(project: project, controls: controls),
+      ],
+    );
+  }
+}
+
+class _RemoteTitle extends StatefulWidget {
+  const _RemoteTitle({required this.title, this.onRename});
+  final String title;
+  final ValueChanged<String>? onRename;
+  @override
+  State<_RemoteTitle> createState() => _RemoteTitleState();
+}
+
+class _RemoteTitleState extends State<_RemoteTitle> {
+  bool editing = false;
+  @override
+  Widget build(BuildContext context) {
+    final style = TextStyle(
+      color: AppColors.textMuted,
+      fontSize: 12.5,
+      fontWeight: FontWeight.w500,
+    );
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: editing && widget.onRename != null
+          ? SizedBox(
+              width: 320,
+              child: InlineRenameField(
+                initial: widget.title,
+                style: style,
+                onDone: (value) {
+                  setState(() => editing = false);
+                  final next = value?.trim();
+                  if (next != null && next.isNotEmpty && next != widget.title) {
+                    widget.onRename?.call(next);
+                  }
+                },
+              ),
+            )
+          : GestureDetector(
+              onDoubleTap: widget.onRename == null
+                  ? null
+                  : () => setState(() => editing = true),
+              child: HoverScrollText(widget.title, style: style),
+            ),
     );
   }
 }
@@ -827,6 +1011,7 @@ class _CatalogRow extends StatelessWidget {
     required this.label,
     required this.icon,
     this.trailing,
+    this.updatedAt,
     this.selected = false,
     this.indent = 0,
     this.onTap,
@@ -834,6 +1019,7 @@ class _CatalogRow extends StatelessWidget {
   final String label;
   final IconData icon;
   final IconData? trailing;
+  final DateTime? updatedAt;
   final bool selected;
   final double indent;
   final VoidCallback? onTap;
@@ -862,45 +1048,25 @@ class _CatalogRow extends StatelessWidget {
                 style: TextStyle(fontSize: 13, color: AppColors.textPrimary),
               ),
             ),
+            if (updatedAt != null)
+              ValueListenableBuilder<bool>(
+                valueListenable: SidebarTimes.shown,
+                builder: (context, shown, _) => shown
+                    ? Text(
+                        relativeTime(updatedAt!, DateTime.now(), context.l10n),
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: AppColors.textFaint,
+                        ),
+                      )
+                    : const SizedBox.shrink(),
+              ),
             if (trailing != null)
               Icon(trailing, size: 13, color: AppColors.textFaint),
           ],
         ),
       ),
     ),
-  );
-}
-
-class _HostHeading extends StatelessWidget {
-  const _HostHeading({
-    required this.title,
-    required this.tooltip,
-    required this.icon,
-    required this.onBack,
-  });
-
-  final String title;
-  final String tooltip;
-  final IconData icon;
-  final VoidCallback? onBack;
-
-  @override
-  Widget build(BuildContext context) => Row(
-    children: [
-      IconButton(onPressed: onBack, tooltip: tooltip, icon: Icon(icon)),
-      const SizedBox(width: 8),
-      Expanded(
-        child: Semantics(
-          header: true,
-          child: Text(
-            title,
-            style: SettingsText.title,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-      ),
-    ],
   );
 }
 
@@ -1038,6 +1204,8 @@ class _HostText {
   String get loadingChats => _zh ? '正在加载主机会话…' : 'Loading host conversations…';
   String get emptyCatalog =>
       _zh ? '主机上没有会话。' : 'No conversations on this host.';
+  String get hostOptions => _zh ? '主机选项' : 'Host options';
+  String get sidebar => _zh ? '显示或隐藏侧栏' : 'Toggle sidebar';
   String get backToChats => _zh ? '返回主机会话列表' : 'Back to host chats';
   String get closeChat => _zh ? '关闭会话' : 'Close chat';
   String get chooseChat => _zh ? '请选择主机会话。' : 'Select a host conversation.';
