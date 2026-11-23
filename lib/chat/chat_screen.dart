@@ -61,6 +61,7 @@ import 'widgets/chat_minimap.dart';
 import 'widgets/code_citation.dart';
 import 'widgets/hover_scroll_text.dart';
 import 'widgets/context_meter.dart';
+import 'widgets/conversation_card_header.dart';
 import 'widgets/inline_rename_field.dart';
 import 'widgets/pixel_loader.dart';
 import 'widgets/plan_start.dart';
@@ -159,7 +160,7 @@ class ChatScreen extends StatefulWidget {
   /// From the card's right to the row's last button, less its padding (2):
   /// its right edge on the side panel's rail's under it, as far in as that
   /// (AgentSidePanelArea.railRight, [Islands.inset]).
-  static const cardHeaderEnd = Islands.inset - 2;
+  static const cardHeaderEnd = ConversationCardHeader.endInset;
 
   /// Left of the title bar's [leading]: by default clear of the native
   /// traffic lights, as when this is the whole window. The title and
@@ -783,35 +784,11 @@ class _ChatScreenState extends State<ChatScreen>
     return TitleBarDoubleClick(
       windowTitleBar: widget.windowTitleBar,
       onDragStart: _renaming ? null : widget.onTitleDragStart,
-      child: SizedBox(
-        height: ChatScreen.cardHeaderHeight,
-        child: Padding(
-          // Its buttons first, their left edge on the rail's at the left.
-          padding: EdgeInsets.only(
-            left: start && window ? ChatScreen.cardHeaderEnd : Islands.inset,
-            right: ChatScreen.cardHeaderEnd,
-          ),
-          child: Row(
-            children: [
-              if (leading.isNotEmpty) ...[
-                TitleBarControls(
-                  child: Row(mainAxisSize: MainAxisSize.min, children: leading),
-                ),
-                const SizedBox(width: 4),
-              ],
-              Expanded(child: _buildTitle()),
-              if (trailing.isNotEmpty) ...[
-                const SizedBox(width: 6),
-                TitleBarControls(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: trailing,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
+      child: ConversationCardHeader(
+        title: _buildTitle(),
+        leading: leading,
+        trailing: trailing,
+        compactLeading: start && window,
       ),
     );
   }

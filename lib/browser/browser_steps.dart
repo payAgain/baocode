@@ -3,6 +3,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:path/path.dart' as p;
 
 import '../chat/chat_models.dart';
+import '../chat/host_transcript_scope.dart';
 import '../chat/widgets/hover_builder.dart';
 import '../chat/widgets/content_image.dart';
 import '../chat/widgets/step_header.dart';
@@ -303,7 +304,9 @@ class BrowserStep extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         header,
-        if (running && item.tool == 'browser_watch')
+        if (running &&
+            item.tool == 'browser_watch' &&
+            !HostTranscriptScope.of(context))
           const _WatchCard()
         else if (expanded && opens)
           _body(context),
@@ -330,7 +333,9 @@ class BrowserStep extends StatelessWidget {
           return StepBody(child: _ConsoleLines(output));
         case 'browser_network':
           return StepBody(child: _NetworkTable(output));
-        case 'browser_performance' when output.contains('Web Vitals'):
+        case 'browser_performance'
+            when output.contains('Web Vitals') &&
+                !HostTranscriptScope.of(context):
           return StepBody(
             maxHeight: 420,
             child: _PerformanceView(PerformanceReport.parse(output)),

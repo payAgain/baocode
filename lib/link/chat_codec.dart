@@ -401,11 +401,14 @@ abstract final class ChatCodec {
 
   /// The item [json] is; null for one of a kind this side does not know
   /// (a newer desktop's).
-  static ChatItem? decode(Object? json) {
+  static ChatItem? decode(Object? json, {bool hostTranscript = false}) {
     if (json is! Map<String, Object?>) return null;
-    String text(String key) => json[key] as String? ?? '';
-    String? optional(String key) => json[key] as String?;
-    int? number(String key) => (json[key] as num?)?.toInt();
+    String? optional(String key) => switch (json[key]) {
+      final String value => value,
+      _ => null,
+    };
+    String text(String key) => optional(key) ?? '';
+    int? number(String key) => _wireNumber(json[key])?.toInt();
     DateTime? time(String key) => switch (number(key)) {
       final ms? => DateTime.fromMillisecondsSinceEpoch(ms),
       null => null,
@@ -414,33 +417,44 @@ abstract final class ChatCodec {
       final ms? => Duration(milliseconds: ms),
       null => null,
     };
+    List<Object?> list(String key) => switch (json[key]) {
+      final List<Object?> items => items,
+      _ => const [],
+    };
     T named<T extends Enum>(List<T> values, String key, T fallback) =>
         values.asNameMap()[json[key]] ?? fallback;
     return switch (json['t']) {
       'user' => UserMessageItem(
         text: text('text'),
         queued: json['queued'] == true,
-        images: _decodeImages(json['images']),
+        images: hostTranscript ? const [] : _decodeImages(json['images']),
         worked: duration('worked'),
         stopped: json['stopped'] == true,
         sentAt: time('at'),
-        fromAgent: json['agent'] as String?,
-        fromSession: json['agentSession'] as String?,
+        fromAgent: optional('agent'),
+        fromSession: hostTranscript ? null : optional('agentSession'),
         usage: switch (json['usage']) {
           final Map<String, Object?> usage => TurnUsage(
-            inputTokens: (usage['in'] as num?)?.toInt(),
-            outputTokens: (usage['out'] as num?)?.toInt(),
-            tokensPerSecond: (usage['speed'] as num?)?.toDouble(),
-            costUsd: (usage['cost'] as num?)?.toDouble(),
+            inputTokens: _wireNumber(usage['in'])?.toInt(),
+            outputTokens: _wireNumber(usage['out'])?.toInt(),
+            tokensPerSecond: _wireNumber(usage['speed'])?.toDouble(),
+            costUsd: _wireNumber(usage['cost'])?.toDouble(),
           ),
           _ => null,
         },
       ),
       'text' => AssistantTextItem(
-        ReplySuggestions.write(text('text'), [
-          for (final said in json['suggest'] as List? ?? const [])
-            if (said is String) said,
-        ]),
+        ReplySuggestions.write(
+          hostTranscript ? ReplySuggestions.strip(text('text')) : text('text'),
+          [
+            for (final said in list('suggest').whereType<String>())
+              if (!hostTranscript ||
+                  (said.length <= ReplySuggestions.maxLength &&
+                      !said.contains('<') &&
+                      !said.contains('`')))
+                said,
+          ],
+        ),
       ),
       'thinking' => ThinkingItem(
         text: text('text'),
@@ -453,13 +467,18 @@ abstract final class ChatCodec {
         target: text('target'),
         detail: optional('detail'),
         path: optional('path'),
-        results: [...?(json['results'] as List?)?.whereType<String>()],
+        results: list('results').whereType<String>().toList(),
         label: optional('label'),
         status: named(ToolStatus.values, 'status', ToolStatus.succeeded),
         output: optional('output'),
         tool: optional('tool'),
-        images: _decodeImages(json['images']),
+        images: hostTranscript ? const [] : _decodeImages(json['images']),
         input: switch ((json['making'], json['browse'])) {
+          (_, final Map<String, Object?> browse) when hostTranscript => {
+            if (browse['action'] case final String action) 'action': action,
+            if (browse['url'] == true) 'url': '',
+          },
+          _ when hostTranscript => const {},
           _ when json['sticker'] is String => {'sticker': json['sticker']},
           _ when json['url'] is String => {'url': json['url']},
           _ when json['sent'] is String => {
@@ -493,8 +512,8 @@ abstract final class ChatCodec {
         duration: duration('duration'),
         model: optional('model'),
         children: [
-          for (final child in (json['children'] as List?) ?? const [])
-            ?decode(child),
+          if (!hostTranscript)
+            for (final child in list('children')) ?decode(child),
         ],
         result: optional('result'),
         background: json['background'] == true,
@@ -507,9 +526,9 @@ abstract final class ChatCodec {
           final Map<String, Object?> note => CompactionNote(
             auto: note['auto'] == true,
             tooLong: note['tooLong'] == true,
-            before: (note['before'] as num?)?.toInt(),
-            after: (note['after'] as num?)?.toInt(),
-            window: (note['window'] as num?)?.toInt(),
+            before: _wireNumber(note['before'])?.toInt(),
+            after: _wireNumber(note['after'])?.toInt(),
+            window: _wireNumber(note['window'])?.toInt(),
           ),
           _ => null,
         },
@@ -535,7 +554,7 @@ abstract final class ChatCodec {
         fileName: text('fileName'),
         directory: text('directory'),
         lines: [
-          for (final line in (json['lines'] as List?) ?? const [])
+          for (final line in list('lines'))
             if (line case [final int type, final int number, final String text]
                 when type >= 0 && type < DiffLineType.values.length)
               DiffLine(DiffLineType.values[type], number, text),
@@ -548,10 +567,10 @@ abstract final class ChatCodec {
         whimsical: json['whimsical'] == true,
         visible: json['visible'] != false,
         startedAt: time('startedAt'),
-        output: switch (json['tokens']) {
-          final num tokens => TurnOutput(
-            tokens: tokens.toInt(),
-            tokensPerSecond: (json['speed'] as num?)?.toDouble(),
+        output: switch (number('tokens')) {
+          final tokens? => TurnOutput(
+            tokens: tokens,
+            tokensPerSecond: _wireNumber(json['speed'])?.toDouble(),
           ),
           _ => null,
         },
@@ -559,6 +578,13 @@ abstract final class ChatCodec {
       _ => null,
     };
   }
+
+  /// A finite, nonnegative quantity, within a range that also leaves room
+  /// to add two token counts and represent milliseconds as microseconds.
+  static num? _wireNumber(Object? value) =>
+      value is num && value.isFinite && value >= 0 && value <= 8640000000000000
+      ? value
+      : null;
 
   static List<Map<String, Object?>> _images(List<ImageAttachment> images) => [
     for (final image in images)

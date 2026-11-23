@@ -4,6 +4,7 @@ import '../../browser/browser_steps.dart';
 import '../../images/image_steps.dart';
 import '../../l10n/l10n.dart';
 import '../chat_models.dart';
+import '../host_transcript_scope.dart';
 import '../session_links.dart';
 import '../edit_detail.dart';
 import 'activity_row.dart';
@@ -57,13 +58,13 @@ class ChatItemView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final view = _build();
+    final view = _build(hostTranscript: HostTranscriptScope.of(context));
     // Steps line up on the left: the history centers what is narrower
     // than its column.
     return isStep(item) ? SizedBox(width: double.infinity, child: view) : view;
   }
 
-  Widget _build() {
+  Widget _build({required bool hostTranscript}) {
     return switch (item) {
       UserMessageItem(
         :final text,
@@ -82,11 +83,9 @@ class ChatItemView extends StatelessWidget {
         expanded: expanded,
         onToggle: onToggle,
       ),
-      final ToolCallItem tool when tool.kind == ToolKind.image => ImageStep(
-        item: tool,
-        expanded: expanded,
-        onToggle: onToggle,
-      ),
+      final ToolCallItem tool
+          when tool.kind == ToolKind.image && !hostTranscript =>
+        ImageStep(item: tool, expanded: expanded, onToggle: onToggle),
       final ToolCallItem tool
           when tool.kind == ToolKind.other && isSessionTool(tool.tool) =>
         SessionStep(item: tool, expanded: expanded, onToggle: onToggle),

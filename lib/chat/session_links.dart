@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 
 import 'chat_models.dart';
 import 'chat_session.dart';
+import 'host_transcript_scope.dart';
 
 /// How a conversation handed work stands.
 enum HandedStatus { running, waiting, done, failed }
@@ -72,7 +73,9 @@ class SessionLinks extends InheritedWidget {
   final SessionLinkHost host;
 
   static SessionLinkHost? of(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<SessionLinks>()?.host;
+      HostTranscriptScope.of(context)
+      ? null
+      : context.dependOnInheritedWidgetOfExactType<SessionLinks>()?.host;
 
   @override
   bool updateShouldNotify(SessionLinks oldWidget) =>

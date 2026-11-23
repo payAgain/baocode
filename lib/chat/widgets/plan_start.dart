@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import '../../l10n/l10n.dart';
 import '../chat_session.dart';
 import '../composer/session_model_picker.dart';
+import '../host_transcript_scope.dart';
 import '../panels/interaction_panel.dart' show PanelButton;
 
 /// The conversation whose plan its cards start (see [PlanStartBar]): the
@@ -17,7 +18,9 @@ class PlanStartScope extends InheritedWidget {
   final ChatSession session;
 
   static ChatSession? maybeOf(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<PlanStartScope>()?.session;
+      HostTranscriptScope.of(context)
+      ? null
+      : context.dependOnInheritedWidgetOfExactType<PlanStartScope>()?.session;
 
   @override
   bool updateShouldNotify(PlanStartScope oldWidget) =>

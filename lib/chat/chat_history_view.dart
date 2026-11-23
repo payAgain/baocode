@@ -61,6 +61,9 @@ class ChatHistoryView extends StatefulWidget {
     this.after,
     this.forkAfter,
     this.underTitle = false,
+    this.autoLoadEarlier = true,
+    this.earlierEnabled = true,
+    this.hostTranscript = false,
   });
 
   /// The conversation shown: a session's, or a subagent's.
@@ -99,6 +102,13 @@ class ChatHistoryView extends StatefulWidget {
   /// above the history, which then keeps less above its first item and a
   /// stuck message, and fades less deep at its top.
   final bool underTitle;
+
+  /// Remote paging is manual: scrolling never requests more from the host.
+  final bool autoLoadEarlier;
+  final bool earlierEnabled;
+
+  /// Older hosts may have finished answers without turn timing metadata.
+  final bool hostTranscript;
 
   @override
   State<ChatHistoryView> createState() => _ChatHistoryViewState();
@@ -174,6 +184,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
       _feed.itemCount,
       _feed.itemAt,
       live: _feed.isStreaming,
+      untimedFooters: widget.hostTranscript,
     );
     _liveStart = null;
     if (!_feed.isStreaming) return;
@@ -790,7 +801,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
     // Its size, for a slow frame's line in the event log.
     FrameWatch.notes[this] = _frameNote;
     _wasLive = _feed.isStreaming;
-    _prependedSeen = _session?.prependedCount ?? 0;
+    _prependedSeen = _pagingFeed?.prependedCount ?? 0;
     _long = _longFeeds[_feed] ?? false;
     _refold();
     _syncUsageSession();
@@ -838,7 +849,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
         : (
             index: shown.index,
             above: shown.above,
-            prepended: _session?.prependedCount ?? 0,
+            prepended: feed is PagedChatFeed ? feed.prependedCount : 0,
             expanded: {..._expanded},
             folds: {..._foldOpen},
             unfolded: {..._unfoldedTurns},
@@ -850,7 +861,10 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
   void _goBack() {
     final left = _leftAt[_feed];
     if (left == null) return;
-    final moved = math.max(0, (_session?.prependedCount ?? 0) - left.prepended);
+    final moved = math.max(
+      0,
+      (_pagingFeed?.prependedCount ?? 0) - left.prepended,
+    );
     _expanded.addAll({
       for (final MapEntry(:key, :value) in left.expanded.entries)
         key + moved: value,
@@ -910,6 +924,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
       _leaving.clear();
       _entering.clear();
       _wasLive = widget.feed.isStreaming;
+      _prependedSeen = _pagingFeed?.prependedCount ?? 0;
       _usageSessionId = null;
       _usageSessionVersion = -1;
       _usageCalls = const [];
@@ -1058,22 +1073,27 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
     _ => null,
   };
 
+  PagedChatFeed? get _pagingFeed => switch (_feed) {
+    final PagedChatFeed feed => feed,
+    _ => null,
+  };
+
   /// There are earlier turns to read, or they are being read: room for
   /// the bar.
-  bool get _earlierRoom => switch (_session) {
+  bool get _earlierRoom => switch (_pagingFeed) {
     final session? => session.hasEarlierHistory || session.loadingEarlier,
     null => false,
   };
 
   /// Whether the list was last laid out with room for the bar, and for
   /// whose turns.
-  (ChatSession?, bool) _earlierRoomLaidOut = (null, false);
+  (PagedChatFeed?, bool) _earlierRoomLaidOut = (null, false);
 
   /// [_earlierRoom], what is in the list kept where it is as the room comes
   /// or goes (the last of the earlier turns read): scrolled by as much,
   /// unless at the top, where the bar goes with it.
   bool _keepEarlierRoom() {
-    final session = _session;
+    final session = _pagingFeed;
     final room = _earlierRoom;
     final (laidOutFor, laidOut) = _earlierRoomLaidOut;
     _earlierRoomLaidOut = (session, room);
@@ -1105,7 +1125,11 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
   /// Reads the earlier turns once the frame is done, if the list is near its
   /// top (and it is not the first read, nor under way).
   void _wantEarlier() {
-    if (_earlierQueued || _session?.hasEarlierHistory != true) return;
+    if (!widget.autoLoadEarlier ||
+        _earlierQueued ||
+        _pagingFeed?.hasEarlierHistory != true) {
+      return;
+    }
     _earlierQueued = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _earlierQueued = false;
@@ -1119,8 +1143,12 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
   }
 
   Future<void> _loadEarlier() async {
-    final session = _session;
-    if (session == null || !session.hasEarlierHistory) return;
+    final session = _pagingFeed;
+    if (session == null ||
+        !session.hasEarlierHistory ||
+        !widget.earlierEnabled) {
+      return;
+    }
     if (session.loadingEarlier) return;
     final before = session.prependedCount;
     _held = _firstShown();
@@ -1518,7 +1546,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
     child: ListenableBuilder(
       listenable: Listenable.merge([_scrollController, _feed]),
       builder: (context, _) {
-        final session = _session;
+        final session = _pagingFeed;
         final position = _scrollController.hasClients
             ? _scrollController.position
             : null;
@@ -1537,7 +1565,9 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
               right: 0,
               height: _earlierBarHeight,
               child: Center(
-                child: session.loadingEarlier || !_earlierFailed
+                child:
+                    session.loadingEarlier ||
+                        (widget.autoLoadEarlier && !_earlierFailed)
                     ? const SizedBox.square(
                         dimension: 16,
                         child: CircularProgressIndicator(strokeWidth: 2),
@@ -1546,10 +1576,12 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
                         cursor: SystemMouseCursors.click,
                         builder: (context, hovered) => GestureDetector(
                           behavior: HitTestBehavior.opaque,
-                          onTap: () {
-                            setState(() => _earlierFailed = false);
-                            _loadEarlier();
-                          },
+                          onTap: !widget.earlierEnabled
+                              ? null
+                              : () {
+                                  setState(() => _earlierFailed = false);
+                                  _loadEarlier();
+                                },
                           child: Container(
                             height: 24,
                             padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -2180,7 +2212,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
   }
 
   void _handleSessionChanged() {
-    final prepended = _session?.prependedCount ?? 0;
+    final prepended = _pagingFeed?.prependedCount ?? 0;
     final moved = prepended - _prependedSeen;
     _prependedSeen = prepended;
     if (moved > 0) _shiftIndexes(moved);
@@ -3053,7 +3085,9 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
                       stopped: fold.stopped,
                       edits: turnEdits(_itemsIn(fold)),
                       images: foldImages(_itemsIn(fold)),
-                      webIcons: foldWebIcons(_itemsIn(fold)),
+                      webIcons: widget.hostTranscript
+                          ? const []
+                          : foldWebIcons(_itemsIn(fold)),
                       expanded: _isFoldOpen(fold),
                       onToggle: () => _toggleFold(fold),
                     ),
@@ -3065,7 +3099,9 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
                     StepsFoldLine(
                       tally: StepTally(_itemsIn(fold)),
                       images: foldImages(_itemsIn(fold)),
-                      webIcons: foldWebIcons(_itemsIn(fold)),
+                      webIcons: widget.hostTranscript
+                          ? const []
+                          : foldWebIcons(_itemsIn(fold)),
                       expanded: _isFoldOpen(fold),
                       onToggle: () => _toggleFold(fold),
                     ),

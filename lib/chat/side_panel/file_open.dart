@@ -11,6 +11,7 @@ import '../../ide/file_views.dart';
 import '../../ide/host_paths.dart';
 import '../../workspace/window_controls.dart';
 import '../chat_models.dart';
+import '../host_transcript_scope.dart';
 import 'file_link.dart';
 import 'file_link_menu.dart';
 import '../widgets/image_thumbnails.dart' show showImagePreview;
@@ -339,11 +340,15 @@ class FileOpenScope extends InheritedWidget {
   final String? home;
 
   static FileOpenScope? maybeOf(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<FileOpenScope>();
+      HostTranscriptScope.of(context)
+      ? null
+      : context.dependOnInheritedWidgetOfExactType<FileOpenScope>();
 
   /// The scope over [context], for what a click does (not depended on).
   static FileOpenScope? find(BuildContext context) =>
-      context.getInheritedWidgetOfExactType<FileOpenScope>();
+      HostTranscriptScope.read(context)
+      ? null
+      : context.getInheritedWidgetOfExactType<FileOpenScope>();
 
   /// [path] absolute (see [FileLink.resolvePath]): relative to [root], or
   /// in a workspace the first of its folders' found to have it (until one

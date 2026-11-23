@@ -133,7 +133,7 @@ class ModelSettingChoice {
 /// waiting, the model in effect) is projected from those or read from the
 /// kernel. The UI reaches what the kernel can do through the facets here,
 /// null when the kernel does not declare it.
-class ChatSession extends ChangeNotifier implements ChatFeed {
+class ChatSession extends ChangeNotifier implements PagedChatFeed {
   ChatSession({
     KernelDescriptor? kernel,
     List<KernelDescriptor>? kernels,
@@ -305,6 +305,7 @@ class ChatSession extends ChangeNotifier implements ChatFeed {
   };
 
   /// Whether there is more of that conversation before what was read.
+  @override
   bool get hasEarlierHistory => switch (_kernel) {
     LoadsHistory(:final hasEarlierHistory) => hasEarlierHistory,
     _ => false,
@@ -312,15 +313,18 @@ class ChatSession extends ChangeNotifier implements ChatFeed {
 
   /// How many items were put before the others by [loadEarlier] so far: the
   /// indexes of those there were moved by as many.
+  @override
   int get prependedCount => _transcript.prepended;
 
   /// Whether that is being read.
+  @override
   bool get loadingEarlier => switch (_kernel) {
     LoadsHistory(:final loadingEarlier) => loadingEarlier,
     _ => false,
   };
 
   /// Reads some more of the conversation, before what was.
+  @override
   Future<void> loadEarlier() => switch (_kernel) {
     final LoadsHistory kernel => kernel.loadEarlier(),
     _ => Future.value(),

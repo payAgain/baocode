@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:bao_link/bao_link.dart';
+import 'package:baocode/l10n/l10n.dart';
 import 'package:bao_markdown/bao_markdown.dart';
 import 'package:baocode/chat/composer/composer_presentation.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
@@ -142,12 +143,17 @@ void main() {
     expect(connection.reconnections, 1);
     expect(find.text('Project chat'), findsOneWidget);
 
+    expect(find.text('Forget host'), findsNothing);
+    await tester.tap(find.byTooltip('Host options'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Forget host'));
     await tester.pumpAndSettle();
     expect(connection.forgets, 0);
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
     expect(connection.forgets, 0);
+    await tester.tap(find.byTooltip('Host options'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Forget host'));
     await tester.pumpAndSettle();
     await tester.tap(
@@ -229,10 +235,53 @@ void main() {
 
     await tester.tap(find.text('Project chat'));
     await tester.pump();
+    final pane = find.byKey(const ValueKey('host-content'));
+    final title = find.descendant(
+      of: pane,
+      matching: find.text('Project chat'),
+    );
+    expect(
+      tester.getTopLeft(title).dx - tester.getTopLeft(pane).dx,
+      lessThan(28),
+    );
+    expect(
+      tester.getTopLeft(title).dy - tester.getTopLeft(pane).dy,
+      lessThan(27),
+    );
     final bot = find.text('Helper bot');
     expect(bot.hitTestable(), findsOneWidget);
     expect(tester.getRect(bot).right, lessThan(tester.getRect(_composer).left));
     expect(tester.getRect(switcher), switcherBounds);
+    expect(find.text('1d'), findsOneWidget);
+    await tester.tap(title);
+    await tester.pump(const Duration(milliseconds: 70));
+    await tester.tap(title);
+    await tester.pump();
+    final rename = find.descendant(of: pane, matching: find.byType(TextField));
+    expect(rename, findsOneWidget);
+    await tester.enterText(rename, 'Revised project chat');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    expect((connection.peer as _Peer).calls.single.$1, LinkMethods.rename);
+    expect((connection.peer as _Peer).calls.single.$2, {
+      'session': 'project',
+      'title': 'Revised project chat',
+    });
+    expect(
+      title,
+      findsOneWidget,
+    ); // The host catalog, not a local optimistic rename.
+    final fileRail = find.byKey(const ValueKey('desktop-remote-files-toggle'));
+    expect(fileRail.hitTestable(), findsOneWidget);
+    final toggle = find.byKey(const ValueKey('host-toggle-sidebar'));
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(bot, findsNothing);
+    expect(find.text('Project chat'), findsOneWidget);
+    expect(chats.opens, ['project']);
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(bot.hitTestable(), findsOneWidget);
     expect(find.text('Pairing link'), findsNothing);
 
     await tester.tap(bot);
@@ -609,7 +658,10 @@ Future<void> _pumpPage(
     MaterialApp(
       locale: locale,
       supportedLocales: const [Locale('en'), Locale('zh')],
-      localizationsDelegates: GlobalMaterialLocalizations.delegates,
+      localizationsDelegates: const [
+        AppLocalizations.delegate,
+        ...GlobalMaterialLocalizations.delegates,
+      ],
       builder: (context, child) => MediaQuery(
         data: MediaQuery.of(context)
             .copyWith(textScaler: TextScaler.linear(scale)),
@@ -724,6 +776,21 @@ class _Connection extends ChangeNotifier implements DesktopHostConnection {
 }
 
 class _Peer extends Fake implements LinkPeer {
+  final calls = <(String, Map<String, Object?>)>[];
+  @override
+  Future<Object?> call(
+    String method, [
+    Map<String, Object?> params = const {},
+    Duration timeout = const Duration(seconds: 30),
+  ]) async {
+    calls.add((method, params));
+    return null;
+  }
+
+  @override
+  bool get isClosed => false;
+  @override
+  Stream<LinkEvent> get events => const Stream.empty();
   _Peer([this.remote = 'development-host-key']);
 
   @override
@@ -732,6 +799,10 @@ class _Peer extends Fake implements LinkPeer {
 
 class _Chat extends Fake implements DesktopHostChat {
   _Chat(this.id, this.title, this.kind);
+  @override
+  DateTime? get updatedAt => kind == 'project'
+      ? DateTime.now().subtract(const Duration(days: 1))
+      : null;
   @override
   String? get projectId => kind == 'project' ? r'C:\work\claude' : null;
 
@@ -755,6 +826,9 @@ class _Message extends Fake implements DesktopHostMessage {
 }
 
 class _Chats extends ChangeNotifier implements DesktopHostChats {
+  @override
+  Null get sessionControls => null;
+
   @override
   List<ProjectInfo> projects = const [
     ProjectInfo(id: r'C:\work\claude', name: 'Work', path: r'C:\work\claude'),

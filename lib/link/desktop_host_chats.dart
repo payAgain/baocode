@@ -5,8 +5,10 @@ import 'dart:convert';
 import 'package:bao_link/bao_link.dart';
 import 'package:flutter/foundation.dart';
 
-import '../chat/chat_models.dart' show UserMessageItem, imageReferencePattern;
+import '../chat/chat_models.dart';
 import 'chat_codec.dart';
+import 'desktop_host_project_history_feed.dart';
+import 'desktop_host_session_controls.dart';
 
 class DesktopHostChat {
   const DesktopHostChat({
@@ -14,12 +16,14 @@ class DesktopHostChat {
     required this.title,
     required this.kind,
     this.projectId,
+    this.updatedAt,
   });
 
   final String id;
   final String title;
   final String kind;
   final String? projectId;
+  final DateTime? updatedAt;
 
   (String, String) get _key => (kind, id);
 }
@@ -68,11 +72,16 @@ class DesktopHostChats extends ChangeNotifier {
   Map<String, String> _botNames = const {};
   DesktopHostChat? _selected;
   _HostView? _view;
+  final _controls = Expando<DesktopHostSessionControls>();
   _PendingSend? _sending;
   final Map<(String, String), String> _sendErrors = {};
 
   List<DesktopHostChat> get chats => _chats;
   DesktopHostChat? get selected => _selected;
+  DesktopHostSessionControls? get sessionControls => switch (_view) {
+    final view? when view.ready && !view.opening => _controls[view],
+    _ => null,
+  };
   List<DesktopHostMessage> get messages => _view?.messages ?? const [];
   bool get hasEarlier => _view?.hasEarlier ?? false;
   bool get busy =>
@@ -186,19 +195,34 @@ class DesktopHostChats extends ChangeNotifier {
     _projects = List.unmodifiable(state.projects);
     final projects = state.projects.map((project) => project.id).toSet();
     final entries = <(String, String), DesktopHostChat>{};
-    void add(String kind, String id, String title, {String? projectId}) {
+    void add(
+      String kind,
+      String id,
+      String title, {
+      String? projectId,
+      DateTime? updatedAt,
+    }) {
       if (id.isEmpty) return;
       entries[(kind, id)] = DesktopHostChat(
         id: id,
         title: title.isEmpty ? id : title,
         kind: kind,
         projectId: projectId,
+        updatedAt: updatedAt,
       );
     }
 
     for (final session in state.sessions) {
       if (projects.contains(session.project) && !botIds.contains(session.id)) {
-        add('project', session.id, session.title, projectId: session.project);
+        add(
+          'project',
+          session.id,
+          session.title,
+          projectId: session.project,
+          updatedAt: session.updatedAt.millisecondsSinceEpoch > 0
+              ? session.updatedAt
+              : null,
+        );
       }
     }
     for (final bot in state.bots) {
@@ -261,6 +285,7 @@ class DesktopHostChats extends ChangeNotifier {
   void _closeView() {
     final view = _view;
     _view = null;
+    _projectHistories[this] = null;
     if (view?.target == null || view!.peer.isClosed) return;
     unawaited(
       view.peer
@@ -279,6 +304,14 @@ class DesktopHostChats extends ChangeNotifier {
   ) async {
     _closeView();
     final view = _view = _HostView(peer, target, group: chat.kind == 'group');
+    if (chat.kind == 'project') {
+      _projectHistories[this] = view.history = DesktopHostProjectHistoryFeed(
+        earlier: () async {
+          if (identical(_view, view) && !busy) await earlier();
+        },
+        paging: () => view.paging,
+      );
+    }
     view.opening = target != null;
     notifyListeners();
     if (target == null || !identical(_view, view)) return;
@@ -498,8 +531,24 @@ class DesktopHostChats extends ChangeNotifier {
             start <= view.sessionItems.length &&
             start + tail.length == count) {
       view.sessionItems = [...view.sessionItems.take(start), ...tail];
+      view.history?.replaceTail(start, tail.map(_projectItem));
+      view.live = switch (update['live']) {
+        final bool live => live,
+        _ => switch (view.sessionItems.lastOrNull) {
+          {'t': 'live'} => true,
+          _ => false,
+        },
+      };
       view.hasEarlier = update['earlier'] == true;
       view.interaction = update['interaction'] != null;
+      final controls = _controls[view] ??= DesktopHostSessionControls(
+        peer: view.peer,
+        session: view.target!,
+        kind: _selected!.kind,
+        isCurrent: () => identical(_view, view) && view.ready && !view.opening,
+        onChanged: notifyListeners,
+      );
+      controls.apply(update);
       return true;
     }
     return false;
@@ -508,6 +557,9 @@ class DesktopHostChats extends ChangeNotifier {
   void _prepend(_HostView view, Map<String, Object?> data) {
     if (data['items'] case final List<Object?> items) {
       view.sessionItems = [...items, ...view.sessionItems];
+      if (view.history case final history?) {
+        history.prepend(items.map(_projectItem).toList());
+      }
       view.hasEarlier = data['earlier'] == true;
     }
   }
@@ -536,6 +588,31 @@ class DesktopHostChats extends ChangeNotifier {
     view.messages = List.unmodifiable(
       view.group ? _groupMessages(view) : _sessionMessages(view, chat),
     );
+    view.history?.publish(
+      live: view.live,
+      earlier: view.hasEarlier,
+      interaction: view.interaction,
+    );
+  }
+
+  static ChatItem? _projectItem(Object? raw) {
+    if (raw is! Map<String, Object?>) return null;
+    final data = {...raw};
+    if (data['text'] case final String text) {
+      final shown = text.replaceAll(_hiddenNotes, '');
+      if (data['t'] == 'user') {
+        final images = data['images'];
+        final attachment = images is List && images.isNotEmpty;
+        final words = shown.replaceAll(imageReferencePattern, '').trimRight();
+        if (words.trim().isEmpty && !attachment) return null;
+        data['text'] = attachment
+            ? [if (words.isNotEmpty) words, _attachment].join('\n')
+            : words;
+      } else {
+        data['text'] = shown;
+      }
+    }
+    return ChatCodec.decode(data, hostTranscript: true);
   }
 
   Iterable<DesktopHostMessage> _groupMessages(_HostView view) sync* {
@@ -644,6 +721,13 @@ class DesktopHostChats extends ChangeNotifier {
   }
 }
 
+final _projectHistories = Expando<DesktopHostProjectHistoryFeed>();
+
+extension DesktopHostProjectHistoryAccess on DesktopHostChats {
+  /// The history feed when this model has opened a project subscription.
+  DesktopHostProjectHistoryFeed? get projectHistory => _projectHistories[this];
+}
+
 class _HostView {
   _HostView(this.peer, this.target, {required this.group})
     : mirror = !group && peer.mirror == null ? LinkSessionMirror() : null,
@@ -659,6 +743,8 @@ class _HostView {
   bool paging = false;
   bool hasEarlier = false;
   bool interaction = false;
+  bool live = false;
+  DesktopHostProjectHistoryFeed? history;
   String? error;
   List<Object?> sessionItems = const [];
   final groupItems = SplayTreeMap<int, LinkGroupMessage>();

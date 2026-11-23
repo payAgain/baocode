@@ -14,6 +14,7 @@ import '../../theme/codicons.dart';
 import '../../theme/material_file_icons.dart';
 import '../../theme/workbench_theme.dart' show themeColors;
 import '../chat_find.dart' show ChatFindMarks;
+import '../host_transcript_scope.dart';
 import '../side_panel/file_link.dart' show FileLineRange, FileLink;
 import '../side_panel/file_open.dart' show FileOpenScope;
 import 'hover_builder.dart';
@@ -172,7 +173,9 @@ class CodeCitationScope extends InheritedWidget {
   final TextMateSyntax Function()? syntax;
 
   static CodeCitationScope? maybeOf(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<CodeCitationScope>();
+      HostTranscriptScope.of(context)
+      ? null
+      : context.dependOnInheritedWidgetOfExactType<CodeCitationScope>();
 
   @override
   bool updateShouldNotify(CodeCitationScope oldWidget) =>

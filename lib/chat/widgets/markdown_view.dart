@@ -12,6 +12,7 @@ import '../../workspace/editor_launcher.dart';
 import '../side_panel/file_link.dart';
 import '../side_panel/file_link_menu.dart';
 import '../composer/composer_embeds.dart' show FileImageChip;
+import '../host_transcript_scope.dart';
 import '../side_panel/file_open.dart';
 import 'code_citation.dart';
 import 'content_image.dart';
@@ -193,6 +194,7 @@ class _MarkdownViewState extends State<MarkdownView> {
   /// The message's image files, for a click on one to go through them:
   /// kept up to date for the segments built before the last came.
   final List<String> _gallery = [];
+  bool _textOnly = false;
 
   @override
   void didChangeDependencies() {
@@ -203,10 +205,11 @@ class _MarkdownViewState extends State<MarkdownView> {
 
   @override
   Widget build(BuildContext context) {
+    _textOnly = widget.textOnly || HostTranscriptScope.of(context);
     final from = (
       widget.data,
       widget.style,
-      widget.textOnly,
+      _textOnly,
       themeColors,
       WorkbenchThemeScope.restyles,
     );
@@ -218,7 +221,7 @@ class _MarkdownViewState extends State<MarkdownView> {
   Widget _build(BuildContext context) {
     final from = (
       widget.style,
-      widget.textOnly,
+      _textOnly,
       themeColors,
       WorkbenchThemeScope.restyles,
     );
@@ -255,7 +258,7 @@ class _MarkdownViewState extends State<MarkdownView> {
               ),
       );
     }
-    final files = widget.textOnly ? null : FileOpenScope.maybeOf(context);
+    final files = _textOnly ? null : FileOpenScope.maybeOf(context);
     if (files != null) {
       for (final segment in _segments) {
         for (final src in _imageSources(segment.nodes)) {
@@ -271,7 +274,7 @@ class _MarkdownViewState extends State<MarkdownView> {
       children: children,
     );
     // Code blocks otherwise pick up a local syntax worker from this scope.
-    return widget.textOnly ? CodeCitationScope(child: content) : content;
+    return _textOnly ? CodeCitationScope(child: content) : content;
   }
 
   /// Segments parsed lately, by their text, the latest last: a message
@@ -299,7 +302,7 @@ class _MarkdownViewState extends State<MarkdownView> {
     final _Segment(text: data, :nodes) = segment;
     final style = widget.style;
     final baseStyle = MarkdownView.baseStyle;
-    if (widget.textOnly) {
+    if (_textOnly) {
       return MarkdownBlocks(
         nodes: nodes,
         style: style ?? baseStyle,

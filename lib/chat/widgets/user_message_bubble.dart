@@ -9,6 +9,7 @@ import '../../theme/app_theme.dart';
 import '../chat_find.dart';
 import '../chat_models.dart';
 import '../composer/composer_embeds.dart';
+import '../host_transcript_scope.dart';
 import '../user_message_style.dart';
 import 'assistant_text.dart';
 import 'fade_curve.dart';
@@ -211,7 +212,7 @@ class _UserMessageBubbleState extends State<UserMessageBubble> {
   static const _fittedWidth = 0.85;
 
   Widget _buildBubble(BuildContext context, {required bool fitted}) {
-    final span = widget.textOnly
+    final span = widget.textOnly || HostTranscriptScope.of(context)
         ? inlineCodeSpan(widget.text, _messageStyle)
         : _messageSpan(
             widget.text,
@@ -298,7 +299,9 @@ class UserMessagePreview extends StatelessWidget {
               border: Border.all(color: AppColors.bubbleBorder()),
             ),
       child: InlineCodeText(
-        _messageSpan(text, ComposerVocabulary.of(context), images),
+        HostTranscriptScope.of(context)
+            ? inlineCodeSpan(text, _messageStyle)
+            : _messageSpan(text, ComposerVocabulary.of(context), images),
         maxLines: maxLines,
       ),
     );
@@ -362,7 +365,9 @@ class _UserMessageViewerState extends State<UserMessageViewer> {
   @override
   Widget build(BuildContext context) {
     final UserMessageViewer(:text, :images, :controller) = widget;
-    final vocabulary = ComposerVocabulary.of(context);
+    final span = HostTranscriptScope.of(context)
+        ? inlineCodeSpan(text, _messageStyle)
+        : _messageSpan(text, ComposerVocabulary.of(context), images);
     return Focus(
       focusNode: _focus,
       onKeyEvent: (node, event) {
@@ -399,11 +404,7 @@ class _UserMessageViewerState extends State<UserMessageViewer> {
                   controller: controller,
                   padding: const EdgeInsets.fromLTRB(12, 10, 12, 11),
                   // Its own selection: not the history's.
-                  child: SelectionArea(
-                    child: InlineCodeText(
-                      _messageSpan(text, vocabulary, images),
-                    ),
-                  ),
+                  child: SelectionArea(child: InlineCodeText(span)),
                 ),
               ),
             ),
