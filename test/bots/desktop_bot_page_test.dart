@@ -27,6 +27,7 @@ import 'package:baocode/kernel/claude_code/claude_code_transport.dart';
 import 'package:baocode/kernel/kernel_types.dart' show KernelHealthStatus;
 import 'package:baocode/link/chat_codec.dart';
 import 'package:baocode/link/workspace_bridge.dart';
+import 'package:baocode/usage/usage_ledger.dart';
 import 'package:baocode/workspace/workspace.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -555,8 +556,7 @@ void main() {
     unawaited(subscription.cancel());
     await closePhone();
     fixture.dispose();
-    // Deliver the usage ledger's debounced turn notification in fake time.
-    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump();
   });
 
   testWidgets(
@@ -886,6 +886,7 @@ class _Fixture {
     Bot mainBot = _main,
     bool failFirstLaunch = false,
   }) {
+    UsageLedger.current = _usage;
     late final KernelDescriptor descriptor;
     descriptor = KernelDescriptor(
       id: 'claude-code',
@@ -925,6 +926,8 @@ class _Fixture {
 
   late final Workspace workspace;
   late final Bots bots;
+  final _previousUsage = UsageLedger.current;
+  final _usage = UsageLedger(MemoryUsageStorage());
   final cli = <String?, FakeCli>{};
   final launches = <ClaudeLaunch>[];
   final opened = <String>[];
@@ -987,6 +990,8 @@ class _Fixture {
     _disposed = true;
     bots.dispose();
     workspace.dispose();
+    _usage.dispose();
+    UsageLedger.current = _previousUsage;
   }
 }
 
