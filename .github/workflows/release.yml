@@ -59,6 +59,8 @@ env:
 jobs:
   check:
     name: Check the version
+    # Full-version tags on the personal fork are published with signed assets separately.
+    if: github.repository != 'payAgain/baocode' || !contains(github.ref_name, '+')
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}

@@ -24,6 +24,7 @@ import '../customize/customizations.dart';
 import '../ide/file_service.dart';
 import '../kernel/agent_kernel.dart' show KernelChoiceKind;
 import '../kernel/kernel_types.dart';
+import '../platform/native_path.dart';
 import '../remote/project_host.dart';
 import '../remote/ssh_host.dart';
 import '../workspace/session_tools.dart';
@@ -202,6 +203,15 @@ class WorkspaceBridge {
   static String idOf(AgentThread thread) =>
       _ids[thread] ??= thread.id ?? 'new-$_run-${_nextId++}';
 
+  /// [thread]'s session's own id, when the phones know it by another
+  /// ([idOf]: given before it had a session, and kept for the run). That
+  /// is what the agents' tools call it ([SessionTools.idOf]), and so what
+  /// a bot writes in a card of its chat: the phone takes either.
+  static String? _aliasOf(AgentThread thread) => switch (thread.id) {
+    final id? when id != idOf(thread) => id,
+    _ => null,
+  };
+
   /// A conversation's id ([SessionTools.idOf]: its session's, kept across
   /// runs) as the phones know it ([idOf]): a new agent's, given here, until
   /// the run ends.
@@ -305,6 +315,7 @@ class WorkspaceBridge {
         for (final thread in threads.take(maxSessions))
           SessionSummary(
             id: idOf(thread),
+            alias: _aliasOf(thread),
             project: thread.project.path,
             title: thread.localizedTitle(l10n),
             updatedAt: thread.updatedAt,
@@ -1201,6 +1212,7 @@ class WorkspaceBridge {
   /// user's own, and opens what they would here. Null for one not full.
   String? _anywhere(Project project, String path) {
     final paths = _filesOf(project).paths;
+    path = nativePath(path, paths);
     return paths.isAbsolute(path) ? paths.normalize(path) : null;
   }
 
@@ -1452,11 +1464,14 @@ class WorkspaceBridge {
     if (named.isNotEmpty || guarded) throw _staleChange;
 
     // Older phones could send an absolute or session-relative spelling.
-    final full = session.paths.isAbsolute(path) || session.root == null
-        ? path
-        : session.paths.join(session.root!, path);
+    final native = nativePath(path, session.paths);
+    final full = session.paths.normalize(
+      session.paths.isAbsolute(native) || session.root == null
+          ? native
+          : session.paths.join(session.root!, native),
+    );
     return session.fileChanges
-            .where((change) => change.path == full)
+            .where((change) => session.paths.normalize(change.path) == full)
             .firstOrNull ??
         (throw _staleChange);
   }
