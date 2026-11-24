@@ -2,18 +2,18 @@ import 'dart:async';
 
 import 'package:bao_link/bao_link.dart';
 import 'package:baocode/link/computer_group.dart';
-import 'package:baocode/link/computer_group_dialog.dart';
+import 'package:baocode/link/computer_group_sidebar.dart';
 import 'package:baocode/link/link_host.dart';
 import 'package:baocode/l10n/l10n.dart';
 import 'package:baocode/settings/app_locale.dart';
 import 'package:baocode/settings/app_settings.dart';
-import 'package:baocode/settings/pages/mobile_page.dart';
 import 'package:baocode/workbench.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'desktop_mutual_pairing_test.dart' show Machine, machines;
+import 'my_computers_test.dart' show tapMember;
 
 void main() {
   testWidgets(
@@ -97,10 +97,15 @@ void main() {
     expect(node.connections, hasLength(connectionsBeforeOpening));
     expect(
       tester
-          .widget<FilledButton>(
-            find.byKey(ValueKey(('open-computer', member.host.id))),
+          .widget<InkWell>(
+            find
+                .descendant(
+                  of: find.byKey(ValueKey(('open-computer', member.host.id))),
+                  matching: find.byType(InkWell),
+                )
+                .first,
           )
-          .onPressed,
+          .onTap,
       isNull,
     );
 
@@ -344,43 +349,45 @@ void main() {
         home: Scaffold(
           body: Row(
             children: [
-              Expanded(
-                child: Workbench(
-                  workspace: a.workspace,
-                  settings: AppSettings(locale: locale, link: a.host),
-                  createDesktopHostConnection: () {
-                    a.workbenchOwnsClient = true;
-                    return a.client;
-                  },
+              for (final machine in [a, b])
+                Expanded(
+                  child: Workbench(
+                    workspace: machine.workspace,
+                    settings: AppSettings(locale: locale, link: machine.host),
+                    createDesktopHostConnection: () {
+                      machine.workbenchOwnsClient = true;
+                      return machine.client;
+                    },
+                  ),
                 ),
-              ),
-              Expanded(child: MobileSettingsPage(host: b.host)),
             ],
           ),
         ),
       ),
     );
     Future<void> tap(String text) async {
-      await tester.tap(find.text(text).hitTestable());
+      final button = find.text(text);
+      if (button.evaluate().length == 1) await tester.ensureVisible(button);
+      await tester.tap(button.hitTestable());
       await tester.pumpAndSettle();
     }
 
-    Future<void> entry(Type pane) async {
-      await tester.tap(
-        find
-            .descendant(
-              of: find.byType(pane),
-              matching: find.text('My computers'),
-            )
-            .hitTestable(),
-      );
+    Future<void> workbench(Machine machine) async {
+      final entry = find
+          .descendant(
+            of: find.byWidgetPredicate(
+              (w) => w is Workbench && w.workspace == machine.workspace,
+            ),
+            matching: find.text('My computers'),
+          )
+          .hitTestable();
+      await tester.tap(entry);
       await tester.pumpAndSettle();
     }
 
-    Future<void> settings() => entry(MobileSettingsPage);
-    Future<void> workbench() => entry(Workbench);
-
-    await settings();
+    // A Settings entry is covered in my_computers_test. Keep the two sides
+    // visible here so the production applicant and approval UIs share a test.
+    await workbench(b);
     await tap('Create group');
     expect(find.textContaining('answer approvals'), findsWidgets);
     expect(b.host.computerGroup, isNull);
@@ -389,8 +396,7 @@ void main() {
     await tap('Copy invite');
     expect(clipboard, startsWith('baocode-group://join/'));
     final invite = clipboard!;
-    await tap('Close');
-    await workbench();
+    await workbench(a);
     await tap('Use invite');
     await tester.enterText(
       find.byKey(const ValueKey('computer-group-invite')),
@@ -403,22 +409,29 @@ void main() {
     expect(b.host.pendingGroupApproval, isNull);
     await tap('Join and share workspace');
     expect(b.host.pendingGroupApproval, isNotNull);
-    await tap('Close and keep waiting');
-    await settings();
+    expect(find.text('Waiting for ${b.name} to approve'), findsOneWidget);
     expect(find.textContaining('answer approvals'), findsWidgets);
     await tap('Approve group member');
     expect(
       a.host.computerGroup?.active.keys,
       unorderedEquals([a.host.id, b.host.id]),
     );
-    await tap('Close');
-    await workbench();
-    await tap('Open workspace');
+    await tapMember(tester, b);
     final peer = a.client.peer!;
     expect(peer.remote, b.host.id);
     expect(await peer.call(LinkMethods.state), isA<Map>());
-    await settings();
-    await tester.tap(find.byKey(ValueKey(('computer-menu', a.host.id))));
+    final sponsorRoster = find
+        .ancestor(
+          of: find.text('Invite computer'),
+          matching: find.byType(ComputerGroupSidebar),
+        )
+        .last;
+    await tester.tap(
+      find.descendant(
+        of: sponsorRoster,
+        matching: find.byKey(ValueKey(('computer-menu', a.host.id))),
+      ),
+    );
     await tester.pumpAndSettle();
     await tap('Remove ${a.name}');
     expect(peer.isClosed, isFalse);
@@ -566,25 +579,28 @@ Future<void> pumpRoster(
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
       home: Scaffold(
-        body: Builder(
-          builder: (context) => TextButton(
-            onPressed: () => showMyComputers(
-              context,
+        body: SingleChildScrollView(
+          child: SizedBox(
+            width: 280,
+            child: ComputerGroupSidebar(
               host: viewer.host,
               connection: viewer.client,
+              expanded: true,
+              onToggle: () {},
+              onLocal: () {},
+              onSelect: viewer.client.selectGroupMember,
+              onConnectionInfo: (_) {},
             ),
-            child: const Text('Show roster'),
           ),
         ),
       ),
     ),
   );
-  await tester.tap(find.text('Show roster'));
   await tester.pumpAndSettle();
 }
 
 Finder memberStatus(Machine member, String status) => find.descendant(
-  of: find.ancestor(of: find.text(member.name), matching: find.byType(Row)),
+  of: find.byKey(ValueKey(('open-computer', member.host.id))),
   matching: find.text(status),
 );
 

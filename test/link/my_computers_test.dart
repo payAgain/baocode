@@ -28,13 +28,13 @@ void main() {
       await tap(tester, 'My computers');
       expect(find.text(a.host.fingerprint), findsNothing);
       expect(find.text('Remove ${a.name}'), findsNothing);
-      expect(find.text('Open workspace').hitTestable(), findsOneWidget);
+      expect(memberRow(a).hitTestable(), findsOneWidget);
       await tester.tap(find.byKey(ValueKey(('computer-menu', a.host.id))));
       await tester.pumpAndSettle();
       await tap(tester, 'Device details');
       expect(find.text(a.host.fingerprint), findsOneWidget);
       await tap(tester, 'Close');
-      expect(find.text('Open workspace').hitTestable(), findsOneWidget);
+      expect(memberRow(a).hitTestable(), findsOneWidget);
       expect(b.host.computerGroup!.active.containsKey(a.host.id), isTrue);
       await tester.pumpWidget(const SizedBox.shrink());
       await a.host.pauseGroupConnections();
@@ -74,6 +74,16 @@ void main() {
     final (a, _) = await machines();
     await pumpWorkbench(tester, a);
     await tap(tester, 'My computers');
+    final page = find.byType(DesktopHostPage);
+    expect(page, findsOneWidget);
+    expect(
+      find
+          .descendant(of: page, matching: find.text('Create group'))
+          .hitTestable(),
+      findsOneWidget,
+    );
+    expect(find.byType(Dialog), findsNothing);
+    expect(a.client.selectedHostId, isNull);
     expect(find.text('Create group'), findsOneWidget);
     expect(find.text('Use invite'), findsOneWidget);
     expect(a.host.computerGroup, isNull);
@@ -104,7 +114,7 @@ void main() {
     await tester.pumpAndSettle();
     await tap(tester, 'Mobile');
     await tap(tester, 'My computers');
-    final remote = find.byKey(ValueKey(('open-computer', a.host.id)));
+    final remote = memberRow(a);
     expect(remote.hitTestable(), findsOneWidget);
     expect(find.text('Recently reachable'), findsOneWidget);
     expect(find.text('Use invite'), findsNothing);
@@ -113,13 +123,19 @@ void main() {
     expect(find.byType(SettingsDialog), findsNothing);
     expect(find.byType(DesktopHostPage), findsOneWidget);
     expect(b.client.peer?.remote, a.host.id);
-    expect(find.byTooltip('Computers'), findsNothing);
+    expect(find.byType(Dialog), findsNothing);
+    expect(find.text('Workspace connected'), findsOneWidget);
+    await tester.tap(find.byKey(ValueKey(('computer-menu', a.host.id))));
+    await tester.pumpAndSettle();
+    await tap(tester, 'Connection info');
+    expect(find.byType(AlertDialog), findsOneWidget);
+    await tap(tester, 'Close');
 
-    await tap(tester, 'Switch to local');
+    await leaveComputers(tester);
     expect(find.byType(DesktopHostPage), findsNothing);
     await tap(tester, 'My computers');
     expect(find.text('Workspace connected'), findsOneWidget);
-    await tap(tester, 'Close');
+    await leaveComputers(tester);
     await tester.pumpWidget(const SizedBox.shrink());
     await a.host.pauseGroupConnections();
     await b.host.pauseGroupConnections();
@@ -177,7 +193,7 @@ void main() {
     expect(sponsor.host.pendingGroupApproval, isNull);
     expect(joiner.host.computerGroup, isNull);
     await tap(tester, 'Cancel join');
-    await tap(tester, 'Close');
+    await leaveComputers(tester);
     expect(joiner.adverts.hasListener, isFalse);
     await tester.pumpWidget(const SizedBox.shrink());
     await sponsor.host.pauseGroupConnections();
@@ -193,18 +209,57 @@ void main() {
     await pumpWorkbench(tester, b);
     await tap(tester, 'My computers');
     expect(find.text('Currently unreachable'), findsOneWidget);
-    await tap(tester, 'Open workspace');
+    await tapMember(tester, a);
     expect(b.client.peer, isNull);
-    await tap(tester, 'Switch to local');
+    await leaveComputers(tester);
     await tap(tester, 'My computers');
     expect(find.text('Currently unreachable'), findsOneWidget);
     expect(find.text('Online status unknown'), findsNothing);
+    a.network.unreachable.remove(a.host.id);
+    await tester.tap(find.byKey(ValueKey(('computer-menu', a.host.id))));
+    await tester.pumpAndSettle();
+    await tap(tester, 'Reconnect');
+    expect(b.client.peer?.remote, a.host.id);
+    expect(find.text('Workspace connected'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
     await b.host.pauseGroupConnections();
     await a.host.pauseGroupConnections();
   }, variant: desktop);
 
-  testWidgets('closing the sponsor dialog ends its nearby invite window', (
+  testWidgets('sidebar settings suspend only group access and can resume it', (
+    tester,
+  ) async {
+    final (owner, viewer) = await machines();
+    await owner.host.createComputerGroup();
+    await admit(owner, viewer);
+    await pumpWorkbench(tester, viewer);
+    await tap(tester, 'My computers');
+    await tapMember(tester, owner);
+    final peer = viewer.client.peer!;
+    Future<void> settings() async {
+      await tester.tap(find.byTooltip('Connection settings'));
+      await tester.pumpAndSettle();
+    }
+
+    await settings();
+    await tap(tester, 'Workspace permissions');
+    expect(find.textContaining('answer approvals'), findsOneWidget);
+    await tap(tester, 'Close');
+    await settings();
+    await tap(tester, 'Pause group connections on this computer');
+    expect(peer.isClosed, isTrue);
+    expect(viewer.host.enabled, isTrue);
+    expect(viewer.host.computerGroup!.active.keys, contains(owner.host.id));
+    expect(find.byType(DesktopHostPage), findsOneWidget);
+    await tap(tester, 'Resume connections');
+    await tapMember(tester, owner);
+    expect(viewer.client.peer?.remote, owner.host.id);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await viewer.host.pauseGroupConnections();
+    await owner.host.pauseGroupConnections();
+  }, variant: desktop);
+
+  testWidgets('collapsing the roster ends its nearby invite window', (
     tester,
   ) async {
     final (sponsor, _) = await machines();
@@ -215,7 +270,8 @@ void main() {
     expect(sponsor.host.invitingNearbyGroupMembers, isFalse);
     await tap(tester, 'Invite nearby');
     expect(sponsor.host.invitingNearbyGroupMembers, isTrue);
-    await tap(tester, 'Close');
+    await tester.tap(find.byKey(const ValueKey('computer-group-toggle')));
+    await tester.pumpAndSettle();
     expect(sponsor.host.invitingNearbyGroupMembers, isFalse);
     await tester.pumpWidget(const SizedBox.shrink());
     await sponsor.host.pauseGroupConnections();
@@ -238,30 +294,60 @@ Future<void> pumpWorkbench(
   WidgetTester tester,
   Machine machine, {
   SettingsFiles? files,
+  Size size = const Size(1440, 960),
+  Locale? locale,
+  ThemeData? theme,
+  Key? surface,
 }) async {
-  tester.view.physicalSize = const Size(1440, 960);
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
-  final locale = AppLocale();
-  addTearDown(locale.dispose);
-  await tester.pumpWidget(
-    MaterialApp(
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: AppLocalizations.supportedLocales,
-      home: Workbench(
-        workspace: machine.workspace,
-        settings: AppSettings(locale: locale, link: machine.host, files: files),
-        createDesktopHostConnection: () {
-          machine.workbenchOwnsClient = true;
-          return machine.client;
-        },
+  final appLocale = AppLocale();
+  addTearDown(appLocale.dispose);
+  final app = MaterialApp(
+    debugShowCheckedModeBanner: false,
+    locale: locale,
+    theme: theme,
+    localizationsDelegates: AppLocalizations.localizationsDelegates,
+    supportedLocales: AppLocalizations.supportedLocales,
+    home: Workbench(
+      key: ValueKey(machine.host.id),
+      workspace: machine.workspace,
+      settings: AppSettings(
+        locale: appLocale,
+        link: machine.host,
+        files: files,
       ),
+      createDesktopHostConnection: () {
+        machine.workbenchOwnsClient = true;
+        return machine.client;
+      },
     ),
+  );
+  await tester.pumpWidget(
+    surface == null ? app : RepaintBoundary(key: surface, child: app),
   );
   await tester.pumpAndSettle();
 }
 
 Future<void> tap(WidgetTester tester, String label) async {
   await tester.tap(find.text(label).hitTestable());
+  await tester.pumpAndSettle();
+}
+
+Finder memberRow(Machine machine) =>
+    find.byKey(ValueKey(('open-computer', machine.host.id)));
+
+Future<void> tapMember(WidgetTester tester, Machine machine) async {
+  final entry = memberRow(machine);
+  await tester.ensureVisible(entry);
+  await tester.tap(entry.hitTestable());
+  await tester.pumpAndSettle();
+}
+
+Future<void> leaveComputers(WidgetTester tester) async {
+  final row = find.byKey(const ValueKey('local-computer'));
+  await tester.ensureVisible(row);
+  await tester.tap(row.hitTestable());
   await tester.pumpAndSettle();
 }

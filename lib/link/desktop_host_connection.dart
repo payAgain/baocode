@@ -233,6 +233,12 @@ class DesktopHostConnection extends ChangeNotifier {
         when localHost?.permitsGroupWorkspace(id) != true) {
       _dial = null;
       _busy = false;
+      final group = localHost?.computerGroup;
+      if (group != null &&
+          (!group.active.containsKey(id) ||
+              !group.active.containsKey(localHost!.id))) {
+        _member = _error = null;
+      }
       final old = _peer;
       _peer = null;
       unawaited(old?.close());

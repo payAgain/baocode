@@ -420,10 +420,7 @@ void main() {
         _Chat('bot', 'Helper bot', 'bot'),
       ];
     var back = 0;
-    final switcher = find.ancestor(
-      of: find.text('Switch to local'),
-      matching: find.byWidgetPredicate((widget) => widget is FilledButton),
-    );
+    final switcher = find.byKey(const ValueKey('local-computer'));
     await _pumpPage(tester, connection, chats: chats, onBack: () => back++);
     expect(chats.opens, isEmpty);
     final switcherBounds = tester.getRect(switcher);
@@ -531,7 +528,12 @@ void main() {
     expect(find.text('Helper bot'), findsOneWidget);
     await tester.tap(find.text('Helper bot'));
     await tester.pump();
-    await tester.tap(find.text('Switch to local'));
+    final local = find.byKey(const ValueKey('local-computer'));
+    if (local.evaluate().isEmpty) {
+      await tester.tap(find.byTooltip('My computers'));
+      await tester.pump();
+    }
+    await tester.tap(local);
     await tester.pump();
     expect(chats.closes, 2);
     expect(back, 1);
@@ -550,7 +552,9 @@ void main() {
         _Chat('bot', 'Helper bot', 'bot'),
       ];
     await _pumpPage(tester, connection, chats: chats, scale: 2);
-    await tester.tap(find.text('Project chat'));
+    final projectChat = find.text('Project chat');
+    await tester.scrollUntilVisible(projectChat, 80);
+    await tester.tap(projectChat.hitTestable());
     await tester.pump();
     await _enterDraft(tester, 'Unsent');
     final composer = _editor(tester);
@@ -559,7 +563,7 @@ void main() {
     await tester.pump();
     expect(find.text('Helper bot'), findsNothing);
     expect(find.byTooltip('Back to host chats').hitTestable(), findsOneWidget);
-    expect(find.text('Switch to local').hitTestable(), findsOneWidget);
+    expect(find.byTooltip('My computers').hitTestable(), findsOneWidget);
     expect(_editor(tester).controller.text, 'Unsent');
     expect(_editor(tester), same(composer));
     expect(chats.opens, ['project']);
@@ -693,7 +697,12 @@ void main() {
     await tester.tap(find.text('Project chat'));
     await tester.pump();
     await _enterDraft(tester, 'Draft kept in memory');
-    await tester.tap(find.text('Switch to local'));
+    final local = find.byKey(const ValueKey('local-computer'));
+    if (local.evaluate().isEmpty) {
+      await tester.tap(find.byTooltip('My computers'));
+      await tester.pump();
+    }
+    await tester.tap(local);
     await tester.pump();
     expect(chats.selected, isNull);
     expect(back, 1);

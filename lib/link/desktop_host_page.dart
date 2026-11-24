@@ -27,6 +27,7 @@ import '../settings/user_settings.dart' show GlobalStorage;
 import '../theme/app_theme.dart' show AppColors;
 import '../chat/widgets/markdown_view.dart';
 import '../chat/widgets/user_message_bubble.dart';
+import 'computer_group_sidebar.dart';
 import 'desktop_host_chats.dart';
 import 'desktop_host_composer.dart';
 import 'desktop_host_connection.dart';
@@ -84,7 +85,9 @@ class DesktopHostPage extends StatefulWidget {
     required this.onBack,
     this.lastChatStore,
     this.localHost,
-    this.onMyComputers,
+    this.onSelectComputer,
+    this.computerNavigation = 0,
+    this.reviewVisible = true,
   });
 
   final DesktopHostConnection connection;
@@ -92,7 +95,9 @@ class DesktopHostPage extends StatefulWidget {
   final VoidCallback onBack;
   final DesktopHostLastChatStore? lastChatStore;
   final LinkHost? localHost;
-  final VoidCallback? onMyComputers;
+  final ValueChanged<String>? onSelectComputer;
+  final int computerNavigation;
+  final bool reviewVisible;
 
   @override
   State<DesktopHostPage> createState() => _DesktopHostPageState();
@@ -105,6 +110,8 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
 
   bool _working = false;
   bool _sidebarHidden = false;
+  bool _rosterExpanded = true;
+  bool _compactCatalog = false;
   ({LinkPeer peer, DesktopHostChatKey? editor})? _peopleDock;
   bool _leaving = false;
   Object? _chatRequest;
@@ -207,6 +214,24 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   }
 
   @override
+  void didUpdateWidget(DesktopHostPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.computerNavigation != widget.computerNavigation) {
+      _sidebarHidden = false;
+      _rosterExpanded = true;
+      _compactCatalog = true;
+    }
+  }
+
+  void _toggleCatalog(bool wide) => setState(() {
+    if (wide) {
+      _sidebarHidden = !_sidebarHidden;
+    } else {
+      _compactCatalog = !_compactCatalog;
+    }
+  });
+
+  @override
   void dispose() {
     final chats = _chats;
     final selected = chats.selected;
@@ -279,6 +304,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   }
 
   Future<void> _openChat(DesktopHostChat chat, {bool remember = true}) async {
+    if (remember && _compactCatalog) setState(() => _compactCatalog = false);
     final selected = _chats.selected;
     if (selected?.kind == chat.kind && selected?.id == chat.id) return;
     final host = _connection.peer?.remote;
@@ -311,6 +337,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
       (chats) => chats.createInProject(folder.id, label),
     );
     if (!mounted || !opened || !identical(_connection.peer, peer)) return;
+    if (_compactCatalog) setState(() => _compactCatalog = false);
     final current = _chats.selected;
     if (current != null &&
         current.kind == 'project' &&
@@ -481,6 +508,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
 
   void _closeChat() {
     setState(() {
+      _compactCatalog = false;
       _chatRequest = null;
       _localChatError = null;
     });
@@ -530,15 +558,31 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
               final error = _localError ?? (_stored ? _connection.error : null);
               final host = _online ? _connection.peer?.remote : null;
               final selected = host == null ? null : _chats.selected;
-              final wide = host != null && constraints.maxWidth >= 880;
+              final wide = constraints.maxWidth >= 880;
               final showSidebar = wide && (!_sidebarHidden || selected == null);
-              final catalog = _catalog(
-                text,
-                error,
-                showChatStatus: selected == null,
-              );
+              final showCompactCatalog =
+                  !wide && (selected == null || _compactCatalog);
+              final catalog = showSidebar || showCompactCatalog
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      child: _catalog(
+                        text,
+                        error,
+                        showChatStatus: selected == null,
+                        compact: !wide,
+                      ),
+                    )
+                  : null;
               final conversation = host == null || selected == null
-                  ? Center(child: _Notice(text.chooseChat))
+                  ? Center(
+                      child: _Notice(
+                        host != null
+                            ? text.chooseChat
+                            : _stored
+                            ? text.groupDisconnected
+                            : text.chooseComputer,
+                      ),
+                    )
                   : selected.kind == 'project'
                   ? DesktopRemoteRail(
                       peer: _connection.peer!,
@@ -562,90 +606,37 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                       ),
                     )
                   : _conversation(text, host, selected, error, wide: wide);
-              final switcher = Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                child: Wrap(
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 16,
-                  runSpacing: 4,
+              return _withPeopleDock(
+                width: constraints.maxWidth,
+                wide: wide,
+                peer: host == null ? null : _connection.peer,
+                child: Row(
                   children: [
-                    FilledButton.icon(
-                      onPressed: _back,
-                      icon: const Icon(Icons.arrow_back),
-                      label: Text(
-                        text.switchToLocal,
-                        textAlign: TextAlign.center,
-                      ),
-                    ),
-                    if (!wide || !_stored)
-                      Semantics(
-                        header: true,
-                        child: Text(
-                          text.title,
-                          style: SettingsText.title,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                    if (widget.onMyComputers case final manage?)
-                      if (wide)
-                        IconButton(
-                          onPressed: manage,
-                          tooltip: context.l10n.myComputers,
-                          icon: const Icon(Icons.devices, size: 17),
-                        )
-                      else
-                        TextButton.icon(
-                          onPressed: manage,
-                          icon: const Icon(Icons.devices, size: 17),
-                          label: Text(context.l10n.myComputers),
-                        ),
-                  ],
-                ),
-              );
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (!wide) switcher,
-                  if (!wide) const Divider(height: 1),
-                  Expanded(
-                    child: _withPeopleDock(
-                      width: constraints.maxWidth,
-                      wide: wide,
-                      peer: host == null ? null : _connection.peer,
-                      child: Row(
+                    if (showSidebar) ...[
+                      SizedBox(width: 280, child: catalog),
+                      const VerticalDivider(width: 1),
+                    ],
+                    Expanded(
+                      key: const ValueKey('host-content'),
+                      child: Stack(
+                        fit: StackFit.expand,
                         children: [
-                          if (showSidebar) ...[
-                            SizedBox(
-                              width: 280,
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                ),
-                                child: Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.stretch,
-                                  children: [
-                                    switcher,
-                                    Expanded(child: catalog),
-                                  ],
-                                ),
+                          Offstage(
+                            offstage: showCompactCatalog,
+                            child: ExcludeFocus(
+                              excluding: showCompactCatalog,
+                              child: _contentPane(
+                                conversation,
+                                session: selected != null,
                               ),
                             ),
-                            const VerticalDivider(width: 1),
-                          ],
-                          Expanded(
-                            key: const ValueKey('host-content'),
-                            child: _contentPane(
-                              wide || selected != null ? conversation : catalog,
-                              session: selected != null,
-                            ),
                           ),
+                          if (showCompactCatalog) catalog!,
                         ],
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               );
             },
           ),
@@ -685,6 +676,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     _HostText text,
     String? error, {
     required bool showChatStatus,
+    required bool compact,
   }) {
     final chatError = _localChatError ?? _chats.error;
     final groups = <String, List<DesktopHostChat>>{
@@ -708,18 +700,52 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     return CustomScrollView(
       key: const ValueKey('host-catalog'),
       slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.only(top: 4),
+          sliver: SliverToBoxAdapter(
+            child: ComputerGroupSidebar(
+              key: ObjectKey(widget.localHost),
+              host: widget.localHost,
+              connection: _connection,
+              expanded: _rosterExpanded,
+              onToggle: () =>
+                  setState(() => _rosterExpanded = !_rosterExpanded),
+              onLocal: _back,
+              onSelect: (id) {
+                if (widget.onSelectComputer case final select?) {
+                  select(id);
+                } else {
+                  unawaited(_connection.selectGroupMember(id));
+                }
+              },
+              onConnectionInfo: (id) {
+                if (_connection.peer?.remote == id) _showConnectionInfo(text);
+              },
+              reviewVisible:
+                  widget.reviewVisible &&
+                  !(compact &&
+                      identical(_peopleDock?.peer, _connection.peer) &&
+                      _peopleDock != null),
+            ),
+          ),
+        ),
         SliverToBoxAdapter(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const SizedBox(height: 16),
+              if (compact && _compactCatalog && _chats.selected != null)
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: TextButton.icon(
+                    onPressed: () => _toggleCatalog(false),
+                    icon: const Icon(Icons.arrow_forward, size: 16),
+                    label: Text(text.returnToChat),
+                  ),
+                ),
               if (_busy) _Progress(text.working),
               if (showChatStatus && error != null)
                 _Notice(error, isError: true),
-              if (_stored)
-                _host(text)
-              else
-                _Notice(context.l10n.myComputersUnavailable),
+              if (_stored && widget.localHost == null) _host(text),
               if (_connection.peer case final peer?
                   when _online && !peer.isClosed)
                 Align(
@@ -1097,30 +1123,13 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                         editor: (kind: chat.kind, id: chat.id),
                       ),
               ),
-            if (wide) ...[
-              if (_sidebarHidden) ...[
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  tooltip: text.switchToLocal,
-                  icon: const Icon(Codicons.deviceDesktop, size: 16),
-                  onPressed: _back,
-                ),
-                if (widget.onMyComputers case final manage?)
-                  IconButton(
-                    onPressed: manage,
-                    tooltip: context.l10n.myComputers,
-                    icon: const Icon(Icons.devices, size: 17),
-                  ),
-              ],
-              IconButton(
-                key: const ValueKey('host-toggle-sidebar'),
-                visualDensity: VisualDensity.compact,
-                tooltip: text.sidebar,
-                icon: const Icon(Codicons.layoutSidebarLeft, size: 16),
-                onPressed: () =>
-                    setState(() => _sidebarHidden = !_sidebarHidden),
-              ),
-            ],
+            IconButton(
+              key: const ValueKey('host-toggle-sidebar'),
+              visualDensity: VisualDensity.compact,
+              tooltip: wide ? text.sidebar : context.l10n.myComputers,
+              icon: const Icon(Codicons.layoutSidebarLeft, size: 16),
+              onPressed: () => _toggleCatalog(wide),
+            ),
             IconButton(
               visualDensity: VisualDensity.compact,
               tooltip: wide ? text.closeChat : text.backToChats,
@@ -1617,8 +1626,6 @@ class _HostText {
     : _zh = Localizations.localeOf(context).languageCode == 'zh';
 
   final bool _zh;
-  String get title => _zh ? '远程工作区' : 'Remote workspace';
-  String get switchToLocal => _zh ? '切回本地' : 'Switch to local';
   String get managePeople =>
       _zh ? '管理机器人、群聊和资料' : 'Manage bots, groups & profile';
   String get botSettings => _zh ? '机器人设置' : 'Bot settings';
@@ -1670,6 +1677,9 @@ class _HostText {
   String get sidebar => _zh ? '显示或隐藏侧栏' : 'Toggle sidebar';
   String get backToChats => _zh ? '返回主机会话列表' : 'Back to host chats';
   String get closeChat => _zh ? '关闭会话' : 'Close chat';
+  String get returnToChat => _zh ? '返回当前会话' : 'Return to current conversation';
+  String get chooseComputer =>
+      _zh ? '请从侧栏选择一台电脑。' : 'Select a computer from the sidebar.';
   String get chooseChat => _zh ? '请选择主机会话。' : 'Select a host conversation.';
   String get emptyChat => _zh ? '还没有消息。' : 'No messages yet.';
   String get earlier => _zh ? '加载更早的消息' : 'Load earlier messages';

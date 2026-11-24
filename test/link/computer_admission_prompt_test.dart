@@ -12,7 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'desktop_mutual_pairing_test.dart' show Machine, machines;
-import 'my_computers_test.dart' show pumpWorkbench, tap;
+import 'my_computers_test.dart' show leaveComputers, pumpWorkbench, tap;
 
 void main() {
   final desktop = TargetPlatformVariant({
@@ -118,6 +118,7 @@ void main() {
       await _openSettings(tester);
       await tap(tester, 'Mobile');
       await tap(tester, 'My computers');
+      expect(find.byType(SettingsDialog), findsNothing);
 
       final preview = await _prepare(sponsor, joiner);
       final result = _confirm(joiner.host, preview);
@@ -126,8 +127,8 @@ void main() {
       expect(find.text(preview.code), findsOneWidget);
       expect(find.text('Later'), findsNothing);
 
-      await tap(tester, 'Close');
-      expect(find.byType(SettingsDialog), findsOneWidget);
+      await leaveComputers(tester);
+      expect(find.byType(SettingsDialog), findsNothing);
       expect(panel, findsNothing);
       expect(sponsor.host.pendingGroupApproval, isNotNull);
       expect(sponsor.host.permitsGroupWorkspace(joiner.host.id), isFalse);
@@ -139,9 +140,9 @@ void main() {
       expect(sponsor.host.pendingGroupApproval, isNull);
       expect(joiner.host.computerGroup, isNull);
       expect(panel, findsNothing);
-      expect(find.text('Trusted computers · 1'), findsOneWidget);
-      await tap(tester, 'Close');
-      expect(find.byType(SettingsDialog), findsOneWidget);
+      expect(find.text('This computer'), findsOneWidget);
+      await leaveComputers(tester);
+      expect(find.byType(SettingsDialog), findsNothing);
     }),
     variant: desktop,
   );

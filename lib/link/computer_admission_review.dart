@@ -20,9 +20,11 @@ class ComputerGroupAdmissionReview extends StatelessWidget {
     required this.onPrimary,
     required this.secondaryLabel,
     required this.onSecondary,
+    this.compact = false,
   });
   final String title, fingerprint, code, primaryLabel, secondaryLabel;
   final VoidCallback? onPrimary, onSecondary;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +41,7 @@ class ComputerGroupAdmissionReview extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Icon(Icons.devices_outlined, size: 23, color: AppColors.textMuted),
-            const SizedBox(width: 12),
+            SizedBox(width: compact ? 8 : 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -49,7 +51,7 @@ class ComputerGroupAdmissionReview extends StatelessWidget {
                   Text(
                     title,
                     style: TextStyle(
-                      fontSize: 17,
+                      fontSize: compact ? 15 : 17,
                       fontWeight: FontWeight.w600,
                       color: AppColors.textPrimary,
                     ),
@@ -64,18 +66,18 @@ class ComputerGroupAdmissionReview extends StatelessWidget {
             ),
           ],
         ),
-        const SizedBox(height: 16),
-        _Code(code: code),
-        const SizedBox(height: 16),
+        SizedBox(height: compact ? 10 : 16),
+        _Code(code: code, compact: compact),
+        SizedBox(height: compact ? 10 : 16),
         Text(zh ? '工作区权限' : 'Workspace access', style: label),
         const SizedBox(height: 4),
         Text(
           admissionScope(zh),
           style: TextStyle(color: AppColors.text, height: 1.4, fontSize: 13),
         ),
-        const SizedBox(height: 16),
+        SizedBox(height: compact ? 10 : 16),
         Wrap(
-          alignment: WrapAlignment.end,
+          alignment: compact ? WrapAlignment.start : WrapAlignment.end,
           spacing: 8,
           runSpacing: 4,
           children: [
@@ -89,13 +91,14 @@ class ComputerGroupAdmissionReview extends StatelessWidget {
 }
 
 class _Code extends StatelessWidget {
-  const _Code({required this.code});
+  const _Code({required this.code, this.compact = false});
+  final bool compact;
   final String code;
   @override
   Widget build(BuildContext context) {
     final zh = _zh(context);
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: EdgeInsets.all(compact ? 8 : 14),
       decoration: BoxDecoration(
         color: AppColors.code,
         borderRadius: BorderRadius.circular(8),
@@ -163,8 +166,8 @@ class ComputerAdmissionWaiting extends StatelessWidget {
       const SizedBox(height: 6),
       Text(
         _zh(context)
-            ? '申请已发送。你可以关闭窗口继续等待。'
-            : 'Request sent. You can close this window while you wait.',
+            ? '申请已发送。你可以离开此处继续等待。'
+            : 'Request sent. You can leave this view while you wait.',
         style: TextStyle(color: AppColors.textMuted),
       ),
       const SizedBox(height: 12),
@@ -179,10 +182,12 @@ class ComputerApprovalPanel extends StatefulWidget {
     required this.host,
     required this.request,
     this.onApproved,
+    this.compact = false,
   });
   final LinkHost host;
   final ComputerGroupApproval request;
   final VoidCallback? onApproved;
+  final bool compact;
   @override
   State<ComputerApprovalPanel> createState() => _ComputerApprovalPanelState();
 }
@@ -231,6 +236,7 @@ class _ComputerApprovalPanelState extends State<ComputerApprovalPanel> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         ComputerGroupAdmissionReview(
+          compact: widget.compact,
           title: zh ? '$name 申请加入「我的电脑」' : '$name requests to join the group',
           fingerprint: fingerprintOf(keyOfDeviceId(request.member.id)!),
           code: request.code,

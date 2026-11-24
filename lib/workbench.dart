@@ -97,7 +97,6 @@ import 'keybindings/window_keybindings.dart';
 import 'l10n/command_titles.dart';
 import 'l10n/l10n.dart';
 import 'link/computer_admission_prompt.dart';
-import 'link/computer_group_dialog.dart';
 import 'link/desktop_host_chats.dart';
 import 'link/desktop_host_connection.dart';
 import 'link/desktop_host_page.dart';
@@ -1432,7 +1431,7 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
 
   static const _desktopWorkspaceKey = 'workbench.desktopWorkspace';
   bool _remoteWorkspace = false;
-  bool _myComputersOpen = false;
+  int _computerNavigation = 0;
   ComputerAdmissionPrompt? _computerAdmissionPrompt;
   VoidCallback? _cancelWorkspaceRestore;
   bool get _canSwitchWorkspace =>
@@ -1459,11 +1458,14 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     final host = widget.settings?.link;
     if (!_canSwitchWorkspace || storage == null || host == null) return;
     final selection = storage.get<String>(_desktopWorkspaceKey);
-    if (!storage.loaded ||
-        selection == null ||
-        !selection.startsWith('group:')) {
+    if (!storage.loaded || selection == null) return;
+    if (selection == 'computers') {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_remoteWorkspace) _manageComputers();
+      });
       return;
     }
+    if (!selection.startsWith('group:')) return;
     final id = selection.substring('group:'.length);
     // The application is already loading the host. Do not load it again or
     // dial using saved state before signed membership and its listener agree.
@@ -1489,25 +1491,10 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     onChange();
   }
 
-  Future<String?> _pickComputer(BuildContext context) {
-    _cancelWorkspaceRestore?.call();
-    final host = widget.settings?.link;
-    return showMyComputers(
-      context,
-      host: host,
-      connection: host?.supported == true ? _getDesktopConnection() : null,
-    );
-  }
-
-  Future<void> _manageComputers() async {
-    if (!_canSwitchWorkspace || _myComputersOpen) return;
-    _myComputersOpen = true;
-    try {
-      final id = await _pickComputer(context);
-      if (id != null && mounted) _openGroupComputer(id);
-    } finally {
-      _myComputersOpen = false;
-    }
+  void _manageComputers() {
+    if (!_canSwitchWorkspace) return;
+    final connection = _getDesktopConnection();
+    _openComputer(connection.selectedHostId, revealRoster: true);
   }
 
   void _openGroupComputer(String id) {
@@ -1565,15 +1552,15 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
         group != null &&
         (!group.active.containsKey(host!.id) || !group.active.containsKey(id));
     final peer = connection.groupSelected ? connection.peer : null;
+    final hadSelection = _lastHostKey != null;
     if (id != _lastHostKey || removed) _desktopChats!.reset();
     _lastHostKey = removed ? null : id;
     _remoteNotices?.bind(peer);
     _desktopChats!.bind(peer);
-    if (removed && _remoteWorkspace) {
-      _openLocalWorkspace();
-    } else {
-      setState(() {});
+    if (_remoteWorkspace && (removed || (id == null && hadSelection))) {
+      unawaited(_keepDesktopWorkspace('computers'));
     }
+    setState(() {});
   }
 
   void _openRemoteNotice(String host, String kind, String id) {
@@ -1596,13 +1583,14 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     unawaited(chats.open(target));
   }
 
-  void _openComputer(String id) {
+  void _openComputer(String? id, {bool revealRoster = false}) {
     _cancelWorkspaceRestore?.call();
-    unawaited(_keepDesktopWorkspace('group:$id'));
-    if (_remoteWorkspace) return;
+    unawaited(_keepDesktopWorkspace(id == null ? 'computers' : 'group:$id'));
+    if (_remoteWorkspace && !revealRoster) return;
     _leaveChord();
     setState(() {
       _remoteWorkspace = true;
+      if (revealRoster) _computerNavigation++;
       _drawerOpen = _drawerClosing = false;
     });
     _syncWorkspaceFileDrops();
@@ -3094,14 +3082,11 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
               context,
               section,
               onMyComputers: _canSwitchWorkspace
-                  ? (pageContext) async {
+                  ? (pageContext) {
                       final route = ModalRoute.of(pageContext);
-                      final id = await _pickComputer(pageContext);
-                      if (id == null || !mounted || route?.isCurrent != true) {
-                        return;
-                      }
+                      if (!mounted || route?.isCurrent != true) return;
                       route!.navigator!.pop();
-                      _openGroupComputer(id);
+                      _manageComputers();
                     }
                   : null,
             ) ??
@@ -3173,7 +3158,9 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
                 localHost: widget.settings?.link,
                 chats: _desktopChats!,
                 onBack: _openLocalWorkspace,
-                onMyComputers: _manageComputers,
+                onSelectComputer: _openGroupComputer,
+                computerNavigation: _computerNavigation,
+                reviewVisible: !_settingsOpen,
                 lastChatStore: SavedDesktopHostChat.forStorage(
                   widget.settings?.files?.storage,
                 ),

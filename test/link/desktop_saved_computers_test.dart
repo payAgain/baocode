@@ -7,7 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'desktop_mutual_pairing_test.dart' show Machine;
-import 'my_computers_test.dart' show admit, pumpWorkbench, tap;
+import 'my_computers_test.dart'
+    show admit, leaveComputers, memberRow, pumpWorkbench, tap, tapMember;
 
 void main() {
   const desktop = TargetPlatformVariant({
@@ -23,7 +24,7 @@ void main() {
     addTearDown(files.dispose);
     await pumpWorkbench(tester, viewer, files: files);
     await tap(tester, 'My computers');
-    await open(tester, first);
+    await tapMember(tester, first);
     final previous = viewer.client.peer!;
     expect(previous.remote, first.host.id);
 
@@ -43,21 +44,27 @@ void main() {
     await tester.pump();
     String text() => tester.state<MarkdownEditorState>(editor).controller.text;
 
-    await manageFromRemote(tester);
-    expect(find.text('Shared computer'), findsWidgets);
-    await tap(tester, 'Close');
+    final toggle = find.byKey(const ValueKey('computer-group-toggle'));
+    expect(find.text('Shared computer'), findsNWidgets(2));
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    expect(memberRow(second), findsNothing);
     expect(viewer.client.peer, same(previous));
     expect(text(), draft);
 
-    await manageFromRemote(tester);
-    await open(tester, second);
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    await tapMember(tester, second);
     expect(viewer.client.peer?.remote, second.host.id);
     expect(previous.isClosed, isTrue);
     await tap(tester, title);
     expect(text(), isEmpty);
 
-    await manageFromRemote(tester);
-    await open(tester, first);
+    await leaveComputers(tester);
+    expect(find.byType(DesktopHostPage), findsNothing);
+    await tap(tester, 'My computers');
+    expect(viewer.client.peer?.remote, second.host.id);
+    await tapMember(tester, first);
     expect(viewer.client.peer?.remote, first.host.id);
     expect(editor.hitTestable(), findsOneWidget);
     expect(text(), draft);
@@ -89,10 +96,10 @@ void main() {
     await tap(tester, 'Remove from group');
     expect(viewer.host.computerGroup!.removed, contains(first.host.id));
     expect(viewer.host.computerGroup!.active.keys, contains(second.host.id));
-    expect(find.text('Removed Shared computer'), findsOneWidget);
+    await tap(tester, 'Removed Shared computer');
     expect(find.textContaining('Awaiting acknowledgment'), findsOneWidget);
     viewer.network.unreachable.remove(second.host.id);
-    await open(tester, second);
+    await tapMember(tester, second);
     expect(find.byType(DesktopHostPage), findsOneWidget);
     expect(viewer.client.peer?.remote, second.host.id);
     await stop(tester, [viewer, first, second]);
@@ -112,18 +119,6 @@ Future<(Machine, Machine, Machine)> computers() async {
   await admit(viewer, first);
   await admit(viewer, second);
   return (viewer, first, second);
-}
-
-Future<void> open(WidgetTester tester, Machine machine) async {
-  final entry = find.byKey(ValueKey(('open-computer', machine.host.id)));
-  await tester.ensureVisible(entry);
-  await tester.tap(entry.hitTestable());
-  await tester.pumpAndSettle();
-}
-
-Future<void> manageFromRemote(WidgetTester tester) async {
-  await tester.tap(find.byTooltip('My computers').hitTestable());
-  await tester.pumpAndSettle();
 }
 
 Future<void> stop(WidgetTester tester, List<Machine> machines) async {

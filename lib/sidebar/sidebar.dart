@@ -288,7 +288,7 @@ class Sidebar extends StatefulWidget {
   /// actions); no Search row without it.
   final VoidCallback? onSearch;
 
-  /// Opens the My computers workspace chooser and membership controls.
+  /// Opens the remote workspace sidebar and its My computers section.
   final VoidCallback? onMyComputers;
 
   final VoidCallback? onBot;

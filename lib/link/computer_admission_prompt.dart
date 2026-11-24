@@ -13,17 +13,17 @@ _ReviewPresentation _reviewsFor(LinkHost host) =>
     _reviewsByHost[host] ??= _ReviewPresentation();
 
 class _ReviewPresentation extends ChangeNotifier {
-  int _manualDialogs = 0;
+  int _inlineViews = 0;
   bool promptOpen = false;
 
-  bool get manualOpen => _manualDialogs > 0;
+  bool get manualOpen => _inlineViews > 0;
 
   void openManual() {
-    if (++_manualDialogs == 1) notifyListeners();
+    if (++_inlineViews == 1) notifyListeners();
   }
 
   void closeManual() {
-    if (--_manualDialogs == 0) notifyListeners();
+    if (--_inlineViews == 0) notifyListeners();
   }
 
   void releasePrompt() {
@@ -32,19 +32,11 @@ class _ReviewPresentation extends ChangeNotifier {
   }
 }
 
-/// While My computers is open, it owns reviews for this host.
-Future<T> trackManualComputerReview<T>(
-  LinkHost? host,
-  Future<T> Function() open,
-) async {
-  if (host == null || !host.supported) return open();
+/// The visible sidebar owns the inline review until it is hidden or removed.
+VoidCallback ownInlineComputerReview(LinkHost host) {
   final reviews = _reviewsFor(host);
   reviews.openManual();
-  try {
-    return await open();
-  } finally {
-    reviews.closeManual();
-  }
+  return reviews.closeManual;
 }
 
 /// Shows an incoming admission in the main workbench's root navigator.

@@ -28,7 +28,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../window/fake_window_host.dart';
 import 'desktop_mutual_pairing_test.dart' show Machine, machines;
-import 'my_computers_test.dart' show admit, tap;
+import 'my_computers_test.dart' show admit, leaveComputers, tap, tapMember;
 
 void main() {
   setUp(() {
@@ -55,7 +55,7 @@ void main() {
     final threads = workspace.threads.toList();
     await tester.tap(entry);
     await tester.pumpAndSettle();
-    await tap(tester, 'Open workspace');
+    await tapMember(tester, owner);
     final page = find.byType(DesktopHostPage);
     expect(page, findsOneWidget);
     expect(tester.getSize(page).width, 1440);
@@ -87,7 +87,7 @@ void main() {
     expect(workspace.threads, threads);
     expect(find.byType(SearchPalette), findsNothing);
     expect(page, findsOneWidget);
-    await tester.tap(find.text('Switch to local'));
+    await leaveComputers(tester);
     await tester.pump();
     expect(page, findsNothing);
     expect(find.byType(Sidebar), findsOneWidget);
@@ -115,7 +115,7 @@ void main() {
     await start();
     expect(page, findsNothing);
     await tap(tester, 'My computers');
-    await tap(tester, 'Open workspace');
+    await tapMember(tester, owner);
     expect(page, findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
 
@@ -129,7 +129,7 @@ void main() {
     final restored = tester.widget<DesktopHostPage>(page).lastChatStore!;
     expect(await restored.read('host-A'), (kind: 'project', id: 'chat-1'));
     expect(await restored.read('host-B'), isNull);
-    await tester.tap(find.text('Switch to local'));
+    await leaveComputers(tester);
     await tester.pump();
     expect(page, findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
@@ -164,16 +164,13 @@ void main() {
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
-        home: Workbench(
-          workspace: workspace,
-          settings: _Settings(files),
-          createDesktopHostConnection: () => throw StateError('No legacy dial'),
-        ),
+        home: Workbench(workspace: workspace, settings: _Settings(files)),
       ),
     );
     await tester.pumpAndSettle();
-    await tap(tester, 'My computers');
     expect(find.byType(DesktopHostPage), findsNothing);
+    await tap(tester, 'My computers');
+    expect(find.byType(DesktopHostPage), findsOneWidget);
     expect(find.text('Synthetic host'), findsNothing);
     expect(find.byType(TextField), findsNothing);
     expect(
@@ -188,7 +185,7 @@ void main() {
       windowCalls.any(
         (call) => call.method == 'setRemoteWorkspace' && call.arguments == true,
       ),
-      isFalse,
+      isTrue,
     );
     await tester.pumpWidget(const SizedBox.shrink());
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));

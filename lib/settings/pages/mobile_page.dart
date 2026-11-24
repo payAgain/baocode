@@ -8,7 +8,6 @@ import '../../ide/ide_button.dart';
 import '../../ide/ide_hover.dart';
 import '../../ide/ide_menu.dart';
 import '../../l10n/l10n.dart';
-import '../../link/computer_group_dialog.dart';
 import '../../link/link_host.dart';
 import '../../link/phone_downloads.dart';
 import '../../link/qr_view.dart';
@@ -132,15 +131,9 @@ class _MobileSettingsPageState extends State<MobileSettingsPage> {
       title: l10n.settingsSectionMobile,
       description: l10n.mobileSettingsDescription,
       children: [
-        if (host.supported)
+        if (host.supported && widget.onMyComputers != null)
           TextButton.icon(
-            onPressed: () {
-              if (widget.onMyComputers case final open?) {
-                open(context);
-              } else {
-                unawaited(showMyComputers(context, host: host));
-              }
-            },
+            onPressed: () => widget.onMyComputers!(context),
             icon: const Icon(Icons.devices, size: 17),
             label: Text(l10n.myComputers),
           ),
