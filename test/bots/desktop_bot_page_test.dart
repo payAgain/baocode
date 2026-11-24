@@ -555,7 +555,8 @@ void main() {
     unawaited(subscription.cancel());
     await closePhone();
     fixture.dispose();
-    await tester.pump();
+    // Deliver the usage ledger's debounced turn notification in fake time.
+    await tester.pump(const Duration(milliseconds: 250));
   });
 
   testWidgets(
