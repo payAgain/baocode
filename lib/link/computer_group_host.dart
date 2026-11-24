@@ -1,5 +1,8 @@
 part of 'link_host.dart';
 
+/// The last completed authenticated maintenance check for a current member.
+enum ComputerGroupPresence { unknown, reachable, unreachable }
+
 /// An authenticated preview. Only confirming this exact object signs consent.
 class ComputerGroupJoinPreview {
   ComputerGroupJoinPreview._(
@@ -96,7 +99,12 @@ class _ComputerGroupHost {
   LinkPeer? _joinPeer;
   Future<void> _mutating = Future.value();
   Timer? _periodic;
-  bool _syncing = false;
+  // A pause can invalidate syncs without changing the Mobile Link listener.
+  Object _syncGeneration = Object();
+  // The roster and scheduled sync share the same sweep of active members.
+  Future<void>? _activeSync;
+  Future<void>? _fullSync;
+  final _presence = <String, ComputerGroupPresence>{};
   final _observed = <String, Set<String>>{};
   final _denied = <String>{};
 
@@ -123,6 +131,17 @@ class _ComputerGroupHost {
       remote != host.id &&
       !_denied.contains(host.id) &&
       !_denied.contains(remote);
+
+  ComputerGroupPresence presence(String id) => permits(id)
+      ? _presence[id] ?? ComputerGroupPresence.unknown
+      : ComputerGroupPresence.unknown;
+
+  bool get _canSync =>
+      ready &&
+      group?.active.containsKey(host.id) == true &&
+      !_denied.contains(host.id);
+
+  Future<void> refreshPresence() => _fullSync ?? _syncActive();
 
   Future<void> load() async {
     try {
@@ -227,6 +246,7 @@ class _ComputerGroupHost {
     };
     if (!_denied.containsAll(lost)) {
       _denied.addAll(lost);
+      _presence.removeWhere((id, _) => lost.contains(id));
       for (final connection in [...host._connections]) {
         if (connection.groupWorkspace && !permits(connection.id)) {
           _closeWorkspace(connection);
@@ -622,10 +642,14 @@ class _ComputerGroupHost {
 
   Future<ComputerGroup> _mergeFrom(
     String remote,
-    Object? wire,
-  ) => _serial(() async {
+    Object? wire, {
+    bool Function()? stillCurrent,
+  }) => _serial(() async {
     final prior = group;
-    if (!ready || prior == null || remote == host.id) {
+    if (!ready ||
+        prior == null ||
+        remote == host.id ||
+        stillCurrent?.call() == false) {
       throw ComputerGroupWire.rejected;
     }
     if (prior.removed.contains(remote)) {
@@ -645,11 +669,14 @@ class _ComputerGroupHost {
       throw ComputerGroupWire.rejected;
     }
     await _persist(next);
-    _observe(remote, wire, next);
+    if (stillCurrent?.call() != false) _observe(remote, wire, next);
     return next;
   });
 
-  Future<ComputerGroup> syncPeer(LinkPeer peer) async {
+  Future<ComputerGroup> syncPeer(
+    LinkPeer peer, {
+    bool Function()? stillCurrent,
+  }) async {
     final current = group;
     if (current == null ||
         !ready ||
@@ -664,7 +691,7 @@ class _ComputerGroupHost {
     final reply = await peer.call(ComputerGroupWire.sync, {
       'history': history,
     }, const Duration(seconds: 8));
-    return _mergeFrom(peer.remote, reply);
+    return _mergeFrom(peer.remote, reply, stillCurrent: stillCurrent);
   }
 
   Future<LinkPeer> open(String id, {required Iterable<String> nearby}) async {
@@ -694,6 +721,10 @@ class _ComputerGroupHost {
   void stopSync() {
     _periodic?.cancel();
     _periodic = null;
+    _syncGeneration = Object();
+    _activeSync = null;
+    _fullSync = null;
+    _presence.clear();
     _clearInvite();
     _preparing = null;
     _clearPreview();
@@ -702,41 +733,93 @@ class _ComputerGroupHost {
   }
 
   Future<void> sync([Iterable<ComputerGroupMember>? targets]) async {
-    if (!ready ||
-        group?.active.containsKey(host.id) != true ||
-        (targets == null && _syncing)) {
+    if (!_canSync) return;
+    final generation = _syncGeneration;
+    if (targets != null) {
+      await _syncMembers(targets, generation);
       return;
     }
-    if (targets == null) _syncing = true;
+    if (_fullSync case final ongoing?) return ongoing;
+    final running = _fullSync = _syncAll(generation);
     try {
-      final members = targets ?? group!.known.values;
-      final list = members
-          .where(
-            (member) =>
-                member.id != host.id &&
-                (permits(member.id) ||
-                    (group!.removed.contains(member.id) &&
-                        pendingRemoval(member.id).contains(member.id))),
-          )
-          .toList();
-      // Bound concurrent maintenance links. None opens a workspace.
-      for (var start = 0; start < list.length && ready; start += 4) {
-        await Future.wait(
-          list.skip(start).take(4).map((member) async {
-            LinkPeer? peer;
-            try {
-              peer = await dial(member, timeout: const Duration(seconds: 5));
-              await syncPeer(peer);
-            } on Object {
-              // Offline is normal. A later connection or sync will retry.
-            } finally {
-              await peer?.close();
-            }
-          }),
-        );
-      }
+      await running;
     } finally {
-      if (targets == null) _syncing = false;
+      if (identical(_fullSync, running)) _fullSync = null;
+    }
+  }
+
+  Future<void> _syncAll(Object generation) async {
+    await _syncActive();
+    if (generation != _syncGeneration || !_canSync) return;
+    final current = group!;
+    // Keep delivering outstanding revocations on the maintenance schedule.
+    await _syncMembers(
+      current.removed.map((id) => current.known[id]!),
+      generation,
+    );
+  }
+
+  Future<void> _syncActive() async {
+    if (!_canSync) return;
+    if (_activeSync case final ongoing?) return ongoing;
+    final running = _activeSync = _syncMembers(
+      group!.active.values,
+      _syncGeneration,
+      trackPresence: true,
+    );
+    try {
+      await running;
+    } finally {
+      if (identical(_activeSync, running)) _activeSync = null;
+    }
+  }
+
+  Future<void> _syncMembers(
+    Iterable<ComputerGroupMember> members,
+    Object generation, {
+    bool trackPresence = false,
+  }) async {
+    final targets = [
+      for (final member in members)
+        if (permits(member.id))
+          (member, false)
+        else if (!trackPresence &&
+            member.id != host.id &&
+            pendingRemoval(member.id).contains(member.id))
+          (member, true),
+    ];
+    // Bound concurrent maintenance links. None opens a workspace.
+    const parallel = 4;
+    for (var start = 0; start < targets.length; start += parallel) {
+      if (generation != _syncGeneration || !_canSync) return;
+      await Future.wait(
+        targets.skip(start).take(parallel).map((target) async {
+          final (member, removal) = target;
+          final id = member.id;
+          bool stillCurrent() =>
+              generation == _syncGeneration &&
+              _canSync &&
+              (removal ? group!.removed.contains(id) : permits(id));
+          if (!stillCurrent()) return;
+
+          LinkPeer? peer;
+          var result = ComputerGroupPresence.unreachable;
+          try {
+            peer = await dial(member, timeout: const Duration(seconds: 5));
+            if (!stillCurrent()) return;
+            await syncPeer(peer, stillCurrent: stillCurrent);
+            result = ComputerGroupPresence.reachable;
+          } on Object {
+            // A later sync retries failures, which do not change membership.
+          } finally {
+            await peer?.close();
+          }
+          if (trackPresence && stillCurrent() && _presence[id] != result) {
+            _presence[id] = result;
+            host.notifyListeners();
+          }
+        }),
+      );
     }
   }
 

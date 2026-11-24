@@ -268,6 +268,11 @@ class LinkHost extends ChangeNotifier {
       _group.approve(approval);
   void denyGroupJoin(ComputerGroupApproval approval) => _group.deny(approval);
   Future<void> syncComputerGroup() => _group.sync();
+
+  /// Check current members through signed group sync without opening workspaces.
+  Future<void> refreshComputerGroupPresence() => _group.refreshPresence();
+
+  ComputerGroupPresence computerGroupPresence(String id) => _group.presence(id);
   Future<void> removeGroupMember(String id) => _group.remove(id);
   Set<String> pendingGroupRemoval(String id) => _group.pendingRemoval(id);
   bool permitsGroupWorkspace(String id) => _group.permits(id);

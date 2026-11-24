@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:bao_link/bao_link.dart';
 import 'package:baocode/link/computer_group.dart';
+import 'package:baocode/link/computer_group_dialog.dart';
+import 'package:baocode/link/link_host.dart';
 import 'package:baocode/l10n/l10n.dart';
 import 'package:baocode/settings/app_locale.dart';
 import 'package:baocode/settings/app_settings.dart';
@@ -14,6 +16,183 @@ import 'package:flutter_test/flutter_test.dart';
 import 'desktop_mutual_pairing_test.dart' show Machine, machines;
 
 void main() {
+  testWidgets(
+    'My computers shows a reachable member without opening a workspace',
+    (tester) async {
+      final (viewer, member) = await machines();
+      await viewer.host.createComputerGroup();
+      await join(viewer, member);
+      await pumpRoster(tester, viewer);
+
+      expect(memberStatus(member, 'Recently reachable'), findsOneWidget);
+      expect(viewer.client.selectedHostId, isNull);
+      expect(viewer.client.peer, isNull);
+      expect(member.host.groupWorkspaceConnected(viewer.host.id), isFalse);
+      await closeRoster(tester, [viewer, member]);
+    },
+  );
+
+  testWidgets(
+    'the open roster refreshes on the existing sync after a peer returns',
+    (tester) async {
+      final (viewer, member) = await machines();
+      await viewer.host.createComputerGroup();
+      await join(viewer, member);
+      viewer.network.unreachable.add(member.host.id);
+      await viewer.client.selectGroupMember(member.host.id);
+      expect(viewer.client.error, isNotNull);
+      await pumpRoster(tester, viewer);
+      expect(memberStatus(member, 'Currently unreachable'), findsOneWidget);
+      expect(viewer.client.peer, isNull);
+
+      viewer.network.unreachable.remove(member.host.id);
+      await tester.pump(const Duration(seconds: 45));
+      await tester.pumpAndSettle();
+      expect(memberStatus(member, 'Recently reachable'), findsOneWidget);
+      expect(viewer.client.error, isNotNull);
+      expect(viewer.client.peer, isNull);
+      expect(member.host.groupWorkspaceConnected(viewer.host.id), isFalse);
+
+      await viewer.client.selectGroupMember(member.host.id);
+      await tester.pumpAndSettle();
+      expect(memberStatus(member, 'Workspace connected'), findsOneWidget);
+      await closeRoster(tester, [viewer, member]);
+    },
+  );
+
+  testWidgets('the roster reflects a workspace opened by the other member', (
+    tester,
+  ) async {
+    final (viewer, member) = await machines();
+    await viewer.host.createComputerGroup();
+    await join(viewer, member);
+    await pumpRoster(tester, viewer);
+    expect(memberStatus(member, 'Recently reachable'), findsOneWidget);
+
+    await member.client.selectGroupMember(viewer.host.id);
+    await tester.pumpAndSettle();
+    expect(viewer.client.selectedHostId, isNull);
+    expect(viewer.host.groupWorkspaceConnected(member.host.id), isTrue);
+    expect(memberStatus(member, 'Workspace connected'), findsOneWidget);
+
+    await member.client.peer!.close();
+    await tester.pumpAndSettle();
+    expect(memberStatus(member, 'Recently reachable'), findsOneWidget);
+    await closeRoster(tester, [viewer, member]);
+  });
+
+  testWidgets('the Chinese roster checks members when local sharing resumes', (
+    tester,
+  ) async {
+    final (viewer, member) = await machines();
+    await viewer.host.createComputerGroup();
+    await join(viewer, member);
+    await viewer.host.pauseGroupConnections();
+    final node = viewer.platform.node!;
+    final connectionsBeforeOpening = node.connections.length;
+    await pumpRoster(tester, viewer, locale: const Locale('zh', 'CN'));
+    expect(find.text('这台电脑的组连接已暂停。'), findsOneWidget);
+    expect(memberStatus(member, '在线状态未知'), findsOneWidget);
+    expect(memberStatus(member, '暂时无法连接'), findsNothing);
+    expect(node.connections, hasLength(connectionsBeforeOpening));
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(ValueKey(('open-computer', member.host.id))),
+          )
+          .onPressed,
+      isNull,
+    );
+
+    await tester.tap(find.text('恢复连接'));
+    await tester.pumpAndSettle();
+    expect(memberStatus(member, '最近可连接'), findsOneWidget);
+    expect(viewer.client.peer, isNull);
+    await closeRoster(tester, [viewer, member]);
+  });
+
+  testWidgets('opening the roster joins an in-flight membership sync', (
+    tester,
+  ) async {
+    final (viewer, member) = await machines();
+    await viewer.host.createComputerGroup();
+    await join(viewer, member);
+    final remote = await ControlledGroupPeer.replace(member);
+    final syncing = viewer.host.syncComputerGroup();
+    final reply = await remote.nextReply();
+    expect(remote.replies, hasLength(1));
+
+    await pumpRoster(tester, viewer);
+    expect(remote.replies, hasLength(1));
+    reply.complete(member.host.computerGroup!.toJson());
+    await syncing;
+    await tester.pumpAndSettle();
+    expect(memberStatus(member, 'Recently reachable'), findsOneWidget);
+    expect(remote.methods, [ComputerGroupWire.sync]);
+    await closeRoster(tester, [viewer, member]);
+  });
+
+  test(
+    'a delayed pre-pause check cannot replace the result after resume',
+    () async {
+      final (viewer, member) = await machines();
+      await viewer.host.createComputerGroup();
+      await join(viewer, member);
+      final remote = await ControlledGroupPeer.replace(member);
+      final stale = viewer.host.refreshComputerGroupPresence();
+      final staleReply = await remote.nextReply();
+      final node = viewer.platform.node;
+      await viewer.host.pauseGroupConnections();
+      await viewer.host.enableGroupConnections();
+      expect(viewer.platform.node, same(node), reason: 'Mobile Link stays on');
+
+      final fresh = viewer.host.refreshComputerGroupPresence();
+      (await remote.nextReply()).complete(member.host.computerGroup!.toJson());
+      await fresh;
+      expect(
+        viewer.host.computerGroupPresence(member.host.id),
+        ComputerGroupPresence.reachable,
+      );
+
+      staleReply.complete([]);
+      await stale;
+      expect(
+        viewer.host.computerGroupPresence(member.host.id),
+        ComputerGroupPresence.reachable,
+      );
+    },
+  );
+
+  test(
+    'an in-flight presence reply cannot acknowledge a later revocation',
+    () async {
+      final (viewer, member) = await machines();
+      await viewer.host.createComputerGroup();
+      await join(viewer, member);
+      final remote = await ControlledGroupPeer.replace(member);
+      final checking = viewer.host.refreshComputerGroupPresence();
+      final staleReply = await remote.nextReply();
+      final removal = viewer.host.removeGroupMember(member.host.id);
+      final removalReply = await remote.nextReply();
+      expect(viewer.host.permitsGroupWorkspace(member.host.id), isFalse);
+
+      staleReply.complete(
+        viewer.host.computerGroup!.removalProof(member.host.id),
+      );
+      await checking;
+      removalReply.complete([]);
+      await removal;
+      expect(
+        viewer.host.pendingGroupRemoval(member.host.id),
+        contains(member.host.id),
+      );
+      expect(
+        viewer.host.computerGroupPresence(member.host.id),
+        ComputerGroupPresence.unknown,
+      );
+    },
+  );
+
   test(
     'computer group sharing works with legacy Mobile connections off',
     () async {
@@ -374,6 +553,90 @@ void main() {
       }
     },
   );
+}
+
+Future<void> pumpRoster(
+  WidgetTester tester,
+  Machine viewer, {
+  Locale? locale,
+}) async {
+  await tester.pumpWidget(
+    MaterialApp(
+      locale: locale,
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: Scaffold(
+        body: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => showMyComputers(
+              context,
+              host: viewer.host,
+              connection: viewer.client,
+            ),
+            child: const Text('Show roster'),
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.tap(find.text('Show roster'));
+  await tester.pumpAndSettle();
+}
+
+Finder memberStatus(Machine member, String status) => find.descendant(
+  of: find.ancestor(of: find.text(member.name), matching: find.byType(Row)),
+  matching: find.text(status),
+);
+
+Future<void> closeRoster(WidgetTester tester, List<Machine> machines) async {
+  await tester.pumpWidget(const SizedBox.shrink());
+  for (final machine in machines) {
+    if (machine.host.groupConnectionsAvailable) {
+      await machine.host.pauseGroupConnections();
+    }
+    unawaited(machine.host.setEnabled(false));
+  }
+  await tester.pump();
+}
+
+/// An admitted identity using the existing sync wire format with a gated reply.
+class ControlledGroupPeer {
+  final replies = <Completer<Object?>>[];
+  final methods = <String>[];
+  var _available = Completer<void>();
+  var _consumed = 0;
+
+  static Future<ControlledGroupPeer> replace(Machine member) async {
+    await member.host.pauseGroupConnections();
+    final node = member.network.node(member.host.id);
+    final controlled = ControlledGroupPeer();
+    final sub = node.incoming.listen((link) async {
+      await LinkPeer.accept(link, onRequest: controlled._handle);
+    });
+    addTearDown(() async {
+      await sub.cancel();
+      await node.close();
+    });
+    return controlled;
+  }
+
+  Future<Object?> _handle(String method, Map<String, Object?> params) {
+    methods.add(method);
+    expect(method, ComputerGroupWire.sync);
+    expect(params['history'], isA<List>());
+    final reply = Completer<Object?>();
+    replies.add(reply);
+    _available.complete();
+    _available = Completer<void>();
+    return reply.future;
+  }
+
+  Future<Completer<Object?>> nextReply() async {
+    if (_consumed == replies.length) {
+      await _available.future.timeout(const Duration(seconds: 2));
+    }
+    return replies[_consumed++];
+  }
 }
 
 Future<void> join(Machine sponsor, Machine joiner) async {

@@ -64,6 +64,14 @@ class _GroupDialogState extends State<_GroupDialog> {
   DesktopHostConnection? get _connection => widget.connection;
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_host.refreshComputerGroupPresence());
+    });
+  }
+
+  @override
   void dispose() {
     final preview = _preview;
     final host = _host;
@@ -217,7 +225,12 @@ class _GroupDialogState extends State<_GroupDialog> {
               FilledButton(
                 onPressed: _busy
                     ? null
-                    : () => _run(_host.enableGroupConnections),
+                    : () => _run(() async {
+                        await _host.enableGroupConnections();
+                        if (mounted) {
+                          unawaited(_host.refreshComputerGroupPresence());
+                        }
+                      }),
                 child: Text(text.enable),
               ),
             ] else if (_showInviteOptions)
@@ -612,19 +625,18 @@ class _GroupDialogState extends State<_GroupDialog> {
     final here = member.id == _host.id;
     final canUse = !_busy && _host.permitsGroupWorkspace(member.id);
     final connection = _connection;
-    final selected = connection?.selectedHostId == member.id;
-    final status = switch (connection) {
+    final status = switch (_host.computerGroupPresence(member.id)) {
       _
           when _host.groupWorkspaceConnected(member.id) ||
               connection?.peer?.remote == member.id =>
         text.connected,
-      final current? when selected && current.busy => text.connecting,
-      final current?
-          when selected &&
-              current.error != null &&
-              _host.permitsGroupWorkspace(member.id) =>
-        text.unreachable,
-      _ => text.statusUnknown,
+      _
+          when connection?.busy == true &&
+              connection?.selectedHostId == member.id =>
+        text.connecting,
+      ComputerGroupPresence.reachable => text.reachable,
+      ComputerGroupPresence.unreachable => text.unreachable,
+      ComputerGroupPresence.unknown => text.statusUnknown,
     };
     final menu = PopupMenuButton<String>(
       key: ValueKey(('computer-menu', member.id)),
@@ -795,8 +807,8 @@ class _Text {
       : 'This computer was removed from the group. Group access is disabled here.';
   String get connected => zh ? '工作区已连接' : 'Workspace connected';
   String get connecting => zh ? '正在连接…' : 'Connecting…';
-  String get unreachable =>
-      zh ? '工作区连接不可用' : 'Workspace connection unavailable';
+  String get reachable => zh ? '最近可连接' : 'Recently reachable';
+  String get unreachable => zh ? '暂时无法连接' : 'Currently unreachable';
   String get statusUnknown => zh ? '在线状态未知' : 'Online status unknown';
   String get access => zh ? '工作区权限' : 'Workspace permissions';
   String get sync => zh ? '同步成员变更' : 'Sync membership changes';

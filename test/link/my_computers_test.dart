@@ -106,7 +106,7 @@ void main() {
     await tap(tester, 'My computers');
     final remote = find.byKey(ValueKey(('open-computer', a.host.id)));
     expect(remote.hitTestable(), findsOneWidget);
-    expect(find.text('Online status unknown'), findsOneWidget);
+    expect(find.text('Recently reachable'), findsOneWidget);
     expect(find.text('Use invite'), findsNothing);
     await tester.tap(remote);
     await tester.pumpAndSettle();
@@ -183,7 +183,7 @@ void main() {
     await sponsor.host.pauseGroupConnections();
     await joiner.host.pauseGroupConnections();
   }, variant: desktop);
-  testWidgets('an unsuccessful connection is distinct from unknown presence', (
+  testWidgets('an unreachable member remains selectable for a workspace', (
     tester,
   ) async {
     final (a, b) = await machines();
@@ -192,12 +192,12 @@ void main() {
     a.network.unreachable.add(a.host.id);
     await pumpWorkbench(tester, b);
     await tap(tester, 'My computers');
-    expect(find.text('Online status unknown'), findsOneWidget);
+    expect(find.text('Currently unreachable'), findsOneWidget);
     await tap(tester, 'Open workspace');
     expect(b.client.peer, isNull);
     await tap(tester, 'Switch to local');
     await tap(tester, 'My computers');
-    expect(find.text('Workspace connection unavailable'), findsOneWidget);
+    expect(find.text('Currently unreachable'), findsOneWidget);
     expect(find.text('Online status unknown'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
     await b.host.pauseGroupConnections();
