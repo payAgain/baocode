@@ -746,16 +746,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
               if (showChatStatus && error != null)
                 _Notice(error, isError: true),
               if (_stored && widget.localHost == null) _host(text),
-              if (_connection.peer case final peer?
-                  when _online && !peer.isClosed)
-                Align(
-                  alignment: AlignmentDirectional.centerStart,
-                  child: TextButton.icon(
-                    onPressed: _busy ? null : () => _openPeople(peer),
-                    icon: const Icon(Icons.people_outline, size: 16),
-                    label: Text(text.managePeople),
-                  ),
-                ),
+
               if (_online && showChatStatus) ...[
                 const SizedBox(height: 16),
                 if (_chatBusy) _Progress(text.loadingChats),
@@ -1626,8 +1617,7 @@ class _HostText {
     : _zh = Localizations.localeOf(context).languageCode == 'zh';
 
   final bool _zh;
-  String get managePeople =>
-      _zh ? '管理机器人、群聊和资料' : 'Manage bots, groups & profile';
+
   String get botSettings => _zh ? '机器人设置' : 'Bot settings';
   String get groupSettings => _zh ? '群聊设置' : 'Group settings';
   String get replyToMessage => _zh ? '引用回复' : 'Reply to message';

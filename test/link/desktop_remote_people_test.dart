@@ -303,7 +303,7 @@ void main() {
     },
   );
 
-  testWidgets('catalog launches People and applies reply-only changes', (
+  testWidgets('catalog omits the manager shortcut and reflects group edits', (
     tester,
   ) async {
     final host = _Host();
@@ -311,7 +311,10 @@ void main() {
     final chats = DesktopHostChats();
     await _mountPage(tester, _PageConnection(host.peer), chats);
     try {
-      await _tap(tester, 'Manage bots, groups & profile');
+      expect(find.text('Manage bots, groups & profile'), findsNothing);
+      await _tap(tester, 'Fixture Group');
+      await tester.tap(find.byTooltip('Group settings'));
+      await tester.pumpAndSettle();
       final panel = find.byType(DesktopRemotePeopleManager);
       expect(panel, findsOneWidget);
       final catalog = find.byKey(const ValueKey('host-catalog'));
@@ -319,10 +322,6 @@ void main() {
         tester.getRect(catalog).right,
         lessThan(tester.getRect(panel).left),
       );
-      await tester.tap(
-        find.descendant(of: panel, matching: find.text('Fixture Group')),
-      );
-      await tester.pumpAndSettle();
       await _enter(tester, 'Name', 'Group from catalog');
       await _tap(tester, 'Save');
       expect(host.writes(LinkMethods.saveGroup).single['group'], 'g1');
@@ -592,8 +591,9 @@ void main() {
       final chats = DesktopHostChats();
       await _mountPage(tester, connection, chats);
       try {
+        await _tap(tester, 'Fixture Group');
         final firstReply = first.gatedState = Completer<Object?>();
-        await tester.tap(find.text('Manage bots, groups & profile'));
+        await tester.tap(find.byTooltip('Group settings'));
         await tester.pump();
         await tester.tap(find.byTooltip('Close settings'));
         await tester.pump();
@@ -603,7 +603,7 @@ void main() {
         expect(find.text('Updated after close'), findsOneWidget);
 
         final oldReply = first.gatedState = Completer<Object?>();
-        await tester.tap(find.text('Manage bots, groups & profile'));
+        await tester.tap(find.byTooltip('Group settings'));
         await tester.pump();
         chats.bind(second.peer);
         connection.replacePeer(second.peer);
