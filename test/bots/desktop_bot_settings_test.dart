@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:baocode/bots/bot.dart';
 import 'package:baocode/bots/bot_files.dart';
@@ -12,12 +11,45 @@ import 'package:baocode/l10n/l10n.dart';
 import 'package:baocode/workspace/preference_store.dart';
 import 'package:baocode/workspace/workspace.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
 import '../kernel_test.dart' show FakeCli;
 
 void main() {
+  testWidgets('narrow profile keeps Save reachable and reveals invalid name', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(292, 530);
+    addTearDown(tester.view.reset);
+    final fixture = _Fixture();
+    addTearDown(fixture.dispose);
+    final bot = fixture.bots.save(name: '纸鹤', identity: '整理笔记', abilities: {});
+    await tester.pumpWidget(fixture.page(bot: bot, locale: const Locale('zh')));
+    expect(find.text('纸鹤').hitTestable(), findsWidgets);
+    expect(find.text('基本资料').hitTestable(), findsOneWidget);
+    await _enter(tester, '名称', ' ');
+    FocusManager.instance.primaryFocus?.unfocus();
+    await tester.ensureVisible(find.text('删除 Bot'));
+    await tester.pumpAndSettle();
+    final save = find.widgetWithText(FilledButton, '保存');
+    expect(save.hitTestable(), findsOneWidget);
+    expect(tester.getTopLeft(save).dy, greaterThan(450));
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+    expect(_field('名称').hitTestable(), findsOneWidget);
+    final input = find.descendant(
+      of: _field('名称'),
+      matching: find.byType(EditableText),
+    );
+    expect(tester.widget<EditableText>(input).focusNode.hasFocus, isTrue);
+    expect(find.text('请输入名称。').hitTestable(), findsOneWidget);
+    expect(fixture.bots.byId(bot.id)?.name, '纸鹤');
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('validates the name and persists a new bot', (tester) async {
     final fixture = _Fixture();
     addTearDown(fixture.dispose);
@@ -113,7 +145,9 @@ void main() {
     expect(delete, findsOneWidget);
     await _tap(tester, delete);
     expect(find.text('Delete Finch?'), findsOneWidget);
-    await _tap(tester, find.text('Cancel'));
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(find.text('Delete Finch?'), findsNothing);
     expect(fixture.bots.byId(target.id), same(target));
     expect(fixture.read(target), isNotNull);
     expect(fixture.backCount, 0);

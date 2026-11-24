@@ -15,6 +15,7 @@ import 'package:baocode/link/desktop_remote_people.dart';
 import 'package:baocode/link/workspace_bridge.dart' show WorkspaceBridge;
 import 'package:baocode/workspace/workspace.dart' show Workspace;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const _assistant = LinkBot(id: 'assistant', name: 'Assistant', assistant: true);
@@ -898,6 +899,36 @@ void main() {
   });
 
   testWidgets(
+    'narrow remote Bot keeps Save visible and cancels avatar review with Enter',
+    (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(288, 540);
+      addTearDown(tester.view.reset);
+      final host = _Host();
+      await host.open();
+      await _mount(tester, host.peer);
+      await _tap(tester, 'Fixture Bot');
+      expect(find.text('Profile').hitTestable(), findsOneWidget);
+      await _enter(tester, 'Avatar emoji', 'X');
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.ensureVisible(find.text('Delete Bot'));
+      await tester.pumpAndSettle();
+      expect(find.text('Save').hitTestable(), findsOneWidget);
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(find.text('Replace picture').hitTestable(), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+      expect(find.text('Replace picture'), findsNothing);
+      expect(find.text('Delete Bot').hitTestable(), findsOneWidget);
+      expect(find.text('Save').hitTestable(), findsOneWidget);
+      expect(host.writes(LinkMethods.saveBot), isEmpty);
+      expect(tester.takeException(), isNull);
+      await _finish(tester, [host]);
+    },
+  );
+
+  testWidgets(
     'clear chat and group deletion each require explicit confirmation',
     (tester) async {
       final host = _Host();
@@ -909,12 +940,12 @@ void main() {
       await _tap(tester, 'Cancel');
       expect(host.writes(LinkMethods.clearBotChat), isEmpty);
       await _tap(tester, 'Clear chat');
-      await _tap(tester, 'Confirm');
+      await _tap(tester, 'Clear chat');
       expect(host.writes(LinkMethods.clearBotChat).single, {'bot': 'b1'});
       await _tap(tester, 'Fixture Group');
       await _tap(tester, 'Delete group');
       expect(host.writes(LinkMethods.deleteGroup), isEmpty);
-      await _tap(tester, 'Confirm');
+      await _tap(tester, 'Delete');
       expect(host.writes(LinkMethods.deleteGroup).single, {'group': 'g1'});
       expect(find.text('Fixture Group'), findsNothing);
       await _finish(tester, [host]);
@@ -935,7 +966,7 @@ void main() {
         find.textContaining('remove the existing picture'),
         findsOneWidget,
       );
-      await _tap(tester, 'Confirm');
+      await _tap(tester, 'Replace profile');
       expect(host.profile, {
         'name': 'Fixture Profile',
         'gender': '',
@@ -979,7 +1010,7 @@ void main() {
     await _tap(tester, 'Choose picture');
     await _tap(tester, 'Save');
     expect(host.writes(LinkMethods.saveBot), isEmpty);
-    await _tap(tester, 'Confirm');
+    await _tap(tester, 'Replace picture');
     expect(host.writes(LinkMethods.saveBot).single['avatarImage'], {
       'data': _png,
       'type': 'image/png',
@@ -1021,7 +1052,7 @@ void main() {
     await _enter(tester, 'Self notes', '');
     await _tap(tester, 'Save self notes');
     expect(host.writes(LinkMethods.setBotSelf), isEmpty);
-    await _tap(tester, 'Confirm');
+    await _tap(tester, 'Clear self notes');
     expect(host.writes(LinkMethods.setBotSelf).single, {
       'bot': 'b1',
       'text': '',
@@ -1048,7 +1079,7 @@ void main() {
       await _tap(tester, 'Fixture Bot');
       await _tap(tester, 'Delete Bot');
       expect(host.writes(LinkMethods.deleteBot), isEmpty);
-      await _tap(tester, 'Confirm');
+      await _tap(tester, 'Delete');
       expect(host.writes(LinkMethods.deleteBot).single, {'bot': 'b1'});
       expect((catalogs.last['bots'] as List).single['id'], 'assistant');
       await _finish(tester, [host]);
@@ -1063,7 +1094,7 @@ void main() {
     await _mount(tester, host.peer);
     await _tap(tester, 'Fixture Bot');
     await _tap(tester, 'Clear chat');
-    await _tap(tester, 'Confirm');
+    await _tap(tester, 'Clear chat');
     expect(host.writes(LinkMethods.clearBotChat), hasLength(1));
     expect(
       find.text('This host does not provide this setting.'),

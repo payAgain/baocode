@@ -4,8 +4,11 @@ import 'dart:convert';
 import 'package:bao_link/bao_link.dart';
 import 'package:flutter/foundation.dart' show listEquals, setEquals;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../bots/desktop_bot_editor_ui.dart';
 import '../chat/chat_models.dart' show ImageAttachment;
+import '../theme/app_theme.dart';
 import '../workspace/window_controls.dart';
 
 part 'desktop_remote_people_editors.dart';
@@ -66,6 +69,9 @@ class _BoundPeopleManager extends StatefulWidget {
 typedef _Confirmation = ({
   String title,
   String detail,
+  String action,
+  IconData icon,
+  double previousOffset,
   Future<void> Function(LinkPeer) run,
 });
 
@@ -84,7 +90,7 @@ class _DesktopRemotePeopleManagerState extends State<_BoundPeopleManager> {
   // closes. Keep capability evidence for the lifetime of its authenticated peer.
   static final _observedGroupOptions = Expando<Set<String>>();
   final _observedBotFlags = <String>{};
-  final _scroll = ScrollController();
+  final _scroll = ScrollController(keepScrollOffset: false);
 
   String _tr(String en, String zh) =>
       Localizations.maybeLocaleOf(context)?.languageCode == 'zh' ? zh : en;
@@ -256,15 +262,31 @@ class _DesktopRemotePeopleManagerState extends State<_BoundPeopleManager> {
   }
 
   void _back() => _changeView(() {
-    if (_confirm != null) {
-      _confirm = null;
-    } else if (_draft?.kind == _PeopleKind.memory) {
+    if (_draft?.kind == _PeopleKind.memory) {
       _draft = _returnToBot;
       _returnToBot = null;
     } else {
       _draft = null;
     }
   });
+
+  void _cancelReview() {
+    final review = _confirm;
+    if (review == null) return;
+    final draft = _draft;
+    _changeView(() => _confirm = null);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          !identical(_draft, draft) ||
+          _confirm != null ||
+          !_scroll.hasClients) {
+        return;
+      }
+      _scroll.jumpTo(
+        review.previousOffset.clamp(0.0, _scroll.position.maxScrollExtent),
+      );
+    });
+  }
 
   Future<void> _openBot(LinkPeer peer, _PeopleDraft draft) async {
     _check(peer);
@@ -539,105 +561,123 @@ class _DesktopRemotePeopleManagerState extends State<_BoundPeopleManager> {
   };
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => Material(
+    key: const ValueKey('desktop-remote-people-manager'),
+    color: AppColors.conversationSurface,
+    child: _buildView(),
+  );
+
+  Widget _editor({
+    required String title,
+    required IconData icon,
+    required Widget body,
+    String? name,
+    Widget? avatar,
+    Widget? actions,
+    bool warning = false,
+  }) {
     final problem = _problem;
     final notice = _notice;
-    return Material(
-      key: const ValueKey('desktop-remote-people-manager'),
-      color: Theme.of(context).colorScheme.surface,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsetsDirectional.fromSTEB(12, 6, 4, 6),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _tr('Bots, groups & profile', '机器人、群聊和资料'),
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                ),
-                if (widget.options.onClose != null)
-                  IconButton(
-                    tooltip: widget.options.compact
-                        ? _tr('Back to workspace', '返回工作区')
-                        : _tr('Close settings', '关闭设置'),
-                    onPressed: _close,
-                    icon: Icon(
-                      widget.options.compact ? Icons.arrow_back : Icons.close,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          if (_busy)
-            const LinearProgressIndicator()
-          else
-            const Divider(height: 4),
-          if (problem != null || notice != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-              child: Semantics(
-                liveRegion: true,
-                child: Text(
-                  problem == null ? notice! : _errorText(problem),
-                  style: problem == null
-                      ? null
-                      : TextStyle(color: Theme.of(context).colorScheme.error),
-                ),
+    return BotEditorLayout(
+      title: title,
+      name: name,
+      icon: icon,
+      avatar: avatar,
+      body: body,
+      actions: actions,
+      controller: _scroll,
+      busy: _busy,
+      warning: warning,
+      close: widget.options.onClose == null
+          ? null
+          : IconButton(
+              tooltip: widget.options.compact
+                  ? _tr('Back to workspace', '返回工作区')
+                  : _tr('Close settings', '关闭设置'),
+              onPressed: _close,
+              icon: Icon(
+                widget.options.compact ? Icons.arrow_back : Icons.close,
               ),
             ),
-          Expanded(
-            child: SingleChildScrollView(
-              controller: _scroll,
-              padding: const EdgeInsets.all(12),
-              child: _buildView(),
+      status: problem == null && notice == null
+          ? null
+          : Semantics(
+              liveRegion: true,
+              child: Text(
+                problem == null ? notice! : _errorText(problem),
+                style: problem == null
+                    ? null
+                    : TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
             ),
-          ),
-        ],
-      ),
     );
   }
 
   Widget _buildView() {
-    if (_peer == null) return Text(_errorText(_PeopleProblem.offline));
     final catalog = _catalog;
-    if (catalog == null) {
-      if (_busy) return Text(_tr('Loading host settings…', '正在加载主机设置…'));
-      return OutlinedButton(
-        onPressed: () => _run((peer) async {
-          await _readCatalog(peer);
-        }),
-        child: Text(_tr('Refresh', '刷新')),
+    final editor = _PeopleEditors(this);
+    if (_peer == null || catalog == null) {
+      return _catalogView(switch ((_peer, _busy)) {
+        (null, _) => Text(_errorText(_PeopleProblem.offline)),
+        (_, true) => Text(_tr('Loading host settings…', '正在加载主机设置…')),
+        _ => OutlinedButton(
+          onPressed: () => _run((peer) async {
+            await _readCatalog(peer);
+          }),
+          child: Text(_tr('Refresh', '刷新')),
+        ),
+      });
+    }
+    if (_confirm case final review?) {
+      return CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.escape): _cancelReview,
+        },
+        child: FocusScope(
+          child: _editor(
+            title: _tr('Review change', '确认操作'),
+            icon: review.icon,
+            warning: true,
+            body: BotEditorSection(
+              title: review.title,
+              danger: true,
+              children: [
+                Text(review.detail),
+                BotEditorActions(
+                  children: [
+                    OutlinedButton(
+                      autofocus: true,
+                      style: botEditorButtonStyle(context),
+                      onPressed: _cancelReview,
+                      child: Text(_tr('Cancel', '取消')),
+                    ),
+                    FilledButton(
+                      style: botEditorButtonStyle(context, destructive: true),
+                      onPressed: () => _run(review.run),
+                      child: Text(review.action),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
       );
     }
-    if (_confirm case final confirm?) {
-      return _section([
-        _heading(confirm.title),
-        Text(confirm.detail),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            OutlinedButton(onPressed: _back, child: Text(_tr('Cancel', '取消'))),
-            FilledButton(
-              onPressed: () => _run(confirm.run),
-              child: Text(_tr('Confirm', '确认')),
-            ),
-          ],
-        ),
-      ]);
-    }
-    final editor = _PeopleEditors(this);
     if (_draft case final draft?) {
       return KeyedSubtree(
         key: ObjectKey(draft),
         child: editor.buildDraft(draft, catalog),
       );
     }
-    return editor.list(catalog);
+    return _catalogView(editor.list(catalog));
   }
+
+  Widget _catalogView(Widget body) => _editor(
+    title: _tr('Bots, groups & profile', '机器人、群聊和资料'),
+    icon: Icons.people_outline,
+    body: body,
+  );
 }
 
 Widget _section(List<Widget> children) => Column(
