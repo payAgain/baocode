@@ -4,6 +4,11 @@ import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
 
 import '../ide/ide_code_diff.dart';
+import '../ide/ide_list.dart' show IdeListColors;
+import '../settings/pages/settings_widgets.dart' show SettingsText;
+import '../theme/app_theme.dart' show AppColors;
+import '../theme/codicons.dart';
+import '../theme/workbench_theme.dart' show themeColors;
 import 'desktop_host_chats.dart';
 
 part 'desktop_remote_activity_output.dart';
@@ -317,27 +322,28 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
             Expanded(child: widget.builder(context, activityButton)),
             if (_open && available) ...[
               if (side)
-                const VerticalDivider(width: 1)
+                VerticalDivider(width: 1, color: AppColors.partBorder)
               else
-                const Divider(height: 1),
+                _activityRule(),
               SizedBox(
                 width: side ? 324 : null,
                 height: side ? null : constraints.maxHeight * .48,
                 child: Material(
-                  color: Theme.of(context).colorScheme.surface,
+                  color: AppColors.background,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      ListTile(
-                        dense: true,
-                        title: Text(text.activity),
-                        trailing: IconButton(
+                      _ActivityBar(
+                        label: text.activity,
+                        heading: true,
+                        trailing: _ActivityIconButton(
                           tooltip: text.close,
-                          icon: const Icon(Icons.close),
+                          icon: Codicons.close,
                           onPressed: _toggle,
                         ),
                       ),
                       _sections(text),
+                      _activityRule(),
                       Expanded(
                         child: switch (_section) {
                           _Section.tasks when _output != null => _outputPane(
@@ -362,8 +368,9 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
 
   Widget _sections(_ActivityText text) => SingleChildScrollView(
     scrollDirection: Axis.horizontal,
-    padding: const EdgeInsets.symmetric(horizontal: 8),
+    padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
     child: Row(
+      spacing: 4,
       children: [
         _tab(_Section.tasks, text.tasks),
         _tab(_Section.changes, text.changes),
@@ -372,72 +379,72 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     ),
   );
 
-  Widget _tab(_Section section, String label) => Semantics(
-    selected: _section == section,
-    child: TextButton(
-      style: _section == section
-          ? TextButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
-            )
-          : null,
-      onPressed: () {
-        if (_section != section) _selectSection(section);
-      },
-      child: Text(label),
-    ),
-  );
+  Widget _tab(_Section section, String label) {
+    final selected = _section == section;
+    return MergeSemantics(
+      child: Semantics(
+        selected: selected,
+        child: TextButton(
+          style: _activityButtonStyle(
+            context,
+            foreground: selected ? AppColors.accent : AppColors.textMuted,
+            background: selected ? IdeListColors.inactiveSelection : null,
+            selected: selected,
+          ),
+          onPressed: () {
+            if (!selected) _selectSection(section);
+          },
+          child: Text(label),
+        ),
+      ),
+    );
+  }
 
   void _changeState(VoidCallback change) => setState(change);
 
   Widget _tasks(_ActivityText text, DesktopRemoteActivitySession session) {
     final tasks = session._tasks.values.toList();
-    return ListView.separated(
-      primary: false,
-      padding: const EdgeInsets.all(12),
-      itemCount: tasks.isEmpty ? 1 : tasks.length,
-      separatorBuilder: (_, _) => const Divider(),
+    if (tasks.isEmpty) {
+      return _ActivityNotice(icon: Codicons.tasklist, label: text.noTasks);
+    }
+    return _activityList(
+      count: tasks.length,
       itemBuilder: (context, index) {
-        if (tasks.isEmpty) return Text(text.noTasks);
         final task = tasks[index];
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        return _ActivityRow(
+          icon: task.kind == 'command' ? Codicons.terminal : Codicons.tasklist,
+          title: task.description.isEmpty ? task.id : task.description,
+          metadata: [
+            text.taskKind(task.kind),
+            text.taskStatus(task.status),
+          ].join(' · '),
           children: [
-            Text(task.description.isEmpty ? task.id : task.description),
-            Text(
-              [
-                text.taskKind(task.kind),
-                text.taskStatus(task.status),
-              ].join(' · '),
-            ),
             if (task.command case final command? when command.isNotEmpty)
-              SelectableText(
-                command,
-                style: const TextStyle(fontFamily: 'monospace'),
-              ),
+              _ActivityCode(text: command),
             if (task.summary case final summary? when summary.isNotEmpty)
-              Text(summary),
+              Text(summary, style: _activityDetail),
             if (task.output || task.status == 'running')
               Wrap(
+                spacing: 4,
                 children: [
                   if (task.output)
-                    TextButton(
+                    _ActivityAction(
+                      label: text.viewOutput,
                       onPressed: () => _showOutput(session, task),
-                      child: Text(text.viewOutput),
                     ),
                   if (task.status == 'running')
-                    TextButton(
+                    _ActivityAction(
+                      label: _stopping.contains(task.id)
+                          ? text.awaitingHost
+                          : text.stop,
                       onPressed: _stopping.contains(task.id)
                           ? null
                           : () => _stop(session, task),
-                      child: Text(
-                        _stopping.contains(task.id)
-                            ? text.awaitingHost
-                            : text.stop,
-                      ),
+                      secondary: true,
                     ),
                 ],
               ),
-            if (_stopError == task.id) Text(text.actionFailed),
+            if (_stopError == task.id) _ActivityError(text.actionFailed),
           ],
         );
       },
@@ -450,44 +457,314 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
         builder: (context, _) => Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            ListTile(
-              contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-              leading: IconButton(
+            _ActivityBar(
+              leading: _ActivityIconButton(
                 tooltip: text.backToTasks,
-                icon: const Icon(Icons.arrow_back),
+                icon: Codicons.arrowLeft,
                 onPressed: () => setState(_clearOutput),
               ),
-              title: Text(
-                output.task.description.isEmpty
-                    ? output.task.id
-                    : output.task.description,
-              ),
-              trailing: IconButton(
+              label: output.task.description.isEmpty
+                  ? output.task.id
+                  : output.task.description,
+              trailing: _ActivityIconButton(
                 tooltip: text.reloadOutput,
-                icon: const Icon(Icons.refresh),
+                icon: Codicons.refresh,
                 onPressed: output.loading
                     ? null
                     : () => _showOutput(output.session, output.task),
               ),
             ),
+            _activityRule(),
             Expanded(
-              child: SingleChildScrollView(
-                key: ObjectKey(output),
-                padding: const EdgeInsets.all(12),
-                child: switch (output) {
-                  _TaskOutput(loading: true) => Text(text.loading),
-                  _TaskOutput(failed: true) => Text(text.outputFailed),
-                  _TaskOutput(tail: '') => Text(text.noOutput),
-                  _ => SelectableText(
-                    output.tail,
-                    style: const TextStyle(fontFamily: 'monospace'),
-                  ),
-                },
-              ),
+              child: switch (output) {
+                _TaskOutput(loading: true) => _ActivityNotice(
+                  icon: Codicons.terminal,
+                  label: text.loading,
+                ),
+                _TaskOutput(failed: true) => _ActivityNotice(
+                  icon: Codicons.warning,
+                  label: text.outputFailed,
+                ),
+                _TaskOutput(tail: '') => _ActivityNotice(
+                  icon: Codicons.terminal,
+                  label: text.noOutput,
+                ),
+                _ => SingleChildScrollView(
+                  key: ObjectKey(output),
+                  padding: const EdgeInsets.all(12),
+                  child: _ActivityCode(text: output.tail),
+                ),
+              },
             ),
           ],
         ),
       );
+}
+
+TextStyle get _activityTitle =>
+    SettingsText.label.copyWith(color: AppColors.textPrimary);
+TextStyle get _activityDetail =>
+    SettingsText.description.copyWith(color: AppColors.textMuted);
+
+Widget _activityRule() => Divider(height: 1, color: AppColors.partBorder);
+
+ButtonStyle _activityButtonStyle(
+  BuildContext context, {
+  required Color foreground,
+  Color? background,
+  bool selected = false,
+}) => ButtonStyle(
+  foregroundColor: WidgetStateProperty.resolveWith(
+    (states) => states.contains(WidgetState.disabled)
+        ? AppColors.textFaint
+        : foreground,
+  ),
+  backgroundColor: WidgetStatePropertyAll(background),
+  overlayColor: WidgetStateProperty.resolveWith(
+    (states) =>
+        states.contains(WidgetState.hovered) ||
+            states.contains(WidgetState.pressed)
+        ? themeColors['toolbar.hoverBackground']
+        : Colors.transparent,
+  ),
+  side: WidgetStateProperty.resolveWith((states) {
+    final outline = states.contains(WidgetState.focused)
+        ? themeColors['focusBorder']
+        : selected
+        ? themeColors.get('contrastActiveBorder')
+        : null;
+    return outline == null ? BorderSide.none : BorderSide(color: outline);
+  }),
+  textStyle: WidgetStatePropertyAll(
+    Theme.of(context).textTheme.labelLarge
+        ?.merge(_activityDetail.copyWith(fontWeight: FontWeight.w500)),
+  ),
+  minimumSize: const WidgetStatePropertyAll(Size(28, 28)),
+  padding: const WidgetStatePropertyAll(
+    EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+  ),
+  shape: WidgetStatePropertyAll(
+    RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
+  ),
+  visualDensity: VisualDensity.standard,
+  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+);
+
+class _ActivityBar extends StatelessWidget {
+  const _ActivityBar({
+    required this.label,
+    this.leading,
+    this.trailing,
+    this.heading = false,
+  });
+
+  final String label;
+  final Widget? leading;
+  final Widget? trailing;
+  final bool heading;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+    child: Row(
+      spacing: 6,
+      children: [
+        ?leading,
+        Expanded(
+          child: Semantics(
+            header: heading,
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: heading
+                  ? SettingsText.heading.copyWith(color: AppColors.textPrimary)
+                  : _activityTitle,
+            ),
+          ),
+        ),
+        ?trailing,
+      ],
+    ),
+  );
+}
+
+class _ActivityIconButton extends StatelessWidget {
+  const _ActivityIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) => IconButton(
+    tooltip: tooltip,
+    icon: Icon(icon, size: 16),
+    onPressed: onPressed,
+    style: _activityButtonStyle(
+      context,
+      foreground: AppColors.textMuted,
+    ).copyWith(padding: const WidgetStatePropertyAll(EdgeInsets.zero)),
+  );
+}
+
+class _ActivityAction extends StatelessWidget {
+  const _ActivityAction({
+    required this.label,
+    required this.onPressed,
+    this.secondary = false,
+  });
+
+  final String label;
+  final VoidCallback? onPressed;
+  final bool secondary;
+
+  @override
+  Widget build(BuildContext context) => TextButton(
+    style: _activityButtonStyle(
+      context,
+      foreground: secondary ? AppColors.textMuted : AppColors.accent,
+    ),
+    onPressed: onPressed,
+    child: Text(label),
+  );
+}
+
+Widget _activityList({
+  Key? key,
+  required int count,
+  required IndexedWidgetBuilder itemBuilder,
+}) => ListView.separated(
+  key: key,
+  primary: false,
+  padding: const EdgeInsets.symmetric(horizontal: 12),
+  itemCount: count,
+  separatorBuilder: (_, _) => _activityRule(),
+  itemBuilder: itemBuilder,
+);
+
+class _ActivityRow extends StatelessWidget {
+  const _ActivityRow({
+    required this.icon,
+    required this.title,
+    required this.metadata,
+    this.selectableTitle = false,
+    this.children = const [],
+  });
+
+  final IconData icon;
+  final String title;
+  final String metadata;
+  final bool selectableTitle;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 10),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      spacing: 8,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Icon(icon, size: 15, color: AppColors.textMuted),
+        ),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            spacing: 3,
+            children: [
+              selectableTitle
+                  ? SelectableText(title, style: _activityTitle)
+                  : Text(title, style: _activityTitle),
+              Text(metadata, style: _activityDetail),
+              ...children,
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _ActivityNotice extends StatelessWidget {
+  const _ActivityNotice({required this.icon, required this.label, this.action});
+
+  final IconData icon;
+  final String label;
+  final Widget? action;
+
+  Widget get content => Row(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    spacing: 8,
+    children: [
+      Padding(
+        padding: const EdgeInsets.only(top: 2),
+        child: Icon(icon, size: 15, color: AppColors.textMuted),
+      ),
+      Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: _activityDetail),
+            ?action,
+          ],
+        ),
+      ),
+    ],
+  );
+
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+    primary: false,
+    padding: const EdgeInsets.all(12),
+    child: content,
+  );
+}
+
+class _ActivityCode extends StatelessWidget {
+  const _ActivityCode({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: AppColors.code,
+      borderRadius: BorderRadius.circular(5),
+      border: Border.all(color: AppColors.partBorder),
+    ),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: SelectableText(
+        text,
+        style: SettingsText.path.copyWith(
+          color: AppColors.text,
+          fontFamilyFallback: [
+            ...?SettingsText.path.fontFamilyFallback,
+            ?Theme.of(context).textTheme.bodyMedium?.fontFamily,
+            ...?Theme.of(context).textTheme.bodyMedium?.fontFamilyFallback,
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+class _ActivityError extends StatelessWidget {
+  const _ActivityError(this.label);
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Text(
+    label,
+    style: _activityDetail.copyWith(color: IdeListColors.errorForeground),
+  );
 }
 
 class _ActivityText {

@@ -1,14 +1,77 @@
 import 'dart:async';
 
+import 'package:bao_editor/monaco/vs/workbench/services/themes/common/color_theme_data.dart';
 import 'package:bao_link/bao_link.dart';
 import 'package:baocode/ide/ide_code_diff.dart';
+import 'package:baocode/ide/ide_list.dart';
 import 'package:baocode/l10n/app_localizations.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_remote_activity.dart';
+import 'package:baocode/theme/app_theme.dart';
+import 'package:baocode/theme/workbench_theme.dart' as workbench;
+import 'package:baocode/theme/workbench_theme_initial_colors.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('activity uses the workbench light sidebar palette', (
+    tester,
+  ) async {
+    final original = workbench.WorkbenchThemeService.instance;
+    final light = workbench.WorkbenchThemeService(
+      initial: ColorThemeData.createUnloadedThemeForThemeType(
+        workbench.ColorScheme.light,
+        colorThemeLightInitialColors,
+      ),
+    );
+    workbench.WorkbenchThemeService.instance = light;
+    addTearDown(() {
+      workbench.WorkbenchThemeService.instance = original;
+      light.dispose();
+    });
+    final theme = buildAppTheme();
+    expect(theme.brightness, Brightness.light);
+    final host = await _Host.show(tester, theme: theme);
+    await _tap(tester, find.byTooltip('Host activity'));
+
+    final title = find.text('Host activity');
+    final surface = tester
+        .element(title)
+        .findAncestorWidgetOfExactType<Material>();
+    expect(surface?.color, AppColors.background);
+    expect(tester.widget<Text>(title).style?.color, AppColors.textPrimary);
+
+    TextButton tab(String label) =>
+        tester.widget<TextButton>(find.widgetWithText(TextButton, label));
+    expect(
+      tab('Tasks').style?.backgroundColor?.resolve({}),
+      IdeListColors.inactiveSelection,
+    );
+    expect(
+      tab('Changes').style?.foregroundColor?.resolve({}),
+      AppColors.textMuted,
+    );
+    expect(
+      tester.widget<Text>(find.text('No tasks in this session.')).style?.color,
+      AppColors.textMuted,
+    );
+
+    await _tap(tester, find.text('Changes'));
+    expect(
+      tab('Tasks').style?.foregroundColor?.resolve({}),
+      AppColors.textMuted,
+    );
+    expect(
+      tab('Changes').style?.backgroundColor?.resolve({}),
+      IdeListColors.inactiveSelection,
+    );
+    expect(find.text('No pending changes in this session.'), findsOneWidget);
+    await _tap(tester, find.byTooltip('Close host activity'));
+    expect(title, findsNothing);
+    expect(host.methods, [LinkMethods.open]);
+    await host.close(tester);
+  });
+
   testWidgets('header launch docks host tasks alongside the live chat', (
     tester,
   ) async {
@@ -508,6 +571,37 @@ void main() {
       await host.close(tester);
     },
   );
+
+  testWidgets('refresh replaces the extension inventory in the open tab', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester);
+    host.reply = (_, _) => {'items': []};
+    await _tap(tester, find.byTooltip('Host activity'));
+    await _tap(tester, find.text('Extensions'));
+    expect(
+      find.text('No host extensions reported for this project.'),
+      findsOneWidget,
+    );
+
+    host.reply = (_, _) => {
+      'items': [
+        const LinkExtension(
+          kind: 'skill',
+          scope: 'user',
+          name: 'New skill',
+        ).toJson(),
+      ],
+    };
+    await _tap(tester, find.text('Refresh'));
+    expect(find.text('New skill'), findsOneWidget);
+    expect(host.methods, [
+      LinkMethods.open,
+      LinkMethods.extensions,
+      LinkMethods.extensions,
+    ]);
+    await host.close(tester);
+  });
 }
 
 Finder _confirmButton(String label) => find.descendant(
@@ -549,6 +643,7 @@ class _Host {
   static Future<_Host> show(
     WidgetTester tester, {
     Locale locale = const Locale('en'),
+    ThemeData? theme,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 760));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -578,6 +673,7 @@ class _Host {
     await tester.pumpWidget(
       MaterialApp(
         locale: locale,
+        theme: theme,
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         home: Scaffold(

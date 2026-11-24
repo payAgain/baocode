@@ -39,74 +39,79 @@ Future<_ExtensionInventory> _loadExtensions(
 }
 
 extension _ExtensionsPane on _DesktopRemoteActivityState {
-  Widget _extensionsPane(
-    _ActivityText text,
-  ) => FutureBuilder<_ExtensionInventory>(
-    future: _extensions,
-    builder: (context, snapshot) {
-      final inventory = snapshot.connectionState == ConnectionState.done
-          ? snapshot.data
-          : null;
-      final items = inventory?.items ?? const <LinkExtension>[];
-      return ListView.separated(
-        key: const ValueKey(_Section.extensions),
-        primary: false,
-        padding: const EdgeInsets.all(12),
-        itemCount: items.length + 1,
-        separatorBuilder: (_, _) => const Divider(),
-        itemBuilder: (context, index) {
-          if (index > 0) {
-            final item = items[index - 1];
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(item.name, style: Theme.of(context).textTheme.titleSmall),
-                Text(
-                  [
-                    text.extensionKind(item.kind),
-                    text.extensionScope(item.scope),
-                    if (item.enabled case final enabled?)
-                      text.extensionEnabled(enabled),
-                  ].join(' · '),
-                ),
-                if (item.description.isNotEmpty)
-                  SelectableText(item.description),
-              ],
-            );
-          }
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (inventory == null)
-                Text(text.loading)
-              else if (inventory.error case final error?)
-                Text(
-                  error == LinkErrors.unknown || error == LinkErrors.unsupported
-                      ? text.extensionsUnsupported
-                      : text.extensionsFailed,
-                )
-              else
-                Text(items.isEmpty ? text.noExtensions : text.extensionDetails),
-              if (inventory != null)
-                TextButton.icon(
+  Widget _extensionsPane(_ActivityText text) =>
+      FutureBuilder<_ExtensionInventory>(
+        future: _extensions,
+        builder: (context, snapshot) {
+          final inventory = snapshot.connectionState == ConnectionState.done
+              ? snapshot.data
+              : null;
+          final items = inventory?.items ?? const <LinkExtension>[];
+          final label = switch (inventory) {
+            null => text.loading,
+            (items: _, error: LinkErrors.unknown || LinkErrors.unsupported) =>
+              text.extensionsUnsupported,
+            (items: _, error: final String _) => text.extensionsFailed,
+            _ => items.isEmpty ? text.noExtensions : text.extensionDetails,
+          };
+          final refresh = inventory == null
+              ? null
+              : _ActivityAction(
+                  label: text.refresh,
                   onPressed: () {
                     if (widget.session case final session?
                         when _active(session) &&
                             _section == _Section.extensions) {
-                      _changeState(
-                        () => _extensions = _loadExtensions(session),
-                      );
+                      final request = _loadExtensions(session);
+                      _changeState(() {
+                        _extensions = request;
+                      });
                     }
                   },
-                  icon: const Icon(Icons.refresh),
-                  label: Text(text.refresh),
-                ),
-            ],
+                );
+          if (items.isEmpty) {
+            return _ActivityNotice(
+              icon: Codicons.package,
+              label: label,
+              action: refresh,
+            );
+          }
+          return _activityList(
+            key: const ValueKey(_Section.extensions),
+            count: items.length + 1,
+            itemBuilder: (context, index) {
+              if (index == 0) {
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Wrap(
+                    spacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(label, style: _activityDetail),
+                      ?refresh,
+                    ],
+                  ),
+                );
+              }
+              final item = items[index - 1];
+              return _ActivityRow(
+                icon: Codicons.package,
+                title: item.name,
+                metadata: [
+                  text.extensionKind(item.kind),
+                  text.extensionScope(item.scope),
+                  if (item.enabled case final enabled?)
+                    text.extensionEnabled(enabled),
+                ].join(' · '),
+                children: [
+                  if (item.description.isNotEmpty)
+                    SelectableText(item.description, style: _activityDetail),
+                ],
+              );
+            },
           );
         },
       );
-    },
-  );
 }
 
 extension _ExtensionText on _ActivityText {

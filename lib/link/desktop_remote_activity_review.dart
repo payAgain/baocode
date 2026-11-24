@@ -220,16 +220,25 @@ extension _ChangeReview on _DesktopRemoteActivityState {
             embedded: true,
             bars: false,
           ),
-        _ => () => Text(text.previewUnavailable),
+        _ => () => _ActivityNotice(
+          icon: Codicons.diff,
+          label: text.previewUnavailable,
+        ),
       };
     } on LinkRemoteException catch (error) {
-      content = () => Text(switch (error.code) {
-        'stale' || LinkErrors.notFound => text.reviewError(_ReviewError.stale),
-        LinkErrors.unsupported || LinkErrors.unknown => text.previewUnavailable,
-        _ => text.actionFailed,
-      });
+      content = () => _ActivityNotice(
+        icon: Codicons.warning,
+        label: switch (error.code) {
+          'stale' ||
+          LinkErrors.notFound => text.reviewError(_ReviewError.stale),
+          LinkErrors.unsupported ||
+          LinkErrors.unknown => text.previewUnavailable,
+          _ => text.actionFailed,
+        },
+      );
     } on Object {
-      content = () => Text(text.actionFailed);
+      content = () =>
+          _ActivityNotice(icon: Codicons.warning, label: text.actionFailed);
     }
     if (!identical(_reviewPreview, preview) || !current()) return;
     _changeState(() => preview.content = content);
@@ -240,74 +249,77 @@ extension _ChangeReview on _DesktopRemoteActivityState {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          ListTile(
-            leading: IconButton(
+          _ActivityBar(
+            leading: _ActivityIconButton(
               tooltip: text.backToChanges,
-              icon: const Icon(Icons.arrow_back),
+              icon: Codicons.arrowLeft,
               onPressed: () => _changeState(() => _reviewPreview = null),
             ),
-            title: Text(preview.change.path, overflow: TextOverflow.ellipsis),
+            label: preview.change.path,
           ),
+          _activityRule(),
           Expanded(
-            child: preview.content?.call() ?? Center(child: Text(text.loading)),
+            child:
+                preview.content?.call() ??
+                _ActivityNotice(icon: Codicons.diff, label: text.loading),
           ),
         ],
       );
     }
     final changes = session._changes.values.toList();
-    return ListView.separated(
+    if (changes.isEmpty) {
+      return _ActivityNotice(icon: Codicons.diff, label: text.noChanges);
+    }
+    return _activityList(
       key: const ValueKey(_Section.changes),
-      primary: false,
-      padding: const EdgeInsets.all(12),
-      itemCount: changes.isEmpty ? 1 : changes.length,
-      separatorBuilder: (_, _) => const Divider(),
+      count: changes.length,
       itemBuilder: (context, index) {
-        if (changes.isEmpty) return Text(text.noChanges);
         final change = changes[index];
         final pending = _reviewing.containsKey(change.path);
         final counts = [
           if (change.added case final added?) '+$added',
           if (change.removed case final removed?) '−$removed',
         ].join(' ');
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        return _ActivityRow(
+          icon: Codicons.diff,
+          title: change.path,
+          selectableTitle: true,
+          metadata: [
+            text.changeKind(change.kind),
+            if (counts.isNotEmpty) counts,
+            if (change.binary) text.binary,
+            if (change.untracked) text.untracked,
+            if (change.conflict) text.conflict,
+          ].join(' · '),
           children: [
-            SelectableText(change.path),
-            Text(
-              [
-                text.changeKind(change.kind),
-                if (counts.isNotEmpty) counts,
-                if (change.binary) text.binary,
-                if (change.untracked) text.untracked,
-                if (change.conflict) text.conflict,
-              ].join(' · '),
-            ),
             if (pending)
-              Text(text.awaitingHost)
+              Text(text.awaitingHost, style: _activityDetail)
             else if (_projectRelative(change.path))
               Wrap(
+                spacing: 4,
                 children: [
-                  TextButton(
+                  _ActivityAction(
+                    label: text.keep,
                     onPressed: () => _review(session, change, keep: true),
-                    child: Text(text.keep),
                   ),
-                  TextButton(
+                  _ActivityAction(
+                    label: text.undo,
                     onPressed: change.undoable
                         ? () => _review(session, change, keep: false)
                         : null,
-                    child: Text(text.undo),
+                    secondary: true,
                   ),
                   if (change.preview && change.revision != null)
-                    TextButton(
+                    _ActivityAction(
+                      label: text.previewDiff,
                       onPressed: () => _previewChange(session, change),
-                      child: Text(text.previewDiff),
                     ),
                 ],
               )
             else
-              Text(text.outsideProject),
+              Text(text.outsideProject, style: _activityDetail),
             if (_reviewErrors[change.path] case final error?)
-              Text(text.reviewError(error)),
+              _ActivityError(text.reviewError(error)),
           ],
         );
       },
