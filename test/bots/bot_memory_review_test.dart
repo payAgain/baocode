@@ -14,6 +14,53 @@ const _fakeValue = 'synthetic-credential';
 const _credentialEvidence = 'password: $_fakeValue';
 
 void main() {
+  test('a private tombstone purges an apply intent after restart', () async {
+    final host = _Host();
+    var review = host.review();
+    await review.configure(group, memoryApproval: true);
+    await host.record(review, private, 1, toolIterations: 10);
+    await host.record(review, group, 1, toolIterations: 10);
+    expect(await review.runNext(), isTrue);
+    final staged = (await review.proposals(private, pendingOnly: false)).single;
+    expect(staged.status, BotMemoryReviewProposalStatus.applying);
+
+    // The original reader still has stale text. No deletion hook ran before
+    // restart, so the durable lookup must invalidate the journaled intent.
+    host.deleted.add((private, null, 'session', '1'));
+    review = host.review();
+    expect(await review.runNext(), isTrue);
+    expect(host.applications, isEmpty);
+    expect(host.calls.last.scope, group);
+    expect((await review.proposals(group)).single.evidence, hasLength(1));
+    final purged = (await review.proposals(private, pendingOnly: false)).single;
+    expect(purged.id, staged.id);
+    expect(purged.status, BotMemoryReviewProposalStatus.invalid);
+    expect(purged.after, isNull);
+    expect(purged.evidence, isEmpty);
+  });
+
+  test(
+    'a deletion during evidence lookup cannot publish a stale draft',
+    () async {
+      final host = _Host();
+      final review = host.review();
+      await host.record(review, private, 1, toolIterations: 10);
+      final lookupStarted = Completer<void>();
+      final completeLookup = Completer<void>();
+      host.waitForEvidence = () async {
+        if (!lookupStarted.isCompleted) lookupStarted.complete();
+        await completeLookup.future;
+      };
+      final running = review.runNext();
+      await lookupStarted.future;
+      host.deleted.add((private, null, 'session', '1'));
+      completeLookup.complete();
+      expect(await running, isTrue);
+      expect(host.calls, isEmpty);
+      expect(await review.proposals(private, pendingOnly: false), isEmpty);
+    },
+  );
+
   test('threshold, restart, foreground priority and turn dedupe', () async {
     final host = _Host();
     var review = host.review();
@@ -1051,6 +1098,7 @@ class _Host {
   final store = _ReviewStore();
   final memories = <BotMemoryScope, BotMemory>{};
   final sources = <(BotMemoryScope, String), String>{};
+  final deleted = <(BotMemoryScope, String?, String, String)>{};
   final calls = <BotMemoryReviewRequest>[];
   final applications = <(String, List<BotMemoryChange>)>[];
   DateTime now = DateTime.utc(2026, 11, 25);
@@ -1060,6 +1108,7 @@ class _Host {
   List<Object?> Function(String ref)? proposeRows;
   Future<String> Function(BotMemoryReviewRequest request)? respond;
   void Function()? onReadEvidence;
+  Future<void> Function()? waitForEvidence;
 
   Map<String, Object?> Function(String ref) propose = (ref) => {
     'action': 'add',
@@ -1072,8 +1121,11 @@ class _Host {
     scopeExists: (scope) => scope == private || scope == group,
     foregroundBusy: () => busy,
     clock: () => now,
+    isOriginalDeleted: (scope, project, session, message) =>
+        deleted.contains((scope, project, session, message)),
     readEvidence: (scope, session, evidence) async {
       onReadEvidence?.call();
+      if (waitForEvidence case final wait?) await wait();
       return sources[(scope, evidence.messageId)];
     },
     readMemory: (scope) => memories[scope] ?? BotMemory.fromMarkdown(''),

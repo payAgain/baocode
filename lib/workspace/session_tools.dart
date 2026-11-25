@@ -190,6 +190,7 @@ abstract final class SessionTools {
     session.send(
       ComposerMessage(text: text),
       from: UserPlace.computer,
+      preferManagedTranscript: true,
       notes: [
         ..._projectFactNotes(facts),
         for (final skill in loaded) botMemorySkillNote(skill),
@@ -898,6 +899,7 @@ abstract final class SessionTools {
         for (final skill in skills) botMemorySkillNote(skill),
       ],
       turnId: turnId,
+      preferManagedTranscript: accepted != null,
     );
   }
 

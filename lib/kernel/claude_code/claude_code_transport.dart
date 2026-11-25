@@ -31,6 +31,12 @@ abstract interface class ClaudeCodeTransport {
 abstract interface class ClaudeExternalTransport
     implements ClaudeCodeTransport {}
 
+/// The host's local built-in runtime and its selected transcript storage.
+abstract interface class LocalBuiltinClaudeTransport
+    implements ClaudeCodeTransport {
+  ({String projectsDir, String sessionId})? get managedTranscript;
+}
+
 /// The message a transport ends with: the process is gone.
 abstract final class ClaudeExit {
   static const type = 'transport_exit';
@@ -53,6 +59,9 @@ class ClaudeLaunch {
   const ClaudeLaunch({
     required this.cwd,
     this.resume,
+    this.resumePath,
+    this.managedTranscript,
+    this.preferManagedTranscript = false,
     this.model,
     this.permissionMode,
     this.effort,
@@ -131,6 +140,15 @@ class ClaudeLaunch {
 
   /// The session id to continue.
   final String? resume;
+
+  /// Explicit storage for local transcripts owned by the built-in engine.
+  final ({String projectsDir, String sessionId})? managedTranscript;
+
+  /// The catalog's source path, when this is a resume of a kept session.
+  final String? resumePath;
+
+  /// Use managed storage if this is a new, persistent local built-in session.
+  final bool preferManagedTranscript;
   final String? model;
 
   /// The models it may be switched to (`set_model`) without Claude Code
@@ -230,9 +248,13 @@ class ClaudeLaunch {
     String? settingsPath,
     String? promptPath,
     String? instructions,
+    ({String projectsDir, String sessionId})? managedTranscript,
   }) => ClaudeLaunch(
     cwd: cwd ?? this.cwd,
     resume: resume,
+    resumePath: resumePath,
+    managedTranscript: managedTranscript ?? this.managedTranscript,
+    preferManagedTranscript: preferManagedTranscript,
     model: model,
     permissionMode: permissionMode,
     effort: effort,

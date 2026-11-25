@@ -1,12 +1,19 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:bao_agent/bao_agent.dart' show SessionStore;
 import 'package:baocode/bots/bot_fact_store.dart';
 import 'package:baocode/bots/bot_folders.dart';
 import 'package:baocode/bots/bot_memory.dart';
 import 'package:baocode/bots/bots.dart';
+import 'package:baocode/kernel/agent_kernel.dart';
+import 'package:baocode/kernel/claude_code/claude_storage_io.dart';
+import 'package:baocode/kernel/claude_code/managed_transcripts_io.dart';
 import 'package:baocode/kernel/mock/mock_kernels.dart';
 import 'package:baocode/link/bot_memory_management.dart';
+import 'package:baocode/platform/data_dir.dart';
+import 'package:baocode/remote/remote_claude.dart' show ClaudeCatalog;
 import 'package:baocode/workspace/preference_store.dart';
 import 'package:baocode/workspace/workspace.dart';
 import 'package:bao_link/bao_link.dart';
@@ -54,6 +61,148 @@ Workspace _workspace({PreferenceStore? preferences}) {
 }
 
 void main() {
+  test(
+    'a redacted project fact stays suspended after session deletion',
+    () async {
+      final temporary = Directory.systemTemp.createTempSync(
+        'bot-fact-original-',
+      );
+      final previousDirectory = DataDirectory.current;
+      DataDirectory.current = DataDirectory(temporary.path);
+      addTearDown(() {
+        DataDirectory.current = previousDirectory;
+        temporary.deleteSync(recursive: true);
+      });
+      final mock = MockKernels.claudeCode;
+      final project = Project(
+        'Release',
+        temporary.createTempSync('release-').path,
+      );
+      final workspace = Workspace(
+        projects: [project],
+        kernels: [
+          KernelDescriptor(
+            id: mock.id,
+            label: mock.label,
+            icon: mock.icon,
+            description: mock.description,
+            create: mock.create,
+            catalog: ClaudeCatalog(
+              local: ClaudeStorage(configDir: '${temporary.path}/isolated'),
+            ),
+          ),
+        ],
+      );
+      addTearDown(workspace.dispose);
+      final bots = await _start(workspace, MemoryBotFolders());
+      final bot = bots.save(
+        name: 'Review Bot',
+        identity: '',
+        abilities: {BotAbility.agents},
+      );
+      final projectId = workspace.localProjectId(project)!;
+      final access = bots.projectFactAccess(bot.id, projectId)!;
+      const sessionId = 'dcaab80f-725a-4219-9ae1-56033d166455';
+      const redacted = 'd4b3c471-e776-4121-8d38-b1bd0e3dde01';
+      const unaffected = 'dbbb78e0-bb15-4bb1-b542-61d43af0308b';
+      final path = ManagedTranscripts.transcriptPath(project.path, sessionId);
+      final transcript = SessionStore(
+        sessionId: sessionId,
+        cwd: project.path,
+        file: path,
+      );
+      for (final (id, text) in [
+        (redacted, 'Release needs a check'),
+        (unaffected, 'Keep a signed tag'),
+      ]) {
+        transcript.append({
+          'type': 'user',
+          'uuid': id,
+          'message': {'role': 'user', 'content': text},
+        });
+      }
+      bots.applyReviewedProjectFacts(
+        bot.id,
+        projectId,
+        [
+          (
+            action: BotMemoryAction.add,
+            id: null,
+            revision: null,
+            text: 'Run preflight',
+          ),
+          (
+            action: BotMemoryAction.add,
+            id: null,
+            revision: null,
+            text: 'Sign the tag',
+          ),
+        ],
+        operationId: 'create-facts',
+        changeSources: [
+          (sessionId: sessionId, messageId: '$redacted/$redacted'),
+          (sessionId: sessionId, messageId: '$unaffected/$unaffected'),
+        ],
+      );
+      expect(
+        bots.projectFactPrompt(bot.id, projectId),
+        contains('Run preflight'),
+      );
+      await workspace.load();
+      final owner = BotMemoryManagement(
+        bots,
+        reviewer: 'owner',
+        localOwner: true,
+      );
+      final args = {'bot': bot.id, 'historyProject': projectId};
+      final results = await owner.call(LinkMethods.botMemorySearch, {
+        ...args,
+        'query': 'Release needs a check',
+      });
+      final hit = (results['hits'] as List).single as Map;
+      final window = await owner.call(LinkMethods.botMemorySource, {
+        ...args,
+        'source': hit['reference'],
+      });
+      expect(window['canDeleteOriginal'], isTrue);
+      expect(
+        await owner.call(LinkMethods.deleteBotMemorySource, {
+          ...args,
+          'source': (window['anchor'] as Map)['reference'],
+          'confirm': true,
+        }),
+        {'deleted': true},
+      );
+      expect(ManagedTranscripts.isOriginalRevoked(sessionId, redacted), isTrue);
+      expect(bots.projectFactPrompt(bot.id, projectId), '- Sign the tag');
+
+      File(path).deleteSync();
+      final facts = bots.factMemory(access);
+      expect(facts.entries, hasLength(2));
+      expect(facts.memory.unavailableEntries, {facts.entries.first.id});
+      expect(bots.projectFactPrompt(bot.id, projectId), '- Sign the tag');
+      expect(
+        () => bots.applyReviewedProjectFacts(
+          bot.id,
+          projectId,
+          [
+            (
+              action: BotMemoryAction.add,
+              id: null,
+              revision: null,
+              text: 'Run checks',
+            ),
+          ],
+          operationId: 'stale-review',
+          changeSources: [
+            (sessionId: sessionId, messageId: '$redacted/$redacted'),
+          ],
+        ),
+        throwsStateError,
+      );
+    },
+  );
+
   test(
     'imports both private fact kinds and keeps same-name people distinct',
     () {

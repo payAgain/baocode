@@ -289,8 +289,29 @@ Future<void> main(List<String> arguments) async {
       canUseProject: (id, project) =>
           bots.byId(id)?.can(BotAbility.agents) == true &&
           workspace.localProjectById(project) != null,
-      evidenceAvailable: (skill) =>
-          SessionTools.projectSkillEvidenceAvailable(workspace, skill),
+      evidenceAvailable: (skill) async {
+        final scope = BotMemoryScope(botId: skill.botId);
+        bool hasDeletedOriginal() => skill.evidence.any((source) {
+          if (source case {
+            'sessionId': final String sessionId,
+            'messageId': final String messageId,
+          }) {
+            return bots.isManagedOriginalDeleted(
+              scope,
+              skill.project,
+              sessionId,
+              messageId,
+            );
+          }
+          return false;
+        });
+        return !hasDeletedOriginal() &&
+            await SessionTools.projectSkillEvidenceAvailable(
+              workspace,
+              skill,
+            ) &&
+            !hasDeletedOriginal();
+      },
     );
     final review = bots.memoryReview = BotMemoryReview(
       store: PreferenceStore.file(p.join(directory, BotMemoryReview.fileName)),
@@ -298,6 +319,7 @@ Future<void> main(List<String> arguments) async {
       sourceGeneration: (scope) => scope.groupId == null
           ? 0
           : bots.groups.sourceGeneration(scope.groupId!),
+      isOriginalDeleted: bots.isManagedOriginalDeleted,
       readEvidence: bots.reviewEvidence,
       readProjectEvidence: (scope, project, sessionId, source) =>
           SessionTools.reviewProjectEvidence(

@@ -470,6 +470,90 @@ void main() {
     expect(h.lastResult['session_id'], id);
   });
 
+  test(
+    'managed transcripts share configuration but resume only in their project',
+    () async {
+      const id = 'a3da19b6-9c8c-4a2b-92b5-f267b398bddc';
+      h = await Harness.start(
+        sessionId: id,
+        settings: {
+          'env': {'ANTHROPIC_BASE_URL': 'https://shared-settings.invalid'},
+        },
+        script: [Reply.text('Legacy answer')],
+      );
+      await h.turn('Legacy question');
+      await h.engine.close();
+      final legacy = File(h.sessionFile);
+      final legacyText = legacy.readAsStringSync();
+      File(p.join(h.config, 'skills', 'shared-config', 'SKILL.md'))
+        ..createSync(recursive: true)
+        ..writeAsStringSync('Say hello from the shared config.');
+      final projects = p.join(h.root, 'managed', 'projects');
+
+      final managed = await Harness.start(
+        from: h,
+        sessionId: id,
+        transcriptProjectsDir: projects,
+        script: [Reply.text('Managed answer')],
+      );
+      addTearDown(managed.dispose);
+      await managed.turn('Managed question');
+      expect(managed.lastResult['session_id'], id);
+      final session = managed.engine.session;
+      final path = p.join(
+        projects,
+        p.basename(legacy.parent.path),
+        '$id.jsonl',
+      );
+      expect(session.store.file, path);
+      expect(File(path).readAsStringSync(), contains('Managed answer'));
+      expect(session.apiConfig().baseUrl, 'https://shared-settings.invalid');
+      expect(
+        session.promptCommands.map((command) => command.name),
+        contains('shared-config'),
+      );
+      expect(session.autoMemoryDir, p.join(legacy.parent.path, 'memory'));
+      expect(session.paths.findSession(id), path);
+      final options = EngineOptions.fromJson(managed.engine.options.toJson());
+      expect(options.transcriptProjectsDir, projects);
+      expect(options.configDir, h.config);
+      expect(options.sessionId, id);
+      await managed.engine.close();
+
+      final resumed = await Harness.start(
+        from: h,
+        resume: id,
+        transcriptProjectsDir: projects,
+        script: [Reply.text('Managed followup')],
+      );
+      addTearDown(resumed.dispose);
+      await resumed.turn('What did you say?');
+      final asked = requestText(resumed.model.turns.single);
+      expect(asked, contains('Managed question'));
+      expect(asked, contains('Managed answer'));
+      expect(asked, isNot(contains('Legacy')));
+      await resumed.engine.close();
+      expect(legacy.readAsStringSync(), legacyText);
+
+      final otherProject = Directory(p.join(projects, 'other-project'))
+        ..createSync();
+      File(path).renameSync(p.join(otherProject.path, '$id.jsonl'));
+      final missing = await Harness.start(
+        from: h,
+        resume: id,
+        transcriptProjectsDir: projects,
+      );
+      addTearDown(missing.dispose);
+      await expectLater(missing.request('initialize'), throwsStateError);
+      await missing.turn('Do not fall back');
+      expect(missing.lastResult['is_error'], isTrue);
+      expect(missing.lastResult['result'], contains('Managed transcript'));
+      expect(missing.model.turns, isEmpty);
+      expect(File(path).existsSync(), isFalse);
+      expect(legacy.readAsStringSync(), legacyText);
+    },
+  );
+
   test('prompt suggestions and a title, when asked for', () async {
     h = await Harness.start(
       promptSuggestions: true,

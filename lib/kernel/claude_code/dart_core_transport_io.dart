@@ -15,8 +15,8 @@ import 'core_ripgrep_io.dart';
 /// A session on BaoCode's own core: package:bao_agent's engine in an
 /// isolate of its own, speaking what the CLI speaks on its stdin and
 /// stdout, started as [ClaudeLaunch] would start the CLI.
-class DartCoreTransport implements ClaudeCodeTransport {
-  DartCoreTransport._(this._agent) {
+class DartCoreTransport implements LocalBuiltinClaudeTransport {
+  DartCoreTransport._(this._agent, this.managedTranscript) {
     _agent.messages.listen(
       _messages.add,
       onDone: () {
@@ -32,13 +32,19 @@ class DartCoreTransport implements ClaudeCodeTransport {
   final StreamController<Map<String, Object?>> _messages =
       StreamController.broadcast();
 
+  @override
+  final ({String projectsDir, String sessionId})? managedTranscript;
+
   static Future<ClaudeCodeTransport> start(ClaudeLaunch launch) async {
     if (!Directory(launch.cwd).existsSync()) {
       throw ClaudeFolderGone(launch.cwd);
     }
     final options = await engineOptions(launch);
     try {
-      return DartCoreTransport._(await AgentIsolate.spawn(options));
+      return DartCoreTransport._(
+        await AgentIsolate.spawn(options),
+        launch.managedTranscript,
+      );
     } on Object catch (error) {
       throw ClaudeUnavailable(
         'The built-in Claude Code core could not start',
@@ -50,6 +56,11 @@ class DartCoreTransport implements ClaudeCodeTransport {
   /// [launch] as the engine's options: the environment the CLI would run
   /// in, its command line's flags as options.
   static Future<EngineOptions> engineOptions(ClaudeLaunch launch) async {
+    final managed = launch.managedTranscript;
+    final resume = launch.resume;
+    if (managed != null && resume != null && managed.sessionId != resume) {
+      throw StateError('Managed transcript session ID does not match resume');
+    }
     final base = await ClaudeEnvironment.of();
     // The proxy as it is now: Clash may have been turned on since.
     final proxy = await NetworkProxy.instance.environment();
@@ -76,7 +87,9 @@ class DartCoreTransport implements ClaudeCodeTransport {
     ];
     return EngineOptions(
       cwd: launch.cwd,
-      resume: launch.resume,
+      resume: resume,
+      sessionId: resume == null ? managed?.sessionId : null,
+      transcriptProjectsDir: managed?.projectsDir,
       model: launch.model,
       permissionMode: launch.permissionMode,
       effort: launch.effort,

@@ -12,6 +12,7 @@ import '../chat/chat_models.dart';
 import '../chat/chat_session.dart';
 import '../kernel/agent_kernel.dart';
 import '../kernel/claude_code/claude_sdk_tools.dart';
+import '../kernel/claude_code/managed_transcripts_io.dart';
 import '../kernel/kernel_registry.dart';
 import '../kernel/kernel_types.dart' show KernelOption;
 import '../kernel/queued_messages.dart';
@@ -49,6 +50,7 @@ import 'desktop_bot_messages.dart' show privateBotItems;
 part 'bots_facts.dart';
 part 'bot_memory_sharing.dart';
 part 'bots_memory_migration.dart';
+part 'bots_managed_sources.dart';
 
 /// A bot's picture: its bytes, and their media type.
 typedef BotAvatarImage = ({Uint8List bytes, String type});
@@ -681,6 +683,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
         // Told only who it is and how it talks: no coding agent's prompt.
         ownPrompt: true,
         refreshSystemPromptOnCompaction: true,
+        preferManagedTranscript: true,
         tools: BotPermissions.chatTools,
         approvesAll: true,
         // What the user writes while it talks, taken up as it does: as a
@@ -1515,8 +1518,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
   /// its messages, stickers, cards and pictures, as a chat app counts; in
   /// its chat with them, not its groups'.
   int unread(Bot bot) {
-    final deliveries = _deliveryCount(bot);
-    var unread = deliveries - (_deliverySeen[bot.id] ??= deliveries);
+    var unread = _unreadDeliveries[bot.id]?.length ?? 0;
     final thread = threadOf(bot);
     if (thread == null || !thread.isOpen) return unread;
     final session = thread.session;
@@ -1533,7 +1535,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
 
   /// The user has read all [bot] said.
   void seen(Bot bot) {
-    _deliverySeen[bot.id] = _deliveryCount(bot);
+    _unreadDeliveries.remove(bot.id);
     final thread = threadOf(bot);
     if (thread != null && thread.isOpen) {
       final session = thread.session;
@@ -2005,8 +2007,8 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     unawaited(forgetSessions(bot.folder));
     unawaited(botHistoryIndex(this).invalidate(MemoryHistoryScope.dm(bot.id)));
     _invalidateReview(bot);
-    folders.delete(_deliveryFolder(bot));
-    _deliverySeen.remove(bot.id);
+    _clearPrivateDeliveries(bot);
+    _unreadDeliveries.remove(bot.id);
     _deliveryPreview.remove(bot.id);
     _forgetPrivate(bot);
     final self = selfNotes(bot);
@@ -2044,6 +2046,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
         if (jsonDecode(_readText(path)) case {'recallGroup': final String id}
             when id == group) {
           folders.deleteFile(path);
+          _unreadDeliveries[bot.id]?.remove(p.basenameWithoutExtension(path));
         }
       } on FormatException {
         // A corrupted record is already ignored by the private projection.
@@ -2156,7 +2159,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     unawaited(forgetSessions(runtime));
     unawaited(botHistoryIndex(this).invalidateBot(bot.id));
     _invalidateReview(bot);
-    _deliverySeen.remove(bot.id);
+    _unreadDeliveries.remove(bot.id);
     _deliveryPreview.remove(bot.id);
     _pendingPrivate.remove(bot.id);
     _dispatchedPrivate.remove(bot.id);
@@ -2204,7 +2207,16 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
       final memory = BotMemory.fromJson(
         jsonDecode(utf8.decode(saved)) as Map<String, Object?>,
       );
-      if (group == null) return memory;
+      if (group == null) {
+        return memory.withUnavailableSources(
+          (entry) => _managedSourceDeleted(
+            bot,
+            null,
+            entry.session,
+            entry.sourceMessage,
+          ),
+        );
+      }
       final checked = _checkMemoryShares(bot, group, memory);
       if (groups.sourceGeneration(group) == 0) return checked;
       return checked.withUnavailableSources((entry) {
@@ -2231,7 +2243,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     return seq != null && groups.isOriginalDeleted(group, seq);
   }
 
-  BotMemory retainGroupMemory(Bot bot, String group, int id, int revision) {
+  BotMemory retainUserMemory(Bot bot, String? group, int id, int revision) {
     final memory = userMemory(
       bot,
       group: group,
@@ -2265,6 +2277,23 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
                   (change) => previous.unavailableEntries.contains(change.id),
                 ))) {
       throw StateError('The group source was deleted');
+    }
+    if (group == null &&
+        (_managedSourceDeleted(bot, null, session, sourceMessage) ||
+            changeSources?.any(
+                  (source) => _managedSourceDeleted(
+                    bot,
+                    null,
+                    source.sessionId,
+                    source.messageId,
+                  ),
+                ) ==
+                true ||
+            (session != null || operationId != null) &&
+                changes.any(
+                  (change) => previous.unavailableEntries.contains(change.id),
+                ))) {
+      throw StateError('The original was deleted');
     }
     final memory = previous.apply(
       changes,
@@ -2510,7 +2539,6 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
   }) {
     final path = p.join(_deliveryFolder(bot), '$turn.json');
     if (folders.readFile(path, strict: true) != null) return;
-    _deliverySeen.putIfAbsent(bot.id, () => _deliveryCount(bot));
     folders.writeFileAtomically(
       path,
       utf8.encode(
@@ -2527,12 +2555,21 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
         }),
       ),
     );
+    (_unreadDeliveries[bot.id] ??= {}).add(turn);
     _deliveryPreview.remove(bot.id);
     notifyListeners();
   }
 
+  static String privateDeliverySessionId(String botId) =>
+      'bot-dm-deliveries:$botId';
+
+  static const _deletedPrivateDelivery = '{"_deleted":true}';
+  static final _hashedDeliveryId = RegExp(r'^[a-f0-9]{64}$');
+
   String _deliveryFolder(Bot bot) => p.join(_runtimeRoot(bot), 'deliveries');
-  final Map<String, int> _deliverySeen = {};
+  // Track the exact unread deliveries so deleting a read one leaves other
+  // unread messages alone. As before, persisted deliveries are read at startup.
+  final _unreadDeliveries = <String, Set<String>>{};
   final Map<String, ({DateTime at, String text})?> _deliveryPreview = {};
 
   ({DateTime at, String text})? _latestPrivateDelivery(Bot bot) =>
@@ -2616,6 +2653,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
       if (p.extension(path) != '.json') continue;
       try {
         final data = jsonDecode(_readText(path)) as Map<String, Object?>;
+        if (data['_deleted'] == true) continue;
         if (data['recallGroup'] case final String group
             when !_recallIsVisible(bot, group, data)) {
           continue;
@@ -2657,6 +2695,78 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     });
   }
 
+  bool canDeletePrivateDelivery(MemoryHistoryReference ref) =>
+      _privateDeliveryToDelete(ref) != null;
+
+  (Bot, String)? _privateDeliveryToDelete(
+    MemoryHistoryReference ref, {
+    bool strict = false,
+  }) {
+    if (_disposed ||
+        ref.scope != MemoryHistoryScope.dm(ref.scope.botId) ||
+        ref.sessionId != privateDeliverySessionId(ref.scope.botId) ||
+        !_hashedDeliveryId.hasMatch(ref.messageId)) {
+      return null;
+    }
+    final bot = byId(ref.scope.botId);
+    if (bot == null) return null;
+    final path = p.join(_deliveryFolder(bot), '${ref.messageId}.json');
+    final bytes = folders.readFile(path, strict: strict);
+    if (bytes == null) return null;
+    try {
+      // Only deliverPrivate writes this shape to a hashed filename. A host
+      // command reply or an attachment-bearing original is not eligible.
+      final data = jsonDecode(utf8.decode(bytes));
+      if (data is Map<String, Object?> && data.length == 3) {
+        if (data
+            case {
+              'at': final String at,
+              'text': final String text,
+              'images': final List images,
+            }
+            when DateTime.tryParse(at) != null &&
+                text.trim().isNotEmpty &&
+                images.isEmpty) {
+          return (bot, path);
+        }
+      }
+    } on FormatException {
+      // An unreadable record cannot authorize deletion.
+    }
+    return null;
+  }
+
+  /// Erase an exact original and retain only its hashed replay key on disk.
+  Future<void> deletePrivateDelivery(MemoryHistoryReference ref) async {
+    final target = _privateDeliveryToDelete(ref, strict: true);
+    if (target == null) {
+      throw StateError('The original private delivery cannot be deleted');
+    }
+    final (bot, path) = target;
+    BotLegacyDiary(folders, bot).redactOriginal(ref);
+    folders.writeFileAtomically(path, utf8.encode(_deletedPrivateDelivery));
+    _unreadDeliveries[bot.id]?.remove(ref.messageId);
+    _deliveryPreview.remove(bot.id);
+    final index = botHistoryIndex(this);
+    final cleanup = Future.wait([
+      index.invalidate(ref.scope),
+      index.invalidate(MemoryHistoryScope.bot(bot.id)),
+    ]);
+    notifyListeners();
+    await cleanup;
+  }
+
+  void _clearPrivateDeliveries(Bot bot) {
+    for (final path in folders.filesIn(_deliveryFolder(bot))) {
+      if (p.extension(path) == '.json' &&
+          _hashedDeliveryId.hasMatch(p.basenameWithoutExtension(path)) &&
+          _readText(path) == _deletedPrivateDelivery) {
+        continue;
+      }
+      folders.deleteFile(path);
+    }
+  }
+
   /// Commit a group-to-private message independently of either worker.
   String deliverPrivate(
     Bot bot, {
@@ -2671,6 +2781,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     }
     final id = sha256.convert(utf8.encode('$group\n$delivery')).toString();
     final path = p.join(_deliveryFolder(bot), '$id.json');
+    // A tombstone acknowledges a replay without restoring the message.
     if (folders.readFile(path, strict: true) != null) return id;
     if (delivery.isEmpty || !groups.acceptsDelivery(group, bot.id, sessionId)) {
       throw StateError('No active turn in this group');
@@ -2680,7 +2791,6 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     }
     text = text.trim();
     if (text.isEmpty && images.isEmpty) throw ArgumentError('Nothing to send');
-    _deliverySeen.putIfAbsent(bot.id, () => _deliveryCount(bot));
     folders.writeFileAtomically(
       path,
       utf8.encode(
@@ -2694,6 +2804,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
         }),
       ),
     );
+    (_unreadDeliveries[bot.id] ??= {}).add(id);
     _deliveryPreview.remove(bot.id);
     live(
       bot,
@@ -2702,7 +2813,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
       mine: true,
       original: MemoryHistoryReference(
         scope: MemoryHistoryScope.dm(bot.id),
-        sessionId: 'bot-dm-deliveries:${bot.id}',
+        sessionId: privateDeliverySessionId(bot.id),
         messageId: id,
       ),
       text: [
@@ -2713,8 +2824,6 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     notifyListeners();
     return id;
   }
-
-  int _deliveryCount(Bot bot) => folders.filesIn(_deliveryFolder(bot)).length;
 
   // --- The user ---------------------------------------------------------
 
@@ -2803,6 +2912,9 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
         _ => null,
       };
     }
+    bool originalDeleted() =>
+        isManagedOriginalDeleted(scope, null, sessionId, evidence.messageId);
+    if (originalDeleted()) return null;
     final bot = byId(scope.botId)!;
     final folder = runtimeFolder(bot);
     final thread = workspace.threads
@@ -2828,6 +2940,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
       }
     }
     while (workspace.threads.contains(thread) && !_disposed) {
+      if (originalDeleted()) return null;
       for (var i = session.itemCount - 1; i >= 0; i--) {
         if (session.itemIdAt(i) != evidence.messageId) continue;
         return _reviewText(session.itemAt(i), evidence.role);

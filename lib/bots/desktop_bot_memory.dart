@@ -95,6 +95,7 @@ class _MemoryDialogState extends State<_MemoryDialog> {
   String? _cursor;
   String? _searched;
   bool _legacyDiary = false;
+  String? _historyProject;
   bool _busy = false;
   bool _audit = false;
   String? _message;
@@ -189,6 +190,12 @@ class _MemoryDialogState extends State<_MemoryDialog> {
     final projects = _factProjects(scopes);
     setState(() {
       _factScopes = scopes;
+      if (_historyProject != null && !projects.containsKey(_historyProject)) {
+        _historyProject = null;
+        _hits = const [];
+        _searched = null;
+        _cursor = null;
+      }
       if (!projects.containsKey(_factProject)) {
         _factProject = scopes['private'] == true
             ? null
@@ -608,7 +615,7 @@ class _MemoryDialogState extends State<_MemoryDialog> {
     }
   }
 
-  Future<void> _retain(_Row entry) async {
+  Future<void> _retain(_Row entry, {required bool fact}) async {
     final agreed = await _confirm(
       _tr('Keep this fact?', '保留这条事实？'),
       _tr(
@@ -622,7 +629,7 @@ class _MemoryDialogState extends State<_MemoryDialog> {
         'action': 'retain',
         'id': entry['id'],
         'revision': entry['revision'],
-      });
+      }, fact: fact);
     }
   }
 
@@ -712,6 +719,7 @@ class _MemoryDialogState extends State<_MemoryDialog> {
       'query': query,
       'cursor': more ? _cursor : null,
       if (_legacyDiary && _group == null) 'legacyDiary': true,
+      if (_group == null && !_legacyDiary) 'historyProject': ?_historyProject,
     });
     if (!mounted) return;
     setState(() {
@@ -721,100 +729,110 @@ class _MemoryDialogState extends State<_MemoryDialog> {
     });
   });
 
-  Future<void> _openSource(Object? source, {bool legacyDiary = false}) =>
-      _run(() async {
-        final window = await _call(LinkMethods.botMemorySource, {
-          'source': source,
-          if (legacyDiary) 'legacyDiary': true,
-        });
-        if (!mounted) return;
-        final anchor = _row(window['anchor']);
-        final reference = anchor['reference'];
-        final canDelete =
-            widget.localOwner &&
-            _group != null &&
-            _has(LinkMethods.deleteBotMemorySource) &&
-            window['canDeleteOriginal'] == true &&
-            reference != null;
-        final delete = await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: Text(
-              anchor['kind'] == 'diarySummary'
-                  ? _tr('Diary summaries', '日记摘要')
-                  : _tr('Source messages', '原始消息'),
-            ),
-            content: SizedBox(
-              width: 600,
-              child: SelectionArea(
-                child: ListView(
-                  shrinkWrap: true,
-                  children: [
-                    for (final message in [
-                      ..._rows(window['before']),
-                      anchor,
-                      ..._rows(window['after']),
-                    ])
-                      ListTile(
-                        selected: identical(message, anchor),
-                        dense: true,
-                        title: Text('${message['text'] ?? ''}'),
-                        subtitle: Text(
-                          [
-                            _role(message['role']),
-                            _date(message['time']),
-                          ].where((part) => part.isNotEmpty).join(' · '),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            actions: [
-              if (canDelete)
-                TextButton(
-                  style: TextButton.styleFrom(
-                    foregroundColor: Theme.of(context).colorScheme.error,
+  Future<void> _openSource(
+    Object? source, {
+    bool legacyDiary = false,
+    String? historyProject,
+  }) => _run(() async {
+    final window = await _call(LinkMethods.botMemorySource, {
+      'source': source,
+      if (legacyDiary) 'legacyDiary': true,
+      'historyProject': ?historyProject,
+    });
+    if (!mounted) return;
+    final anchor = _row(window['anchor']);
+    final reference = anchor['reference'];
+    final groupSource = _group != null;
+    final canDelete =
+        widget.localOwner &&
+        _has(LinkMethods.deleteBotMemorySource) &&
+        window['canDeleteOriginal'] == true &&
+        reference != null;
+    final delete = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          anchor['kind'] == 'diarySummary'
+              ? _tr('Diary summaries', '日记摘要')
+              : _tr('Source messages', '原始消息'),
+        ),
+        content: SizedBox(
+          width: 600,
+          child: SelectionArea(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final message in [
+                  ..._rows(window['before']),
+                  anchor,
+                  ..._rows(window['after']),
+                ])
+                  ListTile(
+                    selected: identical(message, anchor),
+                    dense: true,
+                    title: Text('${message['text'] ?? ''}'),
+                    subtitle: Text(
+                      [
+                        _role(message['role']),
+                        _date(message['time']),
+                      ].where((part) => part.isNotEmpty).join(' · '),
+                    ),
                   ),
-                  onPressed: () async {
-                    final agreed = await _confirm(
-                      _tr('Delete this original message?', '删除这条原始消息？'),
-                      _tr(
-                        'This removes the original for all group members, refreshes the group model context, and pauses notes that depend on it.',
-                        '这会为所有群成员移除原始消息，刷新该群的模型上下文，并暂停依赖它的笔记。',
-                      ),
-                      _tr('Delete original', '删除原始消息'),
-                    );
-                    if (agreed && context.mounted) Navigator.pop(context, true);
-                  },
-                  child: Text(_tr('Delete original', '删除原始消息')),
-                ),
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: Text(MaterialLocalizations.of(context).closeButtonLabel),
-              ),
-            ],
+              ],
+            ),
           ),
-        );
-        if (delete != true || !canDelete || !mounted) return;
-        final result = await _call(LinkMethods.deleteBotMemorySource, {
-          'source': reference,
-          'confirm': true,
-        });
-        if (!mounted) return;
-        if (result['deleted'] != true) {
-          throw StateError(
-            _tr('The original message could not be deleted.', '无法删除原始消息。'),
-          );
-        }
-        setState(() {
-          _message = _tr('Original message deleted.', '已删除原始消息。');
-          _hits = const [];
-          _cursor = null;
-          _searched = null;
-        });
-        await _load();
-      });
+        ),
+        actions: [
+          if (canDelete)
+            TextButton(
+              style: TextButton.styleFrom(
+                foregroundColor: Theme.of(context).colorScheme.error,
+              ),
+              onPressed: () async {
+                final agreed = await _confirm(
+                  _tr('Delete this original message?', '删除这条原始消息？'),
+                  groupSource
+                      ? _tr(
+                          'This removes the original for all group members, refreshes the group model context, and pauses notes that depend on it.',
+                          '这会为所有群成员移除原始消息，刷新该群的模型上下文，并暂停依赖它的笔记。',
+                        )
+                      : _tr(
+                          'This removes the message from the private chat and the bot’s diary.',
+                          '这会从私聊和机器人的日记中删除这条消息。',
+                        ),
+                  _tr('Delete original', '删除原始消息'),
+                );
+                if (agreed && context.mounted) Navigator.pop(context, true);
+              },
+              child: Text(_tr('Delete original', '删除原始消息')),
+            ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(MaterialLocalizations.of(context).closeButtonLabel),
+          ),
+        ],
+      ),
+    );
+    if (delete != true || !canDelete || !mounted) return;
+    final result = await _call(LinkMethods.deleteBotMemorySource, {
+      'source': reference,
+      'confirm': true,
+      'historyProject': ?historyProject,
+    });
+    if (!mounted) return;
+    if (result['deleted'] != true) {
+      throw StateError(
+        _tr('The original message could not be deleted.', '无法删除原始消息。'),
+      );
+    }
+    setState(() {
+      _message = _tr('Original message deleted.', '已删除原始消息。');
+      _hits = const [];
+      _cursor = null;
+      _searched = null;
+    });
+    await _load();
+  });
 
   Future<void> _configure(String key, Object value) => _run(() async {
     await _call(LinkMethods.configureBotMemoryReview, {key: value});
@@ -1345,8 +1363,6 @@ class _MemoryDialogState extends State<_MemoryDialog> {
         _has(LinkMethods.shareBotMemoryEntry);
     final canRetain =
         sourceUnavailable &&
-        !fact &&
-        _group != null &&
         widget.localOwner &&
         _has(LinkMethods.deleteBotMemorySource);
     return Card(
@@ -1419,7 +1435,9 @@ class _MemoryDialogState extends State<_MemoryDialog> {
                 if (!shared && _has(LinkMethods.changeBotMemory)) ...[
                   if (canRetain)
                     TextButton(
-                      onPressed: _busy ? null : () => _retain(entry),
+                      onPressed: _busy
+                          ? null
+                          : () => _retain(entry, fact: fact),
                       child: Text(_tr('Keep fact', '保留事实')),
                     ),
                   TextButton(
@@ -1459,7 +1477,29 @@ class _MemoryDialogState extends State<_MemoryDialog> {
   Widget _history() => ListView(
     padding: const EdgeInsets.only(top: 12),
     children: [
-      if (widget.localOwner && _group == null)
+      if (widget.localOwner &&
+          _group == null &&
+          _factProjects(_factScopes).isNotEmpty)
+        DropdownButtonFormField<String>(
+          key: ValueKey(_historyProject),
+          initialValue: _historyProject ?? '',
+          decoration: InputDecoration(labelText: _tr('History scope', '历史范围')),
+          items: [
+            DropdownMenuItem(value: '', child: Text(_tr('Private chat', '私聊'))),
+            for (final project in _factProjects(_factScopes).entries)
+              DropdownMenuItem(value: project.key, child: Text(project.value)),
+          ],
+          onChanged: _busy
+              ? null
+              : (value) => setState(() {
+                  _historyProject = value == '' ? null : value;
+                  _legacyDiary = false;
+                  _hits = const [];
+                  _searched = null;
+                  _cursor = null;
+                }),
+        ),
+      if (widget.localOwner && _group == null && _historyProject == null)
         CheckboxListTile(
           title: Text(_tr('Search unassigned legacy diaries', '搜索范围未知的旧日记')),
           value: _legacyDiary,
@@ -1508,6 +1548,7 @@ class _MemoryDialogState extends State<_MemoryDialog> {
               : () => _openSource(
                   match['reference'],
                   legacyDiary: _legacyDiary && _group == null,
+                  historyProject: _group == null ? _historyProject : null,
                 ),
         ),
       if (_cursor != null)

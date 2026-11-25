@@ -125,12 +125,13 @@ class AgentThread {
     required this._kernel,
     required this._open,
     required this.updatedAt,
-    this.record,
+    SessionRecord? record,
     this._title = '',
     this.pinned = false,
     this.archived = false,
     bool unread = false,
-  }) : _seenSeq = unread ? -1 : 0,
+  }) : _record = record,
+       _seenSeq = unread ? -1 : 0,
        _wantsTitle = record == null && _title.isEmpty;
 
   /// Its project: replaced by one of the new name when a workspace is
@@ -138,10 +139,11 @@ class AgentThread {
   Project project;
 
   /// The kept session it continues, if any.
-  final SessionRecord? record;
+  SessionRecord? get record => _record;
+  SessionRecord? _record;
 
   final KernelDescriptor _kernel;
-  final ChatSession Function() _open;
+  ChatSession Function() _open;
   ChatSession? _session;
   void Function(AgentThread thread)? _onOpened;
 
@@ -587,6 +589,68 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
     was
       ..stop()
       ..dispose();
+    notifyListeners();
+  }
+
+  bool canEditKeptTranscript(AgentThread thread) =>
+      !_disposed &&
+      _threads.contains(thread) &&
+      thread.id != null &&
+      !thread.runsInBackground &&
+      (thread._session == null ||
+          !thread.session.loadingHistory &&
+              !thread.session.isStreaming &&
+              !thread.session.hasQueuedMessages &&
+              thread.session.pendingInteraction == null);
+
+  /// The edit must take the storage writer lease. Replace the loaded
+  /// conversation immediately after the edit commits.
+  Future<void> editKeptTranscript(
+    AgentThread thread,
+    SessionRecord record,
+    VoidCallback edit,
+  ) async {
+    bool eligible() =>
+        canEditKeptTranscript(thread) &&
+        thread.id == record.id &&
+        thread.project.path == record.cwd;
+    if (!eligible()) throw StateError('Wait for the conversation to finish');
+    final was = thread._session;
+    if (was != null) await was.releaseIdleRuntime();
+    if (!eligible() || !identical(was, thread._session)) {
+      throw StateError('The conversation changed');
+    }
+    edit();
+    final kernel = thread.kernel;
+    if (was != null) {
+      if (was.draft.content != null) _draftChanged(thread);
+      if (_listeners.remove(thread) case final listener?) {
+        was.removeListener(listener);
+      }
+      was.dispose();
+    }
+    thread
+      .._record = record
+      .._title = _names[record.id] ?? record.title
+      .._wantsTitle = false
+      .._goneOnElsewhere = false
+      .._session = null
+      .._open = () => ChatSession(
+        kernel: kernel,
+        kernels: kernels,
+        kernelContext: KernelContext(
+          cwd: record.cwd,
+          resume: record,
+          settings: _setUp(record.cwd, {
+            ..._preferredSettings,
+            ...?_agentSettings[record.id],
+          }),
+          workspace: () => _kernelWorkspace(record.cwd),
+        ),
+        historyCount: 0,
+      );
+    if (was != null) thread.session;
+    _snapshots[thread] = thread._snapshot;
     notifyListeners();
   }
 
@@ -2300,6 +2364,13 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
     if (busy()) return ProjectRelocation.busy;
     final kept = <(KernelDescriptor, SessionRecord)>[];
     try {
+      await Future.wait([
+        for (final thread in _threads)
+          if (thread.project.path == from && thread.isOpen)
+            thread.session.releaseIdleRuntime(),
+      ]);
+      if (_disposed) return ProjectRelocation.failed;
+      if (busy()) return ProjectRelocation.busy;
       for (final kernel in kernels) {
         if (kernel.catalog case final MovesSessions catalog) {
           await catalog.moveSessions(from, path);

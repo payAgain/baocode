@@ -1,12 +1,18 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:bao_link/bao_link.dart';
 import 'package:baocode/bots/bot.dart';
 import 'package:baocode/bots/bot_folders.dart';
 import 'package:baocode/bots/bot_groups.dart';
+import 'package:baocode/bots/bot_history.dart';
 import 'package:baocode/bots/bot_memory_review.dart';
 import 'package:baocode/bots/bot_tools.dart';
 import 'package:baocode/bots/bots.dart';
+import 'package:baocode/chat/chat_models.dart' show ImageAttachment;
 import 'package:baocode/chat/chat_session.dart';
+import 'package:baocode/link/bot_memory_management.dart';
 import 'package:baocode/link/chat_codec.dart';
 import 'package:baocode/kernel/agent_kernel.dart';
 import 'package:baocode/kernel/claude_code/claude_code_kernel.dart';
@@ -147,6 +153,152 @@ void main() {
     expect(held.error, isTrue);
     expect(held.text, contains('turned off Leo writing to them first'));
   });
+
+  test(
+    'the owner can erase an exact text delivery and its replay stays erased',
+    () async {
+      final room = groups.save(name: 'Planning', members: [leo.id]);
+      groups.send(room.id, text: '@Leo send it in private');
+      await pumpEventQueue();
+      expect(groups.answering(leo.id), room.id);
+
+      const secret = 'synthetic private delivery words';
+      final id = bots.deliverPrivate(
+        leo,
+        group: room.id,
+        delivery: 'erase-this',
+        text: secret,
+      );
+      expect(bots.lastLine(leo), secret);
+      expect(bots.timeline(leo).lines.join(), contains(secret));
+      bots.seen(leo);
+      now = now.add(const Duration(seconds: 1));
+      final picture = bots.deliverPrivate(
+        leo,
+        group: room.id,
+        delivery: 'keep-picture',
+        text: 'separate attachment caption',
+        images: [
+          ImageAttachment(
+            bytes: Uint8List.fromList([1]),
+            mediaType: 'image/png',
+          ),
+        ],
+      );
+      expect(bots.unread(leo), 1);
+
+      final scope = MemoryHistoryScope.dm(leo.id);
+      MemoryHistoryReference ref(String id) => MemoryHistoryReference(
+        scope: scope,
+        sessionId: Bots.privateDeliverySessionId(leo.id),
+        messageId: id,
+      );
+      final owner = BotMemoryManagement(
+        bots,
+        reviewer: 'owner',
+        localOwner: true,
+      );
+      final paired = BotMemoryManagement(bots, reviewer: 'paired');
+      Future<Map<String, Object?>> source(
+        BotMemoryManagement management,
+        String query,
+      ) async {
+        final results = await management.call(LinkMethods.botMemorySearch, {
+          'bot': leo.id,
+          'query': query,
+        });
+        final hit = (results['hits'] as List).single as Map;
+        return management.call(LinkMethods.botMemorySource, {
+          'bot': leo.id,
+          'source': hit['reference'],
+        });
+      }
+
+      final pairedWindow = await source(paired, secret);
+      expect(pairedWindow['canDeleteOriginal'], isNull);
+      await expectLater(
+        paired.call(LinkMethods.deleteBotMemorySource, {
+          'bot': leo.id,
+          'source': (pairedWindow['anchor'] as Map)['reference'],
+          'confirm': true,
+        }),
+        throwsA(isA<LinkRemoteException>()),
+      );
+      expect(
+        (await source(
+          owner,
+          'separate attachment caption',
+        ))['canDeleteOriginal'],
+        isNull,
+      );
+      final window = await source(owner, secret);
+      expect(window['canDeleteOriginal'], isTrue);
+      final args = {
+        'bot': leo.id,
+        'source': (window['anchor'] as Map)['reference'],
+      };
+      await expectLater(
+        owner.call(LinkMethods.deleteBotMemorySource, args),
+        throwsA(isA<LinkRemoteException>()),
+      );
+      expect(
+        await owner.call(LinkMethods.deleteBotMemorySource, {
+          ...args,
+          'confirm': true,
+        }),
+        {'deleted': true},
+      );
+      await expectLater(
+        owner.call(LinkMethods.botMemorySource, args),
+        throwsA(isA<LinkRemoteException>()),
+      );
+      expect(bots.privateDeliveries(leo).single.id, picture);
+      expect(bots.unread(leo), 1);
+      expect(bots.lastLine(leo), 'separate attachment caption');
+      final diary = bots.timeline(leo).lines.join('\n');
+      expect(diary, isNot(contains(secret)));
+      expect(diary, contains('separate attachment'));
+      expect(diary, contains('send it in private'));
+      final path = '${folders.root}/runtime/${leo.id}/deliveries/$id.json';
+      expect(jsonDecode(utf8.decode(folders.readFile(path)!)), {
+        '_deleted': true,
+      });
+
+      bots.clearChat(leo);
+      bots.dispose();
+      workspace.dispose();
+      workspace = Workspace(kernels: [kernel]);
+      bots = Bots(workspace: workspace, folders: folders, clock: () => now);
+      await bots.start();
+      leo = bots.byId(leo.id)!;
+      expect(
+        bots.deliverPrivate(
+          leo,
+          group: room.id,
+          delivery: 'erase-this',
+          text: secret,
+        ),
+        id,
+      );
+      expect(bots.privateDeliveries(leo), isEmpty);
+      expect(bots.unread(leo), 0);
+      expect(bots.lastLine(leo), isNull);
+      expect(bots.timeline(leo).lines.single, contains('send it in private'));
+      final index = botHistoryIndex(bots);
+      final access = MemoryHistoryAccess(
+        current: scope,
+        isAuthorized: (_) => true,
+      );
+      expect(await index.locate(access, ref(id)), isNull);
+      expect(
+        (await index.search(
+          access,
+          const MemoryHistoryQuery(text: secret),
+        )).hits,
+        isEmpty,
+      );
+    },
+  );
 
   test('only a whole host command can send literal text to a group', () async {
     final group = groups.save(name: '江湖', members: [mia.id, leo.id]);

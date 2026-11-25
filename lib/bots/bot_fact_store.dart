@@ -174,16 +174,26 @@ class BotFactStore {
     'memory': memory.toJson(),
   };
 
+  BotFactStore withUnavailableSources(
+    bool Function(BotMemoryEntry entry) unavailable,
+  ) => _with(memory.withUnavailableSources(unavailable));
+
+  BotFactStore retainWithoutSource(int id, int revision) =>
+      _with(memory.retainWithoutSource(id, revision));
+
+  Iterable<BotFactEntry> get activeEntries =>
+      entries.where((fact) => !memory.unavailableEntries.contains(fact.id));
+
   String get selfMarkdown => [
     if (now.isNotEmpty) now,
-    for (final fact in entries)
+    for (final fact in activeEntries)
       if (fact.kind == BotFactKind.self) fact.markdown,
   ].join('\n');
 
   String get peopleMarkdown {
     final lines = <String>[];
     String? lastKey;
-    for (final fact in entries.where(
+    for (final fact in activeEntries.where(
       (fact) => fact.kind == BotFactKind.person,
     )) {
       if (fact.personName == null) {

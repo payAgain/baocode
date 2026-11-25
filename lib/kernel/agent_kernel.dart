@@ -94,6 +94,7 @@ class KernelWorkspace {
     this.sessionPrompt,
     this.ownPrompt = false,
     this.refreshSystemPromptOnCompaction = false,
+    this.preferManagedTranscript = false,
     this.tools,
     this.userServers = false,
     this.allowedTools = const [],
@@ -124,6 +125,9 @@ class KernelWorkspace {
 
   /// Whether a successful compaction can reread the host's own prompt.
   final bool refreshSystemPromptOnCompaction;
+
+  /// Prefer host-managed storage for a new local built-in session.
+  final bool preferManagedTranscript;
 
   /// When the messages sent while it works are taken up, over the user's
   /// setting; theirs when null.

@@ -632,7 +632,7 @@ void main() {
     expect(find.text('Select Private chat to manage facts.'), findsOneWidget);
   });
 
-  testWidgets('local original deletion requires group scope and confirmation', (
+  testWidgets('local original deletion requires eligibility and confirmation', (
     tester,
   ) async {
     final deletes = <Map<String, Object?>>[];
@@ -662,7 +662,7 @@ void main() {
         },
         LinkMethods.botMemorySource => {
           'anchor': {'text': 'Original message', 'reference': reference},
-          'canDeleteOriginal': true,
+          'canDeleteOriginal': args['group'] == 'garden',
         },
         LinkMethods.deleteBotMemorySource => () {
           deletes.add(args);

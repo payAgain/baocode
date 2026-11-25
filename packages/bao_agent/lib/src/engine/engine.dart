@@ -251,15 +251,21 @@ class AgentEngine {
     final branch = session.context.git?.branch;
     final resume = options.resume;
     if (resume != null) {
-      final file =
-          session.paths.findSession(resume) ??
-          session.paths.sessionFile(session.cwd, resume);
+      final managed = options.transcriptProjectsDir != null;
+      final found = session.paths.findSession(
+        resume,
+        cwd: managed ? session.cwd : null,
+      );
+      if (managed && found == null) {
+        throw StateError('Managed transcript for session $resume is missing');
+      }
       session.store = SessionStore.resume(
         sessionId: resume,
         cwd: session.cwd,
-        file: file,
+        file: found ?? session.paths.sessionFile(session.cwd, resume),
         gitBranch: branch,
         persist: options.persist,
+        requireFile: managed,
       );
       session.checkpoints.load(session.store.extras);
       _titled = session.store.title != null;

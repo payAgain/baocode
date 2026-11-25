@@ -23,6 +23,8 @@ class Harness {
     Map<String, Object?> flagSettings = const {},
     String? permissionMode,
     String? resume,
+    String? sessionId,
+    String? transcriptProjectsDir,
     Harness? from,
     bool promptSuggestions = false,
     Map<String, String> environment = const {},
@@ -63,6 +65,8 @@ class Harness {
       EngineOptions(
         cwd: cwd,
         resume: resume,
+        sessionId: sessionId,
+        transcriptProjectsDir: transcriptProjectsDir,
         permissionMode: permissionMode,
         flagSettings: flagSettings,
         promptSuggestions: promptSuggestions,

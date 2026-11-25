@@ -337,6 +337,12 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
   /// Completes once the kernel has stopped, after [dispose].
   Future<void> get stopped => _kernel.stopped;
 
+  /// Releases the idle runtime so a host-owned transcript can be edited.
+  Future<void> releaseIdleRuntime() {
+    _kernel.release();
+    return _kernel.stopped;
+  }
+
   /// Tries the kernel again after it failed.
   void restart() => _kernel.restart();
 
@@ -1213,10 +1219,12 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
     UserPlace? from,
     List<String> notes = const [],
     String? turnId,
+    bool preferManagedTranscript = false,
   }) {
     if (message.isEmpty || !canSend) return;
     final turn = KernelTurn(
       id: turnId ?? newTurnId(),
+      preferManagedTranscript: preferManagedTranscript,
       // Pastes too long to send, kept in files the agent reads; a remote
       // project's agent cannot, and is sent them.
       text: switch (kernelContext.cwd) {

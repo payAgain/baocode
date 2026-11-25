@@ -10,6 +10,7 @@ import '../chat/composer/composer_files.dart';
 import '../chat/reply_suggestions.dart';
 import '../kernel/agent_kernel.dart';
 import '../kernel/claude_code/claude_code_translator.dart';
+import '../kernel/claude_code/managed_transcripts_io.dart';
 import '../link/chat_codec.dart';
 import '../platform/data_dir.dart';
 import '../remote/remote_claude.dart';
@@ -127,7 +128,7 @@ final class _BotHistorySource {
     }
 
     final records = await _records(bot, scope, sessionIds);
-    final messages = diary.messages(scope, sessionIds: sessionIds);
+    final messages = [...diary.messages(scope, sessionIds: sessionIds)];
     for (final record in records) {
       final rows = await _readRecord(record.session);
       messages.addAll(
@@ -168,7 +169,7 @@ final class _BotHistorySource {
         MemoryHistoryMessage(
           reference: MemoryHistoryReference(
             scope: scope,
-            sessionId: 'bot-dm-deliveries:${bot.id}',
+            sessionId: Bots.privateDeliverySessionId(bot.id),
             messageId: delivery.id,
           ),
           role: MemoryHistoryRole.assistant,
@@ -337,7 +338,9 @@ List<MemoryHistoryMessage> projectBotHistoryTranscript({
   }
 
   for (final (sequence, row) in rows.indexed) {
-    if (row['isSidechain'] == true || row['parent_tool_use_id'] != null) {
+    if (row[ManagedTranscripts.deletedOriginalKey] == true ||
+        row['isSidechain'] == true ||
+        row['parent_tool_use_id'] != null) {
       continue;
     }
     final body = row['message'];

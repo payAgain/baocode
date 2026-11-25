@@ -36,6 +36,8 @@ import 'claude_elicitation.dart';
 import 'claude_goal.dart';
 import 'claude_numbers.dart';
 import 'claude_sdk_tools.dart';
+import 'claude_storage_io.dart';
+import 'managed_transcripts_io.dart';
 import 'turn_stats.dart';
 import 'control_channel.dart';
 import 'local_time_zone.dart';
@@ -275,6 +277,8 @@ class ClaudeCodeKernel
 
   KernelHealth _health = KernelHealth.idle;
   String? _sessionId;
+  ({String projectsDir, String sessionId})? _managedTranscript;
+  bool _preferManagedTranscript = false;
   bool _disposed = false;
 
   /// Whether the CLI says it is at work (`session_state_changed`): from a
@@ -370,7 +374,22 @@ class ClaudeCodeKernel
   /// if offered there, else to the first upstream's.
   String? get _model {
     final picked = _pickedModel;
-    if (_providers.resolve(picked) != null) return picked;
+    final resolved = _providers.resolve(picked);
+    if (_usesManagedTranscript) {
+      if (resolved case (final provider, final model)
+          when provider.protocolOf(model) != ProviderProtocol.agy) {
+        return picked;
+      }
+      for (final provider in _providers.enabled) {
+        for (final model in provider.enabledModels) {
+          if (provider.protocolOf(model) != ProviderProtocol.agy) {
+            return modelRef(provider.id, model.id);
+          }
+        }
+      }
+      return null;
+    }
+    if (resolved != null) return picked;
     if (_providers.builtinAvailable &&
         (parseModelRef(picked) == null || _providers.builtinOffered)) {
       return picked;
@@ -528,7 +547,9 @@ class ClaudeCodeKernel
   String? get sessionId => _sessionId;
 
   @override
-  Future<void> get stopped => _stopped;
+  Future<void> get stopped =>
+      _starting?.then((_) => _stopped, onError: (Object _) => _stopped) ??
+      _stopped;
   Future<void> _stopped = Future.value();
 
   void _setHealth(KernelHealth health) {
@@ -540,6 +561,19 @@ class ClaudeCodeKernel
       _control != null && _health.status == KernelHealthStatus.ready;
 
   String get _cwd => _context.cwd ?? _context.resume?.cwd ?? '.';
+
+  late final bool _resumesManagedTranscript = switch (_context.resume) {
+    final session? when !RemoteLocation.isRemote(_cwd) =>
+      ManagedTranscripts.isManagedSessionId(session.id) ||
+          switch (session.path) {
+            final path? => ClaudeStorage.isManagedPath(path),
+            null => ManagedTranscripts.exists(_cwd, session.id),
+          },
+    _ => false,
+  };
+
+  bool get _usesManagedTranscript =>
+      _managedTranscript != null || _resumesManagedTranscript;
 
   /// The workspace [_cwd] is the folder of, as it is at this launch.
   KernelWorkspace? get _workspace => _context.workspace?.call();
@@ -590,6 +624,7 @@ class ClaudeCodeKernel
     await _history;
     // One process at a time on a session: the last one, if restarted.
     await _stopped;
+    if (_disposed) return;
     _setHealth(const KernelHealth(KernelHealthStatus.starting));
     try {
       // On a provider of the user's: its model as it is asked for, the
@@ -621,6 +656,7 @@ class ClaudeCodeKernel
           );
         }
       }
+      if (_disposed) return;
       final workspace = _workspace;
       final prompt = workspace?.sessionPrompt?.call(_sessionId, refresh: false);
       _launchedProvider = target.provider;
@@ -636,6 +672,11 @@ class ClaudeCodeKernel
           cwd: _cwd,
           sdkServers: sdkServers,
           resume: _sessionId,
+          resumePath: _context.resume?.path,
+          managedTranscript: _managedTranscript,
+          preferManagedTranscript:
+              _preferManagedTranscript ||
+              (workspace?.preferManagedTranscript ?? false),
           model: model,
           // Plan is entered once started.
           permissionMode: _cliMode = _cliApproval,
@@ -684,8 +725,13 @@ class ClaudeCodeKernel
         ),
       );
       if (_disposed) {
-        transport.close();
+        _stopTransport(transport);
         return;
+      }
+      if (transport case LocalBuiltinClaudeTransport(
+        :final managedTranscript,
+      )) {
+        _managedTranscript = managedTranscript;
       }
       _transport = transport;
       _saveSessionPrompt = prompt?.save;
@@ -823,14 +869,7 @@ class ClaudeCodeKernel
     _subscription = null;
     _control?.failAll('Claude Code stopped');
     _control = null;
-    if (_transport case final transport?) {
-      // A process that will not end is not waited on for ever.
-      _stopped = transport.exited.timeout(
-        const Duration(seconds: 5),
-        onTimeout: () {},
-      );
-      transport.close();
-    }
+    if (_transport case final transport?) _stopTransport(transport);
     _transport = null;
     _saveSessionPrompt = null;
     _forgetSessionPrompt?.call();
@@ -839,6 +878,20 @@ class ClaudeCodeKernel
     _promptWithdrawn = null;
     _cliWorking = false;
     _releaseWanted = false;
+  }
+
+  void _stopTransport(ClaudeCodeTransport transport) {
+    // The managed writer's lease follows the actual runtime. In particular,
+    // deletion and a managed relaunch must wait for it to be released.
+    _stopped =
+        transport is LocalBuiltinClaudeTransport &&
+            transport.managedTranscript != null
+        ? transport.exited
+        : transport.exited.timeout(
+            const Duration(seconds: 5),
+            onTimeout: () {},
+          );
+    transport.close();
   }
 
   /// Runs [write] once ready and after the writes before it; a failure to
@@ -850,6 +903,15 @@ class ClaudeCodeKernel
     _writes = _writes
         .then((_) => _ensureStarted())
         .then((_) async {
+          // The task may be the first message in an empty conversation whose
+          // view already prepared a built-in transport in the shared store.
+          if (_preferManagedTranscript &&
+              _launched?.preferManagedTranscript != true &&
+              _transport is LocalBuiltinClaudeTransport &&
+              _sessionId == null) {
+            _teardown();
+            await _ensureStarted();
+          }
           if (checkPrompt &&
               _transport is ClaudeExternalTransport &&
               _promptWithdrawn?.call() == true) {
@@ -999,6 +1061,12 @@ class ClaudeCodeKernel
   @override
   void send(KernelTurn sent) {
     if (_sent.containsKey(sent.id)) return;
+    if (sent.preferManagedTranscript &&
+        _sent.isEmpty &&
+        _sessionId == null &&
+        _context.resume == null) {
+      _preferManagedTranscript = true;
+    }
     var turn = sent;
     if (_startsPlan) {
       _startsPlan = false;
@@ -1498,6 +1566,12 @@ class ClaudeCodeKernel
     if (forkSession == null || id == null) return null;
     final into = _newSessionId();
     try {
+      // Forking a managed transcript requires its writer lease. An idle
+      // runtime can stop before the copy. A running turn keeps its lease.
+      if (!_busy && _managedTranscript != null) {
+        release();
+        await _stopped;
+      }
       final path = await forkSession(
         _cwd,
         id,
@@ -3761,7 +3835,7 @@ class ClaudeCodeKernel
       return [
         // Shown unless turned off in Settings → Models; never on BaoCode's
         // own core, which runs on the upstreams alone.
-        if (_providers.builtinOffered)
+        if (!_usesManagedTranscript && _providers.builtinOffered)
           if (_models.isEmpty)
             // Its models not known (it is not logged in, or no session has
             // started on it yet): picking this starts one, which lists them.
@@ -3790,28 +3864,31 @@ class ClaudeCodeKernel
               ),
         for (final provider in providers)
           for (final info in provider.enabledModels)
-            KernelOption(
-              modelRef(provider.id, info.id),
-              provider.labelOf(info),
-              Icons.hub_outlined,
-              [
-                info.id,
-                if (info.contextWindow case final tokens?) formatTokens(tokens),
-              ].join(' · '),
-              group: KernelOptionGroup(
-                provider.id,
-                provider.name,
-                warning: _providers.error(provider.id),
-                iconBuilder: _providerIcon(provider.id),
+            if (!_usesManagedTranscript ||
+                provider.protocolOf(info) != ProviderProtocol.agy)
+              KernelOption(
+                modelRef(provider.id, info.id),
+                provider.labelOf(info),
+                Icons.hub_outlined,
+                [
+                  info.id,
+                  if (info.contextWindow case final tokens?)
+                    formatTokens(tokens),
+                ].join(' · '),
+                group: KernelOptionGroup(
+                  provider.id,
+                  provider.name,
+                  warning: _providers.error(provider.id),
+                  iconBuilder: _providerIcon(provider.id),
+                ),
+                iconBuilder: _modelIcon(provider.id, info.id),
               ),
-              iconBuilder: _modelIcon(provider.id, info.id),
-            ),
       ];
     },
     selected: () {
       if (_custom != null) return _model;
       // BaoCode's own core with no upstream: none to run on.
-      if (!_providers.builtinAvailable) return null;
+      if (_usesManagedTranscript || !_providers.builtinAvailable) return null;
       return switch (_currentModel?.value) {
         final value? => _baseOf(value),
         null => _models.isEmpty ? 'default' : null,

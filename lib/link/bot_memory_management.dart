@@ -96,16 +96,39 @@ class BotMemoryManagement {
       throw _bad;
     }
     final bot = bots.byId(botId);
-    final target = legacyDiary
+    final historyProject = _field<String>(args, 'historyProject');
+    if (historyProject != null &&
+        (group != null ||
+            legacyDiary ||
+            method != LinkMethods.botMemorySearch &&
+                method != LinkMethods.botMemorySource &&
+                method != LinkMethods.deleteBotMemorySource)) {
+      throw _bad;
+    }
+    final project = historyProject == null
+        ? null
+        : bots.workspace.localProjectById(historyProject);
+    if (historyProject != null && project == null) throw _missing;
+    final target = project != null
+        ? MemoryHistoryScope.project(botId, project.path)
+        : legacyDiary
         ? MemoryHistoryScope.bot(botId)
         : group is String
         ? MemoryHistoryScope.group(botId, group)
         : MemoryHistoryScope.dm(botId);
-    if (bot == null || !_authorized(target)) throw _missing;
+    bool authorized(MemoryHistoryScope scope) => historyProject == null
+        ? _authorized(scope)
+        : localOwner &&
+              isActive?.call() != false &&
+              scope == target &&
+              bots.workspace.localProjectById(historyProject)?.path ==
+                  project?.path &&
+              bots.projectFactAccess(botId, historyProject) != null;
+    if (bot == null || !authorized(target)) throw _missing;
     final scope = BotMemoryScope(botId: botId, groupId: target.groupId);
     final access = MemoryHistoryAccess(
       current: target,
-      isAuthorized: _authorized,
+      isAuthorized: authorized,
     );
     final Map<String, Object?> result;
     try {
@@ -157,9 +180,13 @@ class BotMemoryManagement {
         LinkMethods.botMemoryEntries => _entries(bot, target),
         LinkMethods.changeBotMemory => _change(bot, target, args),
         LinkMethods.botMemorySearch => await _search(access, args),
-        LinkMethods.botMemorySource => await _source(access, args),
+        LinkMethods.botMemorySource => await _source(
+          access,
+          args,
+          historyProject,
+        ),
         LinkMethods.deleteBotMemorySource when localOwner =>
-          await _deleteSource(access, args),
+          await _deleteSource(access, args, historyProject),
         LinkMethods.botMemoryReview => await _reviewState(scope, target, args),
         LinkMethods.configureBotMemoryReview => (await _review.configure(
           scope,
@@ -207,7 +234,7 @@ class BotMemoryManagement {
     } on StateError catch (error) {
       throw LinkRemoteException('stale', error.message);
     }
-    if (!_authorized(target)) throw _missing;
+    if (!authorized(target)) throw _missing;
     return result;
   }
 
@@ -276,7 +303,9 @@ class BotMemoryManagement {
             'injected': next.contains(fact.id),
             'activeRevision': ?revisions[fact.id],
             'updatedAt': ?fact.updatedAt?.toIso8601String(),
-            if (projectId == null)
+            if (store.memory.unavailableEntries.contains(fact.id))
+              'sourceUnavailable': true
+            else if (projectId == null)
               if (fact.entry.session case final session?)
                 if (fact.entry.sourceMessage case final message?)
                   'source': _rememberSource(
@@ -312,6 +341,12 @@ class BotMemoryManagement {
       final id = _field<int>(row, 'id');
       final revision = _field<int>(row, 'revision');
       final pinned = _field<bool>(row, 'pinned');
+      if (action == 'retain') {
+        if (!localOwner || rows.length != 1 || id == null || revision == null) {
+          throw _bad;
+        }
+        return bots.retainFact(access, id, revision);
+      }
       if (action == 'pin') {
         if (rows.length != 1 ||
             id == null ||
@@ -545,14 +580,10 @@ class BotMemoryManagement {
       final text = _field<String>(row, 'text');
       if (name == 'retain') {
         final group = scope.groupId;
-        if (!localOwner ||
-            group == null ||
-            rows.length != 1 ||
-            id == null ||
-            revision == null) {
+        if (!localOwner || rows.length != 1 || id == null || revision == null) {
           throw _bad;
         }
-        bots.retainGroupMemory(bot, group, id, revision);
+        bots.retainUserMemory(bot, group, id, revision);
         return _entries(bot, scope);
       }
       if (name == 'pin') {
@@ -619,6 +650,7 @@ class BotMemoryManagement {
   Future<Map<String, Object?>> _source(
     MemoryHistoryAccess access,
     Map<String, Object?> args,
+    String? historyProject,
   ) async {
     final source = _field<Map<String, Object?>>(args, 'source');
     final ref = _sources[source?['token']];
@@ -638,7 +670,10 @@ class BotMemoryManagement {
       'anchor': wire(window.anchor),
       'before': [for (final item in window.before) wire(item)],
       'after': [for (final item in window.after) wire(item)],
-      if (_deletableGroupSeq(window.anchor) != null) 'canDeleteOriginal': true,
+      if (_deletableGroupSeq(window.anchor) != null ||
+          _deletablePrivateDelivery(window.anchor) ||
+          _deletableManagedOriginal(window.anchor, historyProject))
+        'canDeleteOriginal': true,
     };
   }
 
@@ -657,24 +692,43 @@ class BotMemoryManagement {
         : null;
   }
 
+  bool _deletablePrivateDelivery(MemoryHistoryMessage message) =>
+      localOwner &&
+      message.kind == MemoryHistoryKind.original &&
+      bots.canDeletePrivateDelivery(message.reference);
+
+  bool _deletableManagedOriginal(
+    MemoryHistoryMessage message,
+    String? project,
+  ) =>
+      localOwner &&
+      message.kind == MemoryHistoryKind.original &&
+      bots.canDeleteManagedOriginal(message.reference, project: project);
+
   Future<Map<String, Object?>> _deleteSource(
     MemoryHistoryAccess access,
     Map<String, Object?> args,
+    String? historyProject,
   ) async {
     if (_field<bool>(args, 'confirm') != true) throw _bad;
     final source = _field<Map<String, Object?>>(args, 'source');
     final ref = _sources[source?['token']];
     if (ref == null || ref.scope != access.current) throw _missing;
     final original = await botHistoryIndex(bots).locate(access, ref);
-    if (original == null || !_authorized(ref.scope)) throw _missing;
+    if (original == null || !access.permits(ref.scope)) throw _missing;
     final seq = _deletableGroupSeq(original);
-    if (seq == null) {
+    if (seq != null) {
+      await bots.groups.deleteOriginal(ref.scope.groupId!, seq);
+    } else if (_deletablePrivateDelivery(original)) {
+      await bots.deletePrivateDelivery(ref);
+    } else if (_deletableManagedOriginal(original, historyProject)) {
+      await bots.deleteManagedOriginal(ref, project: historyProject);
+    } else {
       throw const LinkRemoteException(
         LinkErrors.unsupported,
         'This original cannot be deleted here',
       );
     }
-    await bots.groups.deleteOriginal(ref.scope.groupId!, seq);
     return {'deleted': true};
   }
 

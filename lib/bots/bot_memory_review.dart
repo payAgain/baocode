@@ -273,6 +273,7 @@ class BotMemoryReview {
     required this.readMemory,
     required this.applyMemory,
     this.sourceGeneration,
+    this.isOriginalDeleted,
     this.readProjectEvidence,
     this.readProjectMemory,
     this.applyProjectMemory,
@@ -296,6 +297,13 @@ class BotMemoryReview {
   final PreferenceStore store;
   final bool Function(BotMemoryScope scope) scopeExists;
   final int Function(BotMemoryScope scope)? sourceGeneration;
+  final bool Function(
+    BotMemoryScope scope,
+    String? project,
+    String sessionId,
+    String messageId,
+  )?
+  isOriginalDeleted;
   final Future<String?> Function(
     BotMemoryScope scope,
     String sessionId,
@@ -489,17 +497,25 @@ class BotMemoryReview {
         return;
       }
       if (project != null) _requireProject(scope, project);
-      final key = _sessionKey(scope, sessionId);
-      final session = journal.sessions.putIfAbsent(
-        key,
-        () => {
-          'scope': scope.toJson(),
-          'sessionId': sessionId,
-          'project': project,
-          'turns': <Object?>[],
-          'checkpoint': 0,
-        },
-      );
+      final available = evidence
+          .where(
+            (source) => !_deleted(scope, project, sessionId, source.messageId),
+          )
+          .take(8)
+          .toList();
+      if (available.isEmpty) return;
+      final session =
+          _session(journal, scope, project, sessionId) ??
+          journal.sessions.putIfAbsent(
+            _sessionKey(scope, project, sessionId),
+            () => {
+              'scope': scope.toJson(),
+              'sessionId': sessionId,
+              'project': project,
+              'turns': <Object?>[],
+              'checkpoint': 0,
+            },
+          );
       if (session['project'] != project) {
         throw StateError('Review project changed');
       }
@@ -509,7 +525,7 @@ class BotMemoryReview {
         'turnId': turnId,
         'userTurns': userTurns.clamp(0, threshold),
         'toolIterations': toolIterations.clamp(0, threshold),
-        'evidence': [for (final source in evidence.take(8)) source.toJson()],
+        'evidence': [for (final source in available) source.toJson()],
       });
       session['updatedAt'] = _clock().toIso8601String();
       _queueAutomatic(journal, scope, session);
@@ -529,6 +545,7 @@ class BotMemoryReview {
     final existing = journal.jobs.values.any(
       (job) =>
           _isScope(job, scope) &&
+          job['project'] == session['project'] &&
           job['sessionId'] == sessionId &&
           job['manual'] != true,
     );
@@ -659,9 +676,25 @@ class BotMemoryReview {
     }, write: true);
   }
 
-  Future<void> invalidateDeletedSources(BotMemoryScope scope) {
-    if (_runningScope == scope) _cancelCurrent();
-    return _state((_) {});
+  Future<void> invalidateDeletedSources(
+    BotMemoryScope scope, {
+    String? project,
+    String? sessionId,
+    String? messageId,
+  }) {
+    if ((sessionId == null) != (messageId == null)) {
+      throw ArgumentError('A deleted source requires a session and message');
+    }
+    if (sessionId == null) {
+      if (_runningScope == scope) _cancelCurrent();
+      return _state((_) {});
+    }
+    return _state((journal) {
+      _reconcileSourceDeletions(
+        journal,
+        explicit: (scope, project, sessionId, messageId!),
+      );
+    });
   }
 
   int _generation(BotMemoryScope scope) => sourceGeneration?.call(scope) ?? 0;
@@ -669,20 +702,148 @@ class BotMemoryReview {
   bool _originalsCurrent(Map<String, Object?> row, BotMemoryScope scope) =>
       (row['sourceGeneration'] ?? 0) == _generation(scope);
 
-  void _reconcileSourceDeletions(_Journal journal) {
-    if (sourceGeneration == null) return;
-    bool revoked(Map<String, Object?> row) {
-      final scope = BotMemoryScope.fromJson(_map(row['scope']));
-      return scope.groupId != null && !_originalsCurrent(row, scope);
+  bool _deleted(
+    BotMemoryScope scope,
+    String? project,
+    String sessionId,
+    String messageId,
+  ) => isOriginalDeleted?.call(scope, project, sessionId, messageId) == true;
+
+  bool _deletedEvidence(
+    BotMemoryScope scope,
+    String? project,
+    Map<String, Object?> source,
+  ) => switch (source) {
+    {
+      'sessionId': final String sessionId,
+      'messageId': final String messageId,
+    } =>
+      _deleted(scope, project, sessionId, messageId),
+    _ => false,
+  };
+
+  static Iterable<Map<String, Object?>> _jobTurns(
+    Map<String, Object?> job,
+    Map<String, Object?> session,
+  ) {
+    final turns = _list(session['turns']);
+    final end = job['end'] as int;
+    final start = math.max(job['start'] as int, end - _maxSources);
+    return turns.getRange(start, end).map(_map);
+  }
+
+  bool _proposalSourceDeleted(
+    Map<String, Object?> proposal,
+    BotMemoryScope scope,
+    bool Function(BotMemoryScope, String?, String, String) deleted,
+  ) {
+    final project = proposal['project'] as String?;
+    return [
+      ..._rows(proposal['evidence']),
+      ..._rows(proposal['contextSources']),
+      if (proposal['action'] == 'batch')
+        for (final row in _memoryRows(proposal)) ..._rows(row['evidence']),
+    ].any(
+      (source) => deleted(
+        scope,
+        project,
+        source['sessionId'] as String,
+        source['messageId'] as String,
+      ),
+    );
+  }
+
+  void _reconcileSourceDeletions(
+    _Journal journal, {
+    (BotMemoryScope, String?, String, String)? explicit,
+  }) {
+    if (sourceGeneration == null &&
+        isOriginalDeleted == null &&
+        explicit == null) {
+      return;
+    }
+    final checked = <(BotMemoryScope, String?, String, String), bool>{};
+    bool deleted(
+      BotMemoryScope scope,
+      String? project,
+      String sessionId,
+      String messageId,
+    ) {
+      final key = (scope, project, sessionId, messageId);
+      return key == explicit ||
+          checked.putIfAbsent(
+            key,
+            () => _deleted(scope, project, sessionId, messageId),
+          );
     }
 
-    final jobs = journal.jobs;
-    for (final job in jobs.values.where(revoked).toList()) {
-      jobs.remove(job['id']);
-      journal.dirty = true;
+    final turnsToScrub = <Map<String, Object?>, Set<Map<String, Object?>>>{};
+    for (final job in journal.jobs.values.toList()) {
+      final scope = BotMemoryScope.fromJson(_map(job['scope']));
+      final project = job['project'] as String?;
+      final sessionId = job['sessionId'] as String;
+      final session = _session(journal, scope, project, sessionId);
+      final turns =
+          session == null || isOriginalDeleted == null && explicit == null
+          ? const <Map<String, Object?>>[]
+          : _jobTurns(job, session);
+      if (session != null && turns.isNotEmpty) {
+        turnsToScrub.putIfAbsent(session, () => {}).addAll(turns);
+      }
+      final runningSourceDeleted =
+          _runningId == job['id'] &&
+          turns.any(
+            (turn) => _rows(turn['evidence']).any(
+              (source) => deleted(
+                scope,
+                project,
+                sessionId,
+                source['messageId'] as String,
+              ),
+            ),
+          );
+      if (scope.groupId != null && !_originalsCurrent(job, scope) ||
+          runningSourceDeleted ||
+          _proposalSourceDeleted(job, scope, deleted)) {
+        if (_runningId == job['id']) _cancelCurrent();
+        journal.jobs.remove(job['id']);
+        journal.dirty = true;
+      }
     }
-    for (final proposal in journal.proposals.values.where(revoked)) {
-      _invalidateDeletedProposal(journal, proposal);
+    for (final proposal in journal.proposals.values) {
+      if (proposal['contentsPurged'] == true) continue;
+      final scope = BotMemoryScope.fromJson(_map(proposal['scope']));
+      if (scope.groupId != null && !_originalsCurrent(proposal, scope) ||
+          _proposalSourceDeleted(proposal, scope, deleted)) {
+        _invalidateDeletedProposal(journal, proposal);
+      }
+    }
+    if (explicit case (final scope, final project, final sessionId, _)) {
+      final session = _session(journal, scope, project, sessionId);
+      if (session != null) {
+        turnsToScrub
+            .putIfAbsent(session, () => {})
+            .addAll(_rows(session['turns']));
+      }
+    }
+    for (final entry in turnsToScrub.entries) {
+      final session = entry.key;
+      final scope = BotMemoryScope.fromJson(_map(session['scope']));
+      final project = session['project'] as String?;
+      final sessionId = session['sessionId'] as String;
+      for (final turn in entry.value) {
+        final sources = _list(turn['evidence']);
+        final count = sources.length;
+        sources.removeWhere(
+          (source) => deleted(
+            scope,
+            project,
+            sessionId,
+            _map(source)['messageId'] as String,
+          ),
+        );
+        if (sources.length != count) journal.dirty = true;
+      }
     }
   }
 
@@ -694,7 +855,7 @@ class BotMemoryReview {
     if (proposal['status'] == 'pending' || proposal['status'] == 'applying') {
       proposal['status'] = 'invalid';
       proposal['reviewedAt'] ??= _clock().toIso8601String();
-      proposal['error'] = 'A group original was deleted after this review';
+      proposal['error'] = 'An original was deleted after this review';
     }
     _purgeContents(proposal);
     proposal.remove('fingerprint');
@@ -843,15 +1004,12 @@ class BotMemoryReview {
       return;
     }
     final inputs = await _state((journal) {
-      final session = journal.sessions[_sessionKey(scope, sessionId)];
+      final session = _session(journal, scope, project, sessionId);
       if (session == null || !journal.jobs.containsKey(id)) return null;
-      final turns = _list(session['turns']);
-      final end = job['end'] as int;
-      final start = math.max(job['start'] as int, end - _maxSources);
       final sources = <BotMemoryReviewEvidence>[
-        for (final turn in turns.getRange(start, end))
-          for (final source in _list(_map(turn)['evidence']))
-            BotMemoryReviewEvidence.fromJson(_map(source)),
+        for (final turn in _jobTurns(job, session))
+          for (final source in _rows(turn['evidence']))
+            BotMemoryReviewEvidence.fromJson(source),
       ];
       return (sources: sources, settings: journal.settings(scope));
     });
@@ -900,11 +1058,18 @@ class BotMemoryReview {
     }
     final projectSkills = project == null
         ? <BotMemorySkill>[]
-        : await skills!.list(
-            botId: scope.botId,
-            project: project,
-            includeArchived: true,
-          );
+        : (await skills!.list(
+                botId: scope.botId,
+                project: project,
+                includeArchived: true,
+              ))
+              .where(
+                (skill) => !skill.evidence.any(
+                  (source) => _deletedEvidence(scope, project, source),
+                ),
+              )
+              .take(20)
+              .toList();
     final evidence = <String, Map<String, Object?>>{};
     final messages = <Map<String, Object?>>[];
     final seen = <String>{};
@@ -933,6 +1098,29 @@ class BotMemoryReview {
       await _finish(job, scope, const []);
       return;
     }
+    // A draft can copy an input even without citing it. Keep the locators
+    // of its prompt inputs so a later deletion can purge the draft as well.
+    final contextSources = <(String, String)>{
+      for (final source in evidence.values)
+        (sessionId, source['messageId'] as String),
+      for (final entry in memory.values)
+        if ((entry.session, entry.sourceMessage) case (
+          final session?,
+          final message?,
+        ))
+          (session, message),
+      for (final skill in projectSkills)
+        for (final source in skill.evidence)
+          if (source case {
+            'sessionId': final String session,
+            'messageId': final String message,
+          })
+            (session, message),
+    };
+    job['contextSources'] = [
+      for (final (session, message) in contextSources)
+        {'sessionId': session, 'messageId': message},
+    ];
     final prompt = jsonEncode({
       'focus': job['focus'],
       'conversation': messages.reversed.toList(),
@@ -962,6 +1150,11 @@ class BotMemoryReview {
     final claimed = await _state((journal) {
       final ready = journal.jobs[id];
       if (ready == null || foregroundBusy()) return false;
+      if (_proposalSourceDeleted(job, scope, _deleted)) {
+        journal.jobs.remove(id);
+        return false;
+      }
+      ready['contextSources'] = job['contextSources'];
       if (!scopeExists(scope) ||
           project != null && !_projectAvailable(scope, project)) {
         journal.jobs.remove(id);
@@ -995,7 +1188,9 @@ class BotMemoryReview {
       return true;
     }, write: true);
     if (!claimed) return;
-    if (!_originalsCurrent(job, scope) ||
+    if (_cancel?.isCompleted == true ||
+        !_originalsCurrent(job, scope) ||
+        _proposalSourceDeleted(job, scope, _deleted) ||
         !scopeExists(scope) ||
         project != null && !_projectAvailable(scope, project) ||
         !memoryCurrent()) {
@@ -1262,7 +1457,9 @@ class BotMemoryReview {
   ) =>
       _memoryRows(proposal).any((row) {
         final id = row['entryId'];
-        return id is int && memory.isWithdrawnEntry(id);
+        return id is int &&
+            (memory.isWithdrawnEntry(id) ||
+                memory.unavailableEntries.contains(id));
       }) ||
       _rows(proposal['evidence']).any(
         (source) => memory.isWithdrawnSource(
@@ -1332,6 +1529,7 @@ class BotMemoryReview {
       ..remove('skill')
       ..remove('changes')
       ..remove('evidence')
+      ..remove('contextSources')
       ..['contentsPurged'] = true;
   }
 
@@ -1361,7 +1559,7 @@ class BotMemoryReview {
     BotMemoryScope scope,
     List<Map<String, Object?>> drafts,
   ) => _state((journal) async {
-    if (journal.jobs.remove(job['id']) == null || !scopeExists(scope)) return;
+    if (!journal.jobs.containsKey(job['id'])) return;
     final validated = <Map<String, Object?>>[];
     for (final draft in drafts) {
       if (await _validate(
@@ -1372,7 +1570,12 @@ class BotMemoryReview {
         validated.add(draft);
       }
     }
-    if (!scopeExists(scope) || !_originalsCurrent(job, scope)) return;
+    _reconcileSourceDeletions(journal);
+    if (journal.jobs.remove(job['id']) == null ||
+        !scopeExists(scope) ||
+        !_originalsCurrent(job, scope)) {
+      return;
+    }
     _reconcileWithdrawals(journal, scope);
     final settings = journal.settings(scope);
     String? error;
@@ -1455,6 +1658,8 @@ class BotMemoryReview {
       }
       journal.proposals[id] = {
         ...draft,
+        if (job['contextSources'] case final List<Object?> sources)
+          'contextSources': sources,
         'id': id,
         'scope': scope.toJson(),
         'fingerprint': key,
@@ -1482,8 +1687,12 @@ class BotMemoryReview {
     Map<String, Object?> job,
     BotMemoryScope scope,
   ) {
-    final session =
-        journal.sessions[_sessionKey(scope, job['sessionId'] as String)];
+    final session = _session(
+      journal,
+      scope,
+      job['project'] as String?,
+      job['sessionId'] as String,
+    );
     if (session == null) return;
     session['checkpoint'] = math.max(
       session['checkpoint'] as int,
@@ -1558,7 +1767,8 @@ class BotMemoryReview {
                       )) &&
             await _validate(scope, sources, project);
         // Evidence lookup can yield while its original is being deleted.
-        if (!_originalsCurrent(proposal, scope)) {
+        if (!_originalsCurrent(proposal, scope) ||
+            _proposalSourceDeleted(proposal, scope, _deleted)) {
           _invalidateDeletedProposal(journal, proposal);
           return BotMemoryReviewProposal._(proposal);
         }
@@ -1593,8 +1803,12 @@ class BotMemoryReview {
               project: project!,
               draft: BotMemorySkillDraft.fromJson(_map(proposal['skill'])),
               proposalId: id,
-              evidence: _publicEvidence(sources),
+              evidence: [...sources, ..._rows(proposal['contextSources'])],
             );
+            if (_proposalSourceDeleted(proposal, scope, _deleted)) {
+              _invalidateDeletedProposal(journal, proposal);
+              return BotMemoryReviewProposal._(proposal);
+            }
           } else {
             if (action == BotMemoryReviewAction.batch && rows.length < 2) {
               throw StateError('Memory review batch is incomplete');
@@ -1657,9 +1871,13 @@ class BotMemoryReview {
     String sessionId,
     BotMemoryReviewEvidence source,
     String? project,
-  ) async => project == null
-      ? readEvidence(scope, sessionId, source)
-      : readProjectEvidence?.call(scope, project, sessionId, source);
+  ) async {
+    if (_deleted(scope, project, sessionId, source.messageId)) return null;
+    final text = await (project == null
+        ? readEvidence(scope, sessionId, source)
+        : readProjectEvidence?.call(scope, project, sessionId, source));
+    return _deleted(scope, project, sessionId, source.messageId) ? null : text;
+  }
 
   Future<bool> _validate(
     BotMemoryScope scope,
@@ -1705,8 +1923,26 @@ class BotMemoryReview {
     }
   }
 
-  static String _sessionKey(BotMemoryScope scope, String sessionId) =>
-      jsonEncode([scope.botId, scope.groupId, sessionId]);
+  static String _sessionKey(
+    BotMemoryScope scope,
+    String? project,
+    String sessionId,
+  ) => jsonEncode([scope.botId, scope.groupId, sessionId, project]);
+
+  static Map<String, Object?>? _session(
+    _Journal journal,
+    BotMemoryScope scope,
+    String? project,
+    String sessionId,
+  ) {
+    final current = journal.sessions[_sessionKey(scope, project, sessionId)];
+    if (current != null && current['project'] == project) return current;
+    // Older keys omitted the project. Only use a legacy session in its
+    // recorded project (or private conversation).
+    final legacy =
+        journal.sessions[jsonEncode([scope.botId, scope.groupId, sessionId])];
+    return legacy?['project'] == project ? legacy : null;
+  }
 
   static bool _isScope(Map<String, Object?> item, BotMemoryScope scope) =>
       BotMemoryScope.fromJson(_map(item['scope'])) == scope;

@@ -51,6 +51,7 @@ class EngineOptions {
     this.environment = const {},
     this.rootCertificates = const [],
     this.configDir,
+    this.transcriptProjectsDir,
     this.productName = 'BaoCode',
     this.systemPrompt,
     this.refreshSystemPromptOnCompaction = false,
@@ -84,6 +85,7 @@ class EngineOptions {
     },
     rootCertificates: [...asList(json['rootCertificates']).whereType<String>()],
     configDir: asText(json['configDir']),
+    transcriptProjectsDir: asString(json['transcriptProjectsDir']),
     productName: asText(json['productName']) ?? 'BaoCode',
     systemPrompt: asString(json['systemPrompt']),
     refreshSystemPromptOnCompaction:
@@ -143,6 +145,10 @@ class EngineOptions {
   /// Where Claude Code's files are, if not where the environment says.
   final String? configDir;
 
+  /// A trusted host's projects directory for persisted session transcripts.
+  /// The user's configuration and memory still use [configDir].
+  final String? transcriptProjectsDir;
+
   /// What the agent is built into, as the system prompt names it.
   final String productName;
 
@@ -192,6 +198,7 @@ class EngineOptions {
     'environment': environment,
     'rootCertificates': rootCertificates,
     'configDir': ?configDir,
+    'transcriptProjectsDir': ?transcriptProjectsDir,
     'productName': productName,
     'systemPrompt': ?systemPrompt,
     'refreshSystemPromptOnCompaction': refreshSystemPromptOnCompaction,
@@ -231,7 +238,11 @@ class AgentSession {
     ModelClient Function(ApiConfig config)? clientFactory,
   }) : cwd = p.normalize(options.cwd),
        _clientFactory = clientFactory ?? AnthropicClient.new {
-    paths = AgentPaths.from(options.environment, configDir: options.configDir);
+    paths = AgentPaths.from(
+      options.environment,
+      configDir: options.configDir,
+      transcriptProjectsDir: options.transcriptProjectsDir,
+    );
     settings = AgentSettings(
       paths: paths,
       cwd: cwd,

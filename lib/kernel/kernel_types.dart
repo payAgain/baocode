@@ -818,7 +818,11 @@ class KernelTurn {
     this.images = const [],
     this.now = false,
     this.notes = const [],
+    this.preferManagedTranscript = false,
   });
+
+  /// Host preference for a new local built-in conversation on this turn.
+  final bool preferManagedTranscript;
 
   /// Made by the client: sending the same turn twice runs it once.
   final String id;

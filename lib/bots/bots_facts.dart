@@ -19,8 +19,30 @@ extension BotFacts on Bots {
     return BotFactStore.fromJson(
       jsonDecode(utf8.decode(bytes)) as Map<String, Object?>,
       isProject: projectId != null,
+    ).withUnavailableSources(
+      (entry) => _managedSourceDeleted(
+        bot,
+        projectId,
+        entry.session,
+        entry.sourceMessage,
+      ),
     );
   }
+
+  bool _managedSourceDeleted(
+    Bot bot,
+    String? projectId,
+    String? sessionId,
+    String? messageId,
+  ) =>
+      sessionId != null &&
+      messageId != null &&
+      isManagedOriginalDeleted(
+        BotMemoryScope(botId: bot.id),
+        projectId,
+        sessionId,
+        messageId,
+      );
 
   BotFactStore _privateFacts(Bot bot) {
     if (_readSavedFacts(bot, null) case final saved?) return saved;
@@ -185,6 +207,19 @@ extension BotFacts on Bots {
   }) {
     final bot = _checkFactAccess(access);
     final previous = factMemory(access);
+    if (_managedSourceDeleted(
+          bot,
+          access.projectId,
+          access.sessionId,
+          access.sourceMessage,
+        ) ||
+        access.sessionId != null &&
+            changes.any(
+              (change) =>
+                  previous.memory.unavailableEntries.contains(change.id),
+            )) {
+      throw StateError('The fact source was deleted');
+    }
     final current = previous.apply(
       changes,
       at: _clock(),
@@ -216,6 +251,19 @@ extension BotFacts on Bots {
     }
     final bot = _checkFactAccess(access);
     final previous = factMemory(access);
+    if (changeSources.any(
+          (source) => _managedSourceDeleted(
+            bot,
+            projectId,
+            source.sessionId,
+            source.messageId,
+          ),
+        ) ||
+        changes.any(
+          (change) => previous.memory.unavailableEntries.contains(change.id),
+        )) {
+      throw StateError('The fact source was deleted');
+    }
     final current = previous.apply(
       [
         for (final change in changes)
@@ -231,6 +279,17 @@ extension BotFacts on Bots {
       changeSources: changeSources,
     );
     return _commitFacts(bot, projectId, previous, current);
+  }
+
+  BotFactStore retainFact(BotFactAccess access, int id, int revision) {
+    final bot = _checkFactAccess(access);
+    final previous = factMemory(access);
+    return _commitFacts(
+      bot,
+      access.projectId,
+      previous,
+      previous.retainWithoutSource(id, revision),
+    );
   }
 
   BotFactStore pinFact(

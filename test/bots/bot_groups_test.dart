@@ -302,7 +302,7 @@ void main() {
       final memory = bots.userMemory(currentBot, group: group.id);
       final suspended = memory.entries.first;
       expect(memory.unavailableEntries, {suspended.id});
-      bots.retainGroupMemory(
+      bots.retainUserMemory(
         currentBot,
         group.id,
         suspended.id,
