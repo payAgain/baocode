@@ -78,12 +78,14 @@ class WindowHeader extends StatefulWidget {
     this.title,
     this.settingsShown = false,
     this.windowOnly = false,
+    this.windowOnlyLeading,
   });
 
   final Workspace workspace;
 
-  /// Only the draggable caption and native buttons, over a remote workspace.
+  /// The draggable caption and native buttons over a remote workspace.
   final bool windowOnly;
+  final Widget? windowOnlyLeading;
 
   /// The project the session works in, for opening it in an editor; null
   /// before there is one.
@@ -258,7 +260,23 @@ class _WindowHeaderState extends State<WindowHeader> {
         color: AppColors.windowCanvas,
         child: SizedBox(
           height: AppMetrics.headerHeight,
-          child: Row(children: [const Spacer(), _windowButtons()]),
+          child: Row(
+            children: [
+              const SizedBox(width: WindowHeader.settingsToggleLeft),
+              Expanded(
+                child: Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: widget.windowOnlyLeading == null
+                      ? null
+                      : KeyedSubtree(
+                          key: _toggle,
+                          child: widget.windowOnlyLeading!,
+                        ),
+                ),
+              ),
+              _windowButtons(),
+            ],
+          ),
         ),
       );
     }

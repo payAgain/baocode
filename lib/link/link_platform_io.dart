@@ -233,10 +233,10 @@ class IoLinkPlatform implements LinkPlatform {
   }
 
   @override
-  String? branchOf(String folder) {
+  String? branchOf(String folder, {bool refresh = false}) {
     final now = DateTime.now();
     if (_branches[folder] case (final at, final branch)
-        when now.difference(at) < const Duration(seconds: 20)) {
+        when !refresh && now.difference(at) < const Duration(seconds: 20)) {
       return branch;
     }
     final branch = _readBranch(folder);

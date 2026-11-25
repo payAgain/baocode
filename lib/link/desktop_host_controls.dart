@@ -171,13 +171,24 @@ KernelOption _option(LinkOption option, IconData icon) => KernelOption(
   caution: option.caution,
 );
 
-/// The host's project and its reported window usage. The project path and
-/// branch are display-only: neither is resolved against the client machine.
+typedef DesktopHostBranchAccess = ({
+  LinkPeer peer,
+  Object view,
+  bool Function() isCurrent,
+});
+
+/// The host's project, Git branch and reported window usage.
 class DesktopHostSessionFooter extends StatelessWidget {
-  const DesktopHostSessionFooter({super.key, this.project, this.controls});
+  const DesktopHostSessionFooter({
+    super.key,
+    this.project,
+    this.controls,
+    this.branchAccess,
+  });
 
   final ProjectInfo? project;
   final DesktopHostSessionControls? controls;
+  final DesktopHostBranchAccess? branchAccess;
 
   @override
   Widget build(BuildContext context) {
@@ -191,7 +202,7 @@ class DesktopHostSessionFooter extends StatelessWidget {
           Expanded(
             child: project == null
                 ? const SizedBox.shrink()
-                : _HostProject(project),
+                : _HostProject(project, branchAccess),
           ),
           if (usage != null)
             Flexible(
@@ -203,43 +214,244 @@ class DesktopHostSessionFooter extends StatelessWidget {
   }
 }
 
-class _HostProject extends StatelessWidget {
-  const _HostProject(this.project);
-
-  final ProjectInfo project;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = AppColors.textFaint;
-    final name = project.name.isEmpty ? project.path : project.name;
-    final branch = project.branch;
-    Widget label(IconData icon, String text) => Row(
+Widget _projectLabel(IconData icon, String text, {bool dropdown = false}) =>
+    Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 13, color: color),
+        Icon(icon, size: 13, color: AppColors.textFaint),
         const SizedBox(width: 4),
         Flexible(
           child: Text(
             text,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: color, fontSize: 12),
+            style: TextStyle(color: AppColors.textFaint, fontSize: 12),
           ),
         ),
+        if (dropdown)
+          Icon(Codicons.chevronDown, size: 12, color: AppColors.textFaint),
       ],
     );
-    final location = Row(
+
+class _HostProject extends StatelessWidget {
+  const _HostProject(this.project, this.branchAccess);
+
+  final ProjectInfo project;
+  final DesktopHostBranchAccess? branchAccess;
+
+  @override
+  Widget build(BuildContext context) {
+    final name = project.name.isEmpty ? project.path : project.name;
+    final branch = project.branch;
+    final access = branchAccess;
+    return Row(
       children: [
-        if (name.isNotEmpty) Flexible(child: label(Codicons.folder, name)),
+        if (name.isNotEmpty)
+          Flexible(
+            child: IdeHover(
+              message: project.path,
+              child: _projectLabel(Codicons.folder, name),
+            ),
+          ),
         if (branch != null && branch.isNotEmpty) ...[
           if (name.isNotEmpty) const SizedBox(width: 8),
-          Flexible(child: label(Codicons.gitBranch, branch)),
+          Flexible(
+            child: access == null || !project.canSwitchBranch
+                ? _projectLabel(Codicons.gitBranch, branch)
+                : _HostBranch(
+                    key: ObjectKey(access.view),
+                    project: project,
+                    access: access,
+                  ),
+          ),
         ],
       ],
     );
-    return project.path.isEmpty
-        ? location
-        : IdeHover(message: project.path, child: location);
+  }
+}
+
+class _HostBranch extends StatefulWidget {
+  const _HostBranch({super.key, required this.project, required this.access});
+
+  final ProjectInfo project;
+  final DesktopHostBranchAccess access;
+
+  @override
+  State<_HostBranch> createState() => _HostBranchState();
+}
+
+class _HostBranchState extends State<_HostBranch> {
+  final _menu = MenuController();
+  Object? _listing;
+  List<String> _branches = const [];
+  ({String oid, String? branch})? _head;
+  bool _switching = false;
+  bool _unsupported = false;
+  String? _error;
+
+  bool get _current => mounted && widget.access.isCurrent();
+
+  Future<void> _list() async {
+    if (!_current) return;
+    final request = Object();
+    setState(() {
+      _listing = request;
+      _error = null;
+      _head = null;
+      _branches = const [];
+    });
+    try {
+      final response = await widget.access.peer.call(
+        LinkMethods.projectBranches,
+        {'project': widget.project.id},
+      );
+      if (!_current || !identical(_listing, request) || !_menu.isOpen) return;
+      if (response
+          case final Map<String, Object?> result &&
+              {'branches': final List branches, 'head': final String oid}
+          when oid.isNotEmpty) {
+        final branch = result['branch'] as String?;
+        setState(() {
+          _listing = null;
+          _head = (oid: oid, branch: branch);
+          _branches = branches
+              .whereType<String>()
+              .where((name) => name.isNotEmpty)
+              .toSet()
+              .toList();
+        });
+      } else {
+        throw const FormatException('Missing host branches');
+      }
+    } on Object catch (error) {
+      if (!_current || !identical(_listing, request) || !_menu.isOpen) return;
+      _menu.close();
+      _report(error, listing: true);
+    }
+  }
+
+  Future<void> _switch(String branch) async {
+    final head = _head;
+    if (!_current ||
+        _switching ||
+        _unsupported ||
+        head == null ||
+        !_branches.contains(branch) ||
+        branch == head.branch) {
+      return;
+    }
+    setState(() {
+      _switching = true;
+      _error = null;
+    });
+    try {
+      await widget.access.peer.call(LinkMethods.switchProjectBranch, {
+        'project': widget.project.id,
+        'branch': branch,
+        'expectedHead': head.oid,
+        'expectedBranch': ?head.branch,
+      });
+    } on Object catch (error) {
+      if (_current) _report(error);
+    } finally {
+      if (_current) setState(() => _switching = false);
+    }
+  }
+
+  void _report(Object error, {bool listing = false}) {
+    final zh = _zh(context);
+    setState(() {
+      _listing = null;
+      _unsupported =
+          error is LinkRemoteException &&
+          (error.code == LinkErrors.unknown ||
+              error.code == LinkErrors.unsupported);
+      _error = switch (error) {
+        LinkRemoteException(code: LinkErrors.gitRejected, :final message) =>
+          message,
+        LinkRemoteException(code: 'stale') =>
+          zh
+              ? '主机的 HEAD 已更改。请重新打开分支菜单。'
+              : 'The host HEAD changed. Reopen the branch menu.',
+        LinkRemoteException(code: LinkErrors.busy) =>
+          zh
+              ? '主机仓库正在使用中。请稍后重试。'
+              : 'The host repository is busy. Try again later.',
+        _ when listing =>
+          zh ? '无法读取主机的本地分支。' : 'Could not list local branches on the host.',
+        _ => zh ? '无法切换主机分支。' : 'Could not switch the host branch.',
+      };
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final branch = widget.project.branch!;
+    final zh = _zh(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (_unsupported)
+          _projectLabel(Codicons.gitBranch, branch)
+        else
+          MenuAnchor(
+            controller: _menu,
+            onOpen: () => unawaited(_list()),
+            menuChildren: [
+              if (_listing != null || _branches.isEmpty)
+                MenuItemButton(
+                  child: Text(
+                    _listing != null
+                        ? (zh ? '正在读取分支…' : 'Loading branches…')
+                        : (zh ? '没有本地分支' : 'No local branches'),
+                  ),
+                )
+              else
+                for (final name in _branches)
+                  MenuItemButton(
+                    leadingIcon: name == _head?.branch
+                        ? const Icon(Codicons.check, size: 14)
+                        : null,
+                    onPressed: name == _head?.branch
+                        ? null
+                        : () => unawaited(_switch(name)),
+                    child: Text(name),
+                  ),
+            ],
+            builder: (context, menu, child) => TextButton(
+              key: const ValueKey('host-branch-picker'),
+              style: TextButton.styleFrom(
+                minimumSize: const Size(0, 24),
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
+              ),
+              onPressed: _switching
+                  ? null
+                  : () {
+                      if (menu.isOpen) {
+                        menu.close();
+                      } else if (_current) {
+                        menu.open();
+                      }
+                    },
+              child: _projectLabel(Codicons.gitBranch, branch, dropdown: true),
+            ),
+          ),
+        if (_error case final error?)
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              error,
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.error,
+                fontSize: 12,
+              ),
+            ),
+          ),
+      ],
+    );
   }
 }
 

@@ -44,7 +44,8 @@ abstract interface class LinkPlatform {
   Future<DeviceInfo> device();
 
   /// The Git branch checked out in [folder], if it is a repository.
-  String? branchOf(String folder);
+  /// [refresh] bypasses the cache after a request that may change HEAD.
+  String? branchOf(String folder, {bool refresh = false});
 
   /// [body] sent to [url] as JSON (a push to the phones): the answer's
   /// status, and its JSON if it has any. Throws when it is not reached.

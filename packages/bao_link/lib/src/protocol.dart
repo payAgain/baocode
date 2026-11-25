@@ -112,6 +112,16 @@ abstract final class LinkMethods {
   /// [ProjectInfo.pinned]), as the desktop's Pin.
   static const pinProject = 'pinProject';
 
+  /// `{"project"}` -> `{"branches": [...], "head", "branch"?}`: existing
+  /// local Git branches and the current HEAD of a project that advertises
+  /// [ProjectInfo.canSwitchBranch]. A detached HEAD omits `branch`.
+  static const projectBranches = 'projectBranches';
+
+  /// `{"project", "branch", "expectedHead", "expectedBranch"?}`: switch to
+  /// an existing local Git branch if HEAD still matches the list response.
+  /// [LinkEvents.state] reports the resulting project branch.
+  static const switchProjectBranch = 'switchProjectBranch';
+
   /// `{"session"}`: off the list (archived on the desktop).
   static const archive = 'archive';
 
@@ -537,6 +547,9 @@ abstract final class LinkErrors {
   /// The desktop cannot do that here (an agent that cannot go back).
   static const unsupported = 'unsupported';
 
+  /// Git could not list the project's local branches or switch to one.
+  static const gitRejected = 'gitRejected';
+
   /// The request was not one the desktop knows: one from before it could.
   static const unknown = 'unknown';
 
@@ -617,6 +630,7 @@ class ProjectInfo {
     required this.name,
     required this.path,
     this.branch,
+    this.canSwitchBranch = false,
     this.icon,
     this.pinned,
   });
@@ -626,6 +640,7 @@ class ProjectInfo {
     name: json['name'] as String? ?? '',
     path: json['path'] as String? ?? '',
     branch: json['branch'] as String?,
+    canSwitchBranch: json['canSwitchBranch'] == true,
     icon: switch (json['icon']) {
       final Map<String, Object?> icon => icon,
       _ => null,
@@ -637,6 +652,10 @@ class ProjectInfo {
   final String name;
   final String path;
   final String? branch;
+
+  /// The host permits listing and switching this project's local branches.
+  /// A host that omits this capability offers a read-only branch label.
+  final bool canSwitchBranch;
 
   /// What it shows in place of its folder, as the desktop keeps it:
   /// `{"type": "emoji", "emoji"}`, `{"type": "codicon", "name", "color"?}`
@@ -655,6 +674,7 @@ class ProjectInfo {
     'name': name,
     'path': path,
     'branch': ?branch,
+    if (canSwitchBranch) 'canSwitchBranch': true,
     'icon': ?icon,
     'pinned': ?pinned,
   };

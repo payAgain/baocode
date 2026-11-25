@@ -87,10 +87,10 @@ void main() {
       addTearDown(appLocale.dispose);
 
       final catalog = find.byKey(const ValueKey('host-catalog'));
-      final close = find.byTooltip('关闭主机活动');
+      final close = find.byTooltip('关闭项目侧栏');
       final composer = find.byType(DesktopHostComposer);
       final header = find.byType(ConversationCardHeader);
-      final activity = find.byTooltip('主机活动');
+      final activity = find.byTooltip('项目侧栏');
       final semantics = tester.ensureSemantics();
 
       try {
@@ -122,6 +122,13 @@ void main() {
         final composerState = tester.state(composer);
         await tester.tap(activity.hitTestable());
         await tester.pumpAndSettle();
+        final sidebar = find.byKey(
+          const ValueKey('desktop-remote-project-sidebar'),
+        );
+        expect(sidebar, findsOneWidget);
+        await tap(tester, 'checklist.txt');
+        expect(find.text('只读文件预览').hitTestable(), findsOneWidget);
+        await tap(tester, '任务');
         expect(find.text('此会话没有任务。').hitTestable(), findsOneWidget);
         expect(
           tester.getRect(catalog).right,
@@ -151,6 +158,12 @@ void main() {
           ui.Tristate.isTrue,
         );
         await _capture(tester, surface, 'wide-empty-changes.png');
+        await tap(tester, '文件');
+        expect(find.text('只读文件预览').hitTestable(), findsOneWidget);
+        expect(
+          methods.where((method) => method == LinkMethods.read),
+          hasLength(1),
+        );
         await tap(tester, '扩展');
         expect(find.text('主机未报告所选项目的扩展。').hitTestable(), findsOneWidget);
         await _capture(tester, surface, 'wide-empty-extensions.png');
@@ -173,11 +186,8 @@ void main() {
 
         tester.view.physicalSize = const Size(520, 730);
         await tester.pumpAndSettle();
-        expect(tester.state(composer), same(composerState));
-        expect(
-          tester.getRect(composer).bottom,
-          lessThan(tester.getRect(close).top),
-        );
+        expect(composer.hitTestable(), findsNothing);
+        expect(close.hitTestable(), findsOneWidget);
         expect(find.text('执行发布前检查').hitTestable(), findsOneWidget);
         await _capture(tester, surface, 'narrow-tasks.png');
         await tap(tester, '查看输出');
@@ -233,6 +243,11 @@ class _Fixture {
       ],
     ).toJson(),
     LinkMethods.open when args['session'] == _session => update(full: true),
+    LinkMethods.folder => {
+      'files': ['checklist.txt'],
+      'folders': [],
+    },
+    LinkMethods.read when args['path'] == 'checklist.txt' => {'text': '只读文件预览'},
     LinkMethods.extensions => {
       'items': [
         if (populated) ...[

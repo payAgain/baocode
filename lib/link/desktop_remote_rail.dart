@@ -8,7 +8,6 @@ import 'package:flutter/material.dart';
 import '../ide/ide_list.dart';
 import '../ide/ide_panes.dart' show IdePaneAction, IdeViewTitle;
 import '../l10n/l10n.dart';
-import '../sidebar/sidebar.dart' show SidebarIconButton;
 import '../theme/app_theme.dart' show AppColors;
 import '../theme/codicons.dart';
 import '../theme/material_file_icons.dart' show FileIcon, FolderIcon;
@@ -17,19 +16,17 @@ import 'desktop_host_chats.dart';
 import 'desktop_remote_media.dart';
 import 'desktop_remote_media_preview.dart';
 
-/// Docks a host explorer alongside a bounded conversation pane.
+/// The read-only file explorer for the project sidebar's Files tab.
 class DesktopRemoteRail extends StatefulWidget {
   const DesktopRemoteRail({
     super.key,
     required this.peer,
     required this.chat,
-    required this.child,
     this.isCurrent,
   });
 
   final LinkPeer peer;
   final DesktopHostChat chat;
-  final Widget child;
   final bool Function()? isCurrent;
 
   @override
@@ -37,7 +34,6 @@ class DesktopRemoteRail extends StatefulWidget {
 }
 
 class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
-  bool _open = false;
   final _expanded = <String>{};
   final _folders = <String, _Folder>{};
   _LegacyTree? _legacy;
@@ -59,6 +55,7 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
   void initState() {
     super.initState();
     _watchPeer();
+    _load('');
   }
 
   @override
@@ -73,7 +70,8 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
     if (oldWidget.peer != widget.peer ||
         (old.kind, old.id, old.projectId) !=
             (chat.kind, chat.id, chat.projectId)) {
-      _reset();
+      _clearFiles();
+      _load('');
     }
   }
 
@@ -82,7 +80,7 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
     _connection = peer.events.listen(
       null,
       onDone: () {
-        if (mounted && identical(widget.peer, peer)) setState(_reset);
+        if (mounted && identical(widget.peer, peer)) setState(_clearFiles);
       },
     );
   }
@@ -91,11 +89,6 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
   void dispose() {
     unawaited(_connection?.cancel());
     super.dispose();
-  }
-
-  void _reset() {
-    _open = false;
-    _clearFiles();
   }
 
   void _clearFiles() {
@@ -107,15 +100,6 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
     _downloadStatus = null;
   }
 
-  void _toggle() => setState(() {
-    if (_open) {
-      _reset();
-    } else {
-      _open = true;
-      _load('');
-    }
-  });
-
   void _refresh() => setState(() {
     _clearFiles();
     _load('');
@@ -124,11 +108,11 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
   void _load(String path) => unawaited(_fetchFolder(path));
 
   Future<void> _fetchFolder(String path) async {
-    if (!_connected) return;
+    final project = _project;
+    if (!_connected || project == null) return;
     if (_folders[path] case final folder? when !folder.failed) return;
     final request = _folders[path] = _Folder();
     final peer = widget.peer;
-    final project = _project!;
     bool current() =>
         mounted && _connected && identical(_folders[path], request);
     try {
@@ -223,70 +207,6 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
 
   @override
   Widget build(BuildContext context) {
-    final connectedProject = _project != null && _connected;
-    final l10n = context.l10n;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        if (!constraints.hasBoundedWidth || !constraints.hasBoundedHeight) {
-          return widget.child;
-        }
-        final wide = constraints.maxWidth >= 520;
-        final available =
-            connectedProject &&
-            constraints.maxWidth >= 245 &&
-            constraints.maxHeight >= (wide ? 150 : 340);
-        final explorer = available && _open ? _explorer(context) : null;
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Expanded(child: widget.child),
-                  if (!wide && explorer != null)
-                    SizedBox(
-                      height: constraints.maxHeight * .45,
-                      child: explorer,
-                    ),
-                ],
-              ),
-            ),
-            if (wide && explorer != null)
-              SizedBox(
-                width: math.min(400, constraints.maxWidth * .37),
-                child: explorer,
-              ),
-            if (available)
-              SizedBox(
-                width: 40,
-                child: Align(
-                  alignment: Alignment.topCenter,
-                  child: Container(
-                    margin: const EdgeInsets.only(top: 8),
-                    padding: const EdgeInsets.all(4),
-                    decoration: BoxDecoration(
-                      color: AppColors.surface,
-                      border: Border.all(color: AppColors.partBorder),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: SidebarIconButton(
-                      key: const ValueKey('desktop-remote-files-toggle'),
-                      icon: Codicons.files,
-                      tooltip: _open ? l10n.sidePanelHide : l10n.sidePanelFiles,
-                      size: 26,
-                      onTap: _toggle,
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _explorer(BuildContext context) {
     final l10n = context.l10n;
     final preview = _preview;
     final rows = [

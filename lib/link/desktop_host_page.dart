@@ -88,6 +88,7 @@ class DesktopHostPage extends StatefulWidget {
     this.onSelectComputer,
     this.computerNavigation = 0,
     this.reviewVisible = true,
+    this.windowHeader,
   });
 
   final DesktopHostConnection connection;
@@ -98,6 +99,7 @@ class DesktopHostPage extends StatefulWidget {
   final ValueChanged<String>? onSelectComputer;
   final int computerNavigation;
   final bool reviewVisible;
+  final Widget Function(Widget directoryToggle)? windowHeader;
 
   @override
   State<DesktopHostPage> createState() => _DesktopHostPageState();
@@ -115,6 +117,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   ({LinkPeer peer, DesktopHostChatKey? editor})? _peopleDock;
   bool _leaving = false;
   Object? _chatRequest;
+  final _remoteActionsKey = GlobalKey<DesktopRemoteSessionActionsState>();
   final _collapsedFolders = <(String, String)>{};
   final _restoring = <(int, String)>{};
   final _restoreHandled = <String>{};
@@ -584,29 +587,40 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                       ),
                     )
                   : selected.kind == 'project'
-                  ? DesktopRemoteRail(
-                      peer: _connection.peer!,
-                      chat: selected,
-                      isCurrent: _conversationGuard(_connection.peer, selected),
-                      child: DesktopRemoteActivity(
-                        session: DesktopRemoteActivitySession.fromChats(
-                          _chats,
-                          _connection.peer,
-                          selected,
+                  ? DesktopRemoteActivity(
+                      key: ValueKey((
+                        _connection.peer,
+                        selected.id,
+                        selected.projectId,
+                      )),
+                      files: switch (selected.projectId) {
+                        final id? when id.isNotEmpty => DesktopRemoteRail(
+                          peer: _connection.peer!,
+                          chat: selected,
+                          isCurrent: _conversationGuard(
+                            _connection.peer,
+                            selected,
+                          ),
                         ),
-                        hostName: _connection.hostName ?? text.host,
-                        builder: (_, button) => _conversation(
-                          text,
-                          host,
-                          selected,
-                          error,
-                          wide: wide,
-                          activityButton: button,
-                        ),
+                        _ => null,
+                      },
+                      session: DesktopRemoteActivitySession.fromChats(
+                        _chats,
+                        _connection.peer,
+                        selected,
+                      ),
+                      hostName: _connection.hostName ?? text.host,
+                      builder: (_, button) => _conversation(
+                        text,
+                        host,
+                        selected,
+                        error,
+                        wide: wide,
+                        activityButton: button,
                       ),
                     )
                   : _conversation(text, host, selected, error, wide: wide);
-              return _withPeopleDock(
+              final body = _withPeopleDock(
                 width: constraints.maxWidth,
                 wide: wide,
                 peer: host == null ? null : _connection.peer,
@@ -637,6 +651,39 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                     ),
                   ],
                 ),
+              );
+              final directory = TextButton.icon(
+                key: const ValueKey('host-toggle-sidebar'),
+                onPressed: selected == null ? null : () => _toggleCatalog(wide),
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: const Size(0, 28),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                icon: Icon(
+                  showSidebar || showCompactCatalog
+                      ? Codicons.layoutSidebarLeft
+                      : Codicons.layoutSidebarLeftOff,
+                  size: 16,
+                ),
+                label: Text(
+                  showCompactCatalog && selected != null
+                      ? text.returnToChat
+                      : text.sessionDirectory,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              );
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  widget.windowHeader?.call(directory) ??
+                      Align(
+                        alignment: AlignmentDirectional.centerStart,
+                        child: directory,
+                      ),
+                  Expanded(child: body),
+                ],
               );
             },
           ),
@@ -733,15 +780,6 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (compact && _compactCatalog && _chats.selected != null)
-                Align(
-                  alignment: AlignmentDirectional.centerStart,
-                  child: TextButton.icon(
-                    onPressed: () => _toggleCatalog(false),
-                    icon: const Icon(Icons.arrow_forward, size: 16),
-                    label: Text(text.returnToChat),
-                  ),
-                ),
               if (_busy) _Progress(text.working),
               if (showChatStatus && error != null)
                 _Notice(error, isError: true),
@@ -1115,13 +1153,6 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                       ),
               ),
             IconButton(
-              key: const ValueKey('host-toggle-sidebar'),
-              visualDensity: VisualDensity.compact,
-              tooltip: wide ? text.sidebar : context.l10n.myComputers,
-              icon: const Icon(Codicons.layoutSidebarLeft, size: 16),
-              onPressed: () => _toggleCatalog(wide),
-            ),
-            IconButton(
               visualDensity: VisualDensity.compact,
               tooltip: wide ? text.closeChat : text.backToChats,
               onPressed: _closeChat,
@@ -1151,6 +1182,9 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                           isCurrent: isCurrent,
                           child: DesktopHostProjectHistory(
                             feed: history,
+                            openMessageEditor: (index, item) =>
+                                _remoteActionsKey.currentState
+                                    ?.openMessageEditor(history, index, item),
                             earlierEnabled: !_busy && !_chatBusy,
                             emptyLabel: !_chatBusy && error == null
                                 ? text.emptyChat
@@ -1243,6 +1277,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                   ),
                 if (chat.kind == 'project')
                   DesktopRemoteSessionActions(
+                    key: _remoteActionsKey,
                     peer: connection.peer,
                     chat: chat,
                     chats: _chats,
@@ -1256,6 +1291,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                     controls: _chats.sessionControls,
                     peer: peer,
                     chat: chat,
+                    chats: _chats,
                     isMediaCurrent: isCurrent,
                     project: chat.kind == 'project'
                         ? _chats.projects
@@ -1293,6 +1329,7 @@ class _HostComposer extends StatelessWidget {
     required this.peer,
     required this.chat,
     required this.isMediaCurrent,
+    required this.chats,
     this.controls,
     this.project,
   });
@@ -1306,12 +1343,14 @@ class _HostComposer extends StatelessWidget {
   final LinkPeer? peer;
   final DesktopHostChat chat;
   final bool Function() isMediaCurrent;
+  final DesktopHostChats chats;
   final DesktopHostSessionControls? controls;
   final ProjectInfo? project;
 
   @override
   Widget build(BuildContext context) {
     final text = _HostText(context);
+    final branchView = chats.projectBranchView(peer, chat);
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1329,7 +1368,20 @@ class _HostComposer extends StatelessWidget {
           isMediaCurrent: isMediaCurrent,
           controls: controls,
         ),
-        DesktopHostSessionFooter(project: project, controls: controls),
+        DesktopHostSessionFooter(
+          project: project,
+          controls: controls,
+          branchAccess: branchView == null || peer == null
+              ? null
+              : (
+                  peer: peer!,
+                  view: branchView,
+                  isCurrent: () => identical(
+                    branchView,
+                    chats.projectBranchView(peer, chat),
+                  ),
+                ),
+        ),
       ],
     );
   }
@@ -1664,7 +1716,7 @@ class _HostText {
     LinkPathKind.none => routeUnavailable,
   };
   String latency(int ms) => _zh ? '往返时延：$ms 毫秒' : 'Round-trip time: $ms ms';
-  String get sidebar => _zh ? '显示或隐藏侧栏' : 'Toggle sidebar';
+  String get sessionDirectory => _zh ? '会话目录' : 'Session directory';
   String get backToChats => _zh ? '返回主机会话列表' : 'Back to host chats';
   String get closeChat => _zh ? '关闭会话' : 'Close chat';
   String get returnToChat => _zh ? '返回当前会话' : 'Return to current conversation';

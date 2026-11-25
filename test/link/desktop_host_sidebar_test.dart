@@ -71,7 +71,13 @@ void main() {
     final caption = windowCalls.lastWhere(
       (call) => call.method == 'setHitTestAreas',
     );
-    expect(caption.arguments['controls'], isEmpty);
+    final directory = find.byKey(const ValueKey('host-toggle-sidebar'));
+    expect(directory.hitTestable(), findsOneWidget);
+    expect(
+      tester.getRect(directory).bottom,
+      lessThan(tester.getRect(column).top),
+    );
+    expect(caption.arguments['controls'], hasLength(1));
     expect(
       caption.arguments['buttons'].keys,
       unorderedEquals(['minimize', 'maximize', 'close']),

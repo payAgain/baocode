@@ -49,6 +49,10 @@ String remoteMediaError(AppLocalizations l10n, Object error) {
     LinkRemoteException(code: LinkErrors.notFound) => l10n.placeholderNotFound,
     LinkRemoteException(code: LinkErrors.unknown || LinkErrors.unsupported) =>
       zh ? '此主机不支持此操作。' : 'This host does not support this action.',
+    RemoteTooManyImages() =>
+      zh
+          ? '每条消息最多附加 $remoteAttachmentCount 张图片。'
+          : 'Attach up to $remoteAttachmentCount images per message.',
     RemoteUnsupportedImage() =>
       zh
           ? '无法预览此图片，或图片格式不受支持。'
@@ -195,6 +199,22 @@ class DesktopRemotePickedImage {
   final String type;
   final Uint8List _bytes;
 
+  factory DesktopRemotePickedImage.checked({
+    required DesktopRemoteMediaTarget target,
+    required String name,
+    required String type,
+    required Uint8List bytes,
+    required int availableBytes,
+  }) {
+    if (bytes.length > availableBytes) {
+      throw const RemoteMediaTooLarge(remoteAttachmentLimit);
+    }
+    if (!remoteImageSignature(bytes, type)) {
+      throw const RemoteUnsupportedImage();
+    }
+    return DesktopRemotePickedImage._(target, name, type, bytes);
+  }
+
   int get size => _bytes.length;
   Map<String, Object?> toWire() => {
     'name': name,
@@ -220,11 +240,17 @@ Future<DesktopRemotePickedImage?> pickRemoteAttachment({
     current: isCurrent,
   );
   if (bytes == null) return null;
-  if (bytes.length > availableBytes) {
-    throw const RemoteMediaTooLarge(remoteAttachmentLimit);
-  }
-  if (!remoteImageSignature(bytes, type)) throw const RemoteUnsupportedImage();
-  return DesktopRemotePickedImage._(target, name, type, bytes);
+  return DesktopRemotePickedImage.checked(
+    target: target,
+    name: name,
+    type: type,
+    bytes: bytes,
+    availableBytes: availableBytes,
+  );
+}
+
+class RemoteTooManyImages implements Exception {
+  const RemoteTooManyImages();
 }
 
 class RemoteUnsupportedImage implements Exception {

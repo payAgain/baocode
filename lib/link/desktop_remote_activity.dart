@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
@@ -106,8 +107,10 @@ class DesktopRemoteActivity extends StatefulWidget {
     required this.session,
     required this.hostName,
     required this.builder,
+    this.files,
   });
 
+  final Widget? files;
   final DesktopRemoteActivitySession? session;
   final String hostName;
   final Widget Function(BuildContext context, Widget? activityButton) builder;
@@ -116,11 +119,13 @@ class DesktopRemoteActivity extends StatefulWidget {
   State<DesktopRemoteActivity> createState() => _DesktopRemoteActivityState();
 }
 
-enum _Section { tasks, changes, extensions }
+enum _Section { files, tasks, changes, extensions }
 
 class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
   bool _open = false;
-  _Section _section = _Section.tasks;
+  late _Section _section = _defaultSection;
+  _Section get _defaultSection =>
+      widget.files == null ? _Section.tasks : _Section.files;
   Future<_ExtensionInventory>? _extensions;
   final _reviewing = <String, _ReviewRequest>{};
   final _reviewErrors = <String, _ReviewError>{};
@@ -134,13 +139,14 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
   void didUpdateWidget(DesktopRemoteActivity oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.session, widget.session)) {
-      _open = false;
+      if (widget.files == null) _open = false;
       _confirmation = null;
       _stopping.clear();
       _stopError = null;
+      _clearOutput();
       _clearReviews();
       _extensions = null;
-      _section = _Section.tasks;
+      _section = _defaultSection;
     }
     if (!_open ||
         widget.session?._available != true ||
@@ -169,6 +175,7 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
   void _toggle() => setState(() {
     _open = !_open;
     if (!_open) {
+      _section = _defaultSection;
       _confirmation = null;
       _clearOutput();
       _reviewPreview = null;
@@ -295,86 +302,139 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
   Widget build(BuildContext context) {
     final text = _ActivityText(context);
     final session = widget.session;
-    final available = session?._available == true;
+    final sessionAvailable = session?._available == true;
+    final hasFiles = widget.files != null;
+    final available = hasFiles || sessionAvailable;
+    final label = hasFiles ? text.projectSidebar : text.activity;
     final activityButton = available
         ? IconButton(
-            tooltip: text.activity,
+            key: const ValueKey('desktop-remote-project-sidebar-toggle'),
+            tooltip: label,
             visualDensity: VisualDensity.compact,
             icon: Icon(
-              _open ? Icons.fact_check : Icons.fact_check_outlined,
+              _open
+                  ? Codicons.layoutSidebarRight
+                  : Codicons.layoutSidebarRightOff,
               size: 16,
             ),
             isSelected: _open,
-            onPressed: () {
-              if (identical(widget.session, session) && session!._available) {
-                _toggle();
-              }
-            },
+            onPressed: _toggle,
           )
         : null;
     return LayoutBuilder(
       builder: (context, constraints) {
-        final side = constraints.maxWidth >= 720;
-        return Flex(
-          direction: side ? Axis.horizontal : Axis.vertical,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+        final visible = _open && available;
+        final docked = visible && constraints.maxWidth >= 600;
+        final compact = visible && !docked;
+        final panelWidth = docked
+            ? math.min(400.0, constraints.maxWidth * .37)
+            : 0.0;
+        return Stack(
+          fit: StackFit.expand,
           children: [
-            Expanded(child: widget.builder(context, activityButton)),
-            if (_open && available) ...[
-              if (side)
-                VerticalDivider(width: 1, color: AppColors.partBorder)
-              else
-                _activityRule(),
-              SizedBox(
-                width: side ? 324 : null,
-                height: side ? null : constraints.maxHeight * .48,
-                child: Material(
-                  color: AppColors.background,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _ActivityBar(
-                        label: text.activity,
-                        heading: true,
-                        trailing: _ActivityIconButton(
-                          tooltip: text.close,
-                          icon: Codicons.close,
-                          onPressed: _toggle,
-                        ),
-                      ),
-                      _sections(text),
-                      _activityRule(),
-                      Expanded(
-                        child: switch (_section) {
-                          _Section.tasks when _output != null => _outputPane(
-                            text,
-                            _output!,
-                          ),
-                          _Section.tasks => _tasks(text, session!),
-                          _Section.changes => _changes(text, session!),
-                          _Section.extensions => _extensionsPane(text),
-                        },
-                      ),
-                    ],
+            PositionedDirectional(
+              start: 0,
+              end: docked ? panelWidth + 1 : 0,
+              top: 0,
+              bottom: 0,
+              child: Offstage(
+                offstage: compact,
+                child: ExcludeFocus(
+                  excluding: compact,
+                  child: TickerMode(
+                    enabled: !compact,
+                    child: widget.builder(context, activityButton),
                   ),
                 ),
               ),
-            ],
+            ),
+            if (visible)
+              PositionedDirectional(
+                start: docked ? null : 0,
+                end: 0,
+                top: 0,
+                bottom: 0,
+                width: docked ? panelWidth + 1 : null,
+                child: Row(
+                  children: [
+                    if (docked)
+                      VerticalDivider(width: 1, color: AppColors.partBorder),
+                    Expanded(
+                      child: Material(
+                        key: const ValueKey('desktop-remote-project-sidebar'),
+                        color: AppColors.background,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _ActivityBar(
+                              label: label,
+                              heading: true,
+                              trailing: _ActivityIconButton(
+                                tooltip: hasFiles
+                                    ? text.closeProjectSidebar
+                                    : text.close,
+                                icon: compact
+                                    ? Codicons.arrowLeft
+                                    : Codicons.close,
+                                onPressed: _toggle,
+                              ),
+                            ),
+                            _sections(text, sessionAvailable),
+                            _activityRule(),
+                            Expanded(
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  if (hasFiles)
+                                    Offstage(
+                                      offstage: _section != _Section.files,
+                                      child: ExcludeFocus(
+                                        excluding: _section != _Section.files,
+                                        child: widget.files!,
+                                      ),
+                                    ),
+                                  if (sessionAvailable &&
+                                      _section != _Section.files)
+                                    switch (_section) {
+                                      _Section.tasks when _output != null =>
+                                        _outputPane(text, _output!),
+                                      _Section.tasks => _tasks(text, session!),
+                                      _Section.changes => _changes(
+                                        text,
+                                        session!,
+                                      ),
+                                      _Section.extensions => _extensionsPane(
+                                        text,
+                                      ),
+                                      _Section.files => const SizedBox.shrink(),
+                                    },
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
           ],
         );
       },
     );
   }
 
-  Widget _sections(_ActivityText text) => SingleChildScrollView(
-    scrollDirection: Axis.horizontal,
-    padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-    child: Row(
-      spacing: 4,
+  Widget _sections(_ActivityText text, bool sessionAvailable) => Padding(
+    padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+    child: Wrap(
+      spacing: 2,
       children: [
-        _tab(_Section.tasks, text.tasks),
-        _tab(_Section.changes, text.changes),
-        _tab(_Section.extensions, text.extensions),
+        if (widget.files != null) _tab(_Section.files, text.files),
+        if (sessionAvailable) ...[
+          _tab(_Section.tasks, text.tasks),
+          _tab(_Section.changes, text.changes),
+          _tab(_Section.extensions, text.extensions),
+        ],
       ],
     ),
   );
@@ -773,6 +833,9 @@ class _ActivityText {
 
   final bool _zh;
   String get activity => _zh ? '主机活动' : 'Host activity';
+  String get projectSidebar => _zh ? '项目侧栏' : 'Project sidebar';
+  String get closeProjectSidebar => _zh ? '关闭项目侧栏' : 'Close project sidebar';
+  String get files => _zh ? '文件' : 'Files';
   String get tasks => _zh ? '任务' : 'Tasks';
   String get changes => _zh ? '更改' : 'Changes';
   String get close => _zh ? '关闭主机活动' : 'Close host activity';

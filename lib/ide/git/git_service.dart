@@ -988,6 +988,67 @@ class IdeGitService {
     ];
   }
 
+  /// Existing local branches, in ref order and with their full short names
+  /// even when a tag or a remote branch has the same name.
+  Future<List<String>> localBranches() async {
+    await _requireRoot();
+    final output = _check(
+      await _git([
+        'for-each-ref',
+        '--sort=refname',
+        '--format=%(refname:lstrip=2)',
+        'refs/heads/',
+      ]),
+      'Cannot read the local branches.',
+    );
+    return [
+      for (final name in const LineSplitter().convert(output.stdout))
+        if (name.isNotEmpty && !name.startsWith('-') && name != '@') name,
+    ];
+  }
+
+  /// The full commit ID of HEAD and the exact local branch, if attached.
+  Future<({String oid, String? branch})> branchHead() async {
+    await _requireRoot();
+    final [commit, symbolic] = await Future.wait([
+      _git(['rev-parse', '--verify', 'HEAD']),
+      _git(['symbolic-ref', '--quiet', 'HEAD']),
+    ]);
+    final oid = _check(commit, 'Cannot read HEAD.').stdout.trim();
+    if (symbolic.exitCode == 1) return (oid: oid, branch: null);
+    final ref = _check(
+      symbolic,
+      'Cannot read the current branch.',
+    ).stdout.trim();
+    const prefix = 'refs/heads/';
+    if (!ref.startsWith(prefix)) {
+      throw const IdeGitException('HEAD does not point to a local branch.');
+    }
+    return (oid: oid, branch: ref.substring(prefix.length));
+  }
+
+  /// Switch without creating or resetting a branch. Git decides whether
+  /// the working tree and other worktrees permit the switch.
+  Future<void> switchLocalBranch(
+    String name, {
+    void Function(({String oid, String? branch}) head)? checkHead,
+  }) async {
+    if (!(await localBranches()).contains(name)) {
+      throw const IdeGitException('The local branch does not exist.');
+    }
+    if (checkHead != null) checkHead(await branchHead());
+    _check(
+      await _git([
+        'switch',
+        '--no-guess',
+        '--no-recurse-submodules',
+        '--',
+        name,
+      ]),
+      'Cannot switch to $name.',
+    );
+  }
+
   /// `git checkout -q [--track] [--detach] <treeish>`.
   Future<void> checkout(
     String treeish, {

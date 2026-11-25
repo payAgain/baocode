@@ -16,6 +16,7 @@ import 'package:baocode/models/codex/codex_service.dart';
 import 'package:baocode/models/model_providers.dart';
 import 'package:baocode/link/chat_codec.dart';
 import 'package:baocode/link/link_quota.dart';
+import 'package:baocode/link/link_platform_io.dart';
 import 'package:baocode/link/workspace_bridge.dart';
 import 'package:baocode/workspace/workspace.dart';
 import 'package:flutter/material.dart';
@@ -148,6 +149,174 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 60));
     await pumpEventQueue();
   }
+
+  group('remote local branch switching', () {
+    late Directory folder;
+    late String root;
+    late Workspace gitWorkspace;
+    late WorkspaceBridge gitBridge;
+    late LinkPeer client;
+    late IoLinkPlatform platform;
+
+    String git(List<String> args) {
+      final result = Process.runSync('git', args, workingDirectory: root);
+      expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+      return (result.stdout as String).trim();
+    }
+
+    Future<Map<String, Object?>> branches() async =>
+        (await client.call(LinkMethods.projectBranches, {'project': root}))
+            as Map<String, Object?>;
+
+    Future<Object?> change(String target, Map<String, Object?> baseline) =>
+        client.call(LinkMethods.switchProjectBranch, {
+          'project': root,
+          'branch': target,
+          'expectedHead': baseline['head'],
+          'expectedBranch': baseline['branch'],
+        });
+
+    Matcher rejected(String code) => throwsA(
+      isA<LinkRemoteException>().having((error) => error.code, 'code', code),
+    );
+
+    setUp(() async {
+      folder = Directory.systemTemp.createTempSync('paired-branch-');
+      addTearDown(() => folder.deleteSync(recursive: true));
+      final repo = Directory('${folder.path}/repo')..createSync();
+      root = repo.resolveSymbolicLinksSync();
+      git(['init', '-q', '-b', 'main']);
+      git(['config', 'user.name', 'Branch test']);
+      git(['config', 'user.email', 'branch-test@example.invalid']);
+      git(['config', 'commit.gpgsign', 'false']);
+      File('$root/file').writeAsStringSync('main\n');
+      git(['add', 'file']);
+      git(['commit', '-qm', 'main']);
+      git(['switch', '-qc', 'feature/topic']);
+      File('$root/file').writeAsStringSync('feature\n');
+      git(['commit', '-qam', 'feature']);
+      git(['switch', '-q', 'main']);
+      git(['tag', 'feature/topic']);
+      git(['tag', 'tag-only']);
+      git(['update-ref', 'refs/remotes/origin/remote-only', 'HEAD']);
+      platform = IoLinkPlatform();
+      gitWorkspace = Workspace(
+        projects: [Project('repo', root)],
+        kernels: workspace.kernels,
+      );
+      addTearDown(gitWorkspace.dispose);
+      final LinkPeer host;
+      (client, host) = await peers();
+      addTearDown(host.close);
+      addTearDown(client.close);
+      gitBridge = WorkspaceBridge(
+        workspace: gitWorkspace,
+        peer: host,
+        device: () =>
+            const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
+        branchOf: (project) => platform.branchOf(project.root),
+        onBranchChanged: (project) =>
+            platform.branchOf(project.root, refresh: true),
+      )..start();
+      host.onRequest = gitBridge.handle;
+      addTearDown(gitBridge.dispose);
+    });
+
+    test(
+      'lists local branches and immediately broadcasts the switched HEAD',
+      () async {
+        final state = LinkState.fromJson(
+          (await client.call(LinkMethods.state)) as Map<String, Object?>,
+        );
+        expect(state.projects.single.canSwitchBranch, isTrue);
+        expect(state.projects.single.branch, 'main');
+        final list = await branches();
+        expect(list, {
+          'branches': ['feature/topic', 'main'],
+          'head': git(['rev-parse', 'HEAD']),
+          'branch': 'main',
+        });
+        final updated = client.events.firstWhere(
+          (event) => event.name == LinkEvents.state,
+        );
+        await change('feature/topic', list);
+        final fresh = LinkState.fromJson(
+          (await updated).data as Map<String, Object?>,
+        );
+        expect(fresh.projects.single.branch, 'feature/topic');
+        expect(git(['symbolic-ref', 'HEAD']), 'refs/heads/feature/topic');
+        expect(File('$root/file').readAsStringSync(), 'feature\n');
+      },
+    );
+
+    test(
+      'refuses stale HEAD, stale symbolic branch, tags and remote-only refs',
+      () async {
+        final list = await branches();
+        await expectLater(
+          change('feature/topic', {...list, 'head': 'stale'}),
+          rejected('stale'),
+        );
+        git(['switch', '-qc', 'other']);
+        await expectLater(change('feature/topic', list), rejected('stale'));
+        final fresh = await branches();
+        for (final name in ['tag-only', 'remote-only', '@{-1}', '-f']) {
+          await expectLater(
+            change(name, fresh),
+            rejected(LinkErrors.gitRejected),
+          );
+        }
+        expect(git(['symbolic-ref', 'HEAD']), 'refs/heads/other');
+      },
+    );
+
+    test('leaves conflicting edits and occupied worktrees to Git', () async {
+      final list = await branches();
+      final file = File('$root/file')..writeAsStringSync('unsaved changes\n');
+      await expectLater(
+        change('feature/topic', list),
+        rejected(LinkErrors.gitRejected),
+      );
+      expect(file.readAsStringSync(), 'unsaved changes\n');
+      expect(git(['symbolic-ref', 'HEAD']), 'refs/heads/main');
+      git(['restore', 'file']);
+      git(['worktree', 'add', '-q', '${folder.path}/second', 'feature/topic']);
+      await expectLater(
+        change('feature/topic', list),
+        rejected(LinkErrors.gitRejected),
+      );
+      expect(git(['symbolic-ref', 'HEAD']), 'refs/heads/main');
+    });
+
+    test('refuses to switch while a project session is running', () async {
+      final session = gitWorkspace
+          .startAgent(gitWorkspace.projects.first)
+          .session;
+      session.attach();
+      await pumpEventQueue();
+      session.send(const ComposerMessage(text: 'Keep using this checkout'));
+      expect(session.isStreaming, isTrue);
+      await expectLater(
+        change('feature/topic', await branches()),
+        rejected(LinkErrors.busy),
+      );
+      expect(git(['symbolic-ref', 'HEAD']), 'refs/heads/main');
+    });
+
+    test(
+      'keeps multi-root projects and unlisted paths outside the operation',
+      () async {
+        gitWorkspace.addFolder(root, folder.path);
+        expect(gitBridge.state().projects.single.canSwitchBranch, isFalse);
+        await expectLater(branches(), rejected(LinkErrors.unsupported));
+        await expectLater(
+          client.call(LinkMethods.projectBranches, {'project': folder.path}),
+          rejected(LinkErrors.notFound),
+        );
+        expect(bridge.state().projects.single.canSwitchBranch, isFalse);
+      },
+    );
+  });
 
   group('without a window', () {
     test('gives everything, and says nothing of earlier', () async {

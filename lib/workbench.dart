@@ -3139,15 +3139,22 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   Widget build(BuildContext context) {
     if (_main) _syncFileMenu(context.l10n);
     if (_remoteWorkspace) {
-      return Material(
-        color: AppColors.windowCanvas,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (WindowControls.drawsHeader)
-              WindowHeader(
+      return DesktopHostPage(
+        connection: _desktopConnection!,
+        localHost: widget.settings?.link,
+        chats: _desktopChats!,
+        onBack: _openLocalWorkspace,
+        onSelectComputer: _openGroupComputer,
+        computerNavigation: _computerNavigation,
+        reviewVisible: !_settingsOpen,
+        lastChatStore: SavedDesktopHostChat.forStorage(
+          widget.settings?.files?.storage,
+        ),
+        windowHeader: WindowControls.drawsHeader
+            ? (directory) => WindowHeader(
                 workspace: _workspace,
                 windowOnly: true,
+                windowOnlyLeading: directory,
                 sidebarShown: false,
                 onToggleSidebar: null,
                 pinned: false,
@@ -3155,26 +3162,22 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
                 onOpenFolder: () async {},
                 onToggleContextPanel: () {},
               )
-            else if (WindowControls.handlesTitleDoubleClick)
-              const TitleBarDoubleClick(
-                child: SizedBox(height: AppMetrics.titleBarHeight),
-              ),
-            Expanded(
-              child: DesktopHostPage(
-                connection: _desktopConnection!,
-                localHost: widget.settings?.link,
-                chats: _desktopChats!,
-                onBack: _openLocalWorkspace,
-                onSelectComputer: _openGroupComputer,
-                computerNavigation: _computerNavigation,
-                reviewVisible: !_settingsOpen,
-                lastChatStore: SavedDesktopHostChat.forStorage(
-                  widget.settings?.files?.storage,
+            : WindowControls.handlesTitleDoubleClick
+            ? (directory) => TitleBarDoubleClick(
+                child: SizedBox(
+                  height: AppMetrics.titleBarHeight,
+                  child: Padding(
+                    padding: EdgeInsetsDirectional.only(
+                      start: AppMetrics.trafficLightsWidth + 8,
+                    ),
+                    child: Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: TitleBarControls(child: directory),
+                    ),
+                  ),
                 ),
-              ),
-            ),
-          ],
-        ),
+              )
+            : null,
       );
     }
     return LayoutBuilder(

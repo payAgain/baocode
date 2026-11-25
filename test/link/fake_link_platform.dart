@@ -63,7 +63,7 @@ class FakeLinkPlatform implements LinkPlatform {
       const DeviceInfo(name: 'Test Mac', kind: 'mac', system: 'macOS 26.1');
 
   @override
-  String? branchOf(String folder) => 'main';
+  String? branchOf(String folder, {bool refresh = false}) => 'main';
 
   /// What was posted ([postJson]), the latest last; answered with
   /// [answer] (204 by default).

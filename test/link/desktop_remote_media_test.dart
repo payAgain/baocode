@@ -197,6 +197,71 @@ void main() {
     }
   });
 
+  testWidgets('remote composer pastes images and falls back to plain text', (
+    tester,
+  ) async {
+    final (client, host, _) = await _pair(
+      (method, _) => throw StateError(method),
+    );
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final sent = <(String, DesktopRemoteAttachments)>[];
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    var hasImage = true;
+    messenger.setMockMethodCallHandler(_window, (call) async {
+      expect(call.method, 'readPasteboardImages');
+      return hasImage
+          ? [
+              {'bytes': base64Decode(_png), 'type': 'image/png'},
+            ]
+          : [];
+    });
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      return call.method == 'Clipboard.getData' && !hasImage
+          ? {'text': 'plain paste'}
+          : null;
+    });
+    try {
+      await _mountComposer(tester, client, _group, (text, attachments) async {
+        sent.add((text, attachments));
+        return true;
+      });
+      final finder = find.byType(MarkdownEditor);
+      await tester.tap(finder);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+      await tester.pumpAndSettle();
+      expect(find.text('image.png'), findsOneWidget);
+      await tester.tap(find.byTooltip('Send'));
+      await tester.pumpAndSettle();
+      expect(sent.single.$1, isEmpty);
+      expect(sent.single.$2.images.single.toWire(), {
+        'name': 'image.png',
+        'type': 'image/png',
+        'data': _png,
+      });
+      expect(find.text('image.png'), findsNothing);
+
+      hasImage = false;
+      await tester.tap(finder);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<MarkdownEditor>(finder).controller.text,
+        'plain paste',
+      );
+    } finally {
+      await tester.pumpWidget(const SizedBox());
+      messenger.setMockMethodCallHandler(_window, null);
+      messenger.setMockMethodCallHandler(SystemChannels.platform, null);
+      debugDefaultTargetPlatformOverride = null;
+      await client.close();
+      await host.close();
+    }
+  });
+
   testWidgets('chooser-bound group image can be sent without text', (
     tester,
   ) async {

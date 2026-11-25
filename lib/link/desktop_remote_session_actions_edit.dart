@@ -11,26 +11,119 @@ final _internalNote = RegExp(
   caseSensitive: false,
 );
 
-typedef _EditTarget = ({int index, String text});
+String? _editableText(Object? raw) {
+  if (raw case {'t': 'user', 'text': final String text}
+      when raw['queued'] != true &&
+          raw['agent'] == null &&
+          raw['agentSession'] == null &&
+          (raw['images'] == null ||
+              (raw['images'] is List && (raw['images'] as List).isEmpty)) &&
+          text.trim().isNotEmpty &&
+          !_internalNote.hasMatch(text) &&
+          !imageReferencePattern.hasMatch(text)) {
+    return text;
+  }
+  return null;
+}
 
-List<_EditTarget> _editTargets(DesktopRemoteSessionSnapshot snapshot) {
-  final messages = <_EditTarget>[];
-  // Count raw wire entries, including invisible assistant and system rows.
-  for (final (index, raw) in snapshot.items.indexed) {
-    if (raw case {'t': 'user', 'text': final String text}
-        when raw['queued'] != true &&
-            raw['agent'] == null &&
-            raw['agentSession'] == null &&
-            (raw['images'] == null ||
-                (raw['images'] is List && (raw['images'] as List).isEmpty)) &&
-            text.trim().isNotEmpty &&
-            !_internalNote.hasMatch(text) &&
-            !imageReferencePattern.hasMatch(text)) {
-      messages.add((index: index, text: text));
+class _InlineMessageEditor extends StatefulWidget {
+  const _InlineMessageEditor({
+    required this.initial,
+    required this.scrollController,
+    required this.onClose,
+    required this.onReview,
+  });
+
+  final String initial;
+  final ScrollController scrollController;
+  final VoidCallback onClose;
+  final Future<bool> Function(String) onReview;
+
+  @override
+  State<_InlineMessageEditor> createState() => _InlineMessageEditorState();
+}
+
+class _InlineMessageEditorState extends State<_InlineMessageEditor> {
+  late final _controller = TextEditingController(text: widget.initial);
+  bool _reviewing = false;
+
+  Future<void> _review() async {
+    if (_reviewing || !_canSubmitMessage(_controller.value)) return;
+    setState(() => _reviewing = true);
+    try {
+      final submitted = await widget.onReview(_controller.text);
+      if (submitted && mounted) widget.onClose();
+    } finally {
+      if (mounted) setState(() => _reviewing = false);
     }
   }
-  return messages.reversed.toList();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => CallbackShortcuts(
+    bindings: {
+      const SingleActivator(LogicalKeyboardKey.escape): widget.onClose,
+    },
+    child: DecoratedBox(
+      decoration: BoxDecoration(
+        color: AppColors.bubbleFill,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.bubbleBorder(focused: true)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: _controller,
+              scrollController: widget.scrollController,
+              autofocus: true,
+              readOnly: _reviewing,
+              minLines: 1,
+              maxLines: 8,
+              decoration: const InputDecoration(border: InputBorder.none),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextFieldTapRegion(
+                child: Wrap(
+                  spacing: 6,
+                  children: [
+                    TextButton(
+                      onPressed: widget.onClose,
+                      child: Text(_text(context, 'Cancel', '取消')),
+                    ),
+                    ListenableBuilder(
+                      listenable: _controller,
+                      builder: (context, _) => OutlinedButton(
+                        onPressed:
+                            _reviewing || !_canSubmitMessage(_controller.value)
+                            ? null
+                            : _review,
+                        child: Text(_text(context, 'Review edit', '查看编辑影响')),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
+
+bool _canSubmitMessage(TextEditingValue value) =>
+    value.text.trim().isNotEmpty &&
+    !(value.isComposingRangeValid && !value.composing.isCollapsed);
 
 class _MessageDialog extends StatefulWidget {
   const _MessageDialog({
@@ -50,11 +143,7 @@ class _MessageDialog extends StatefulWidget {
 class _MessageDialogState extends State<_MessageDialog> {
   late final _controller = TextEditingController(text: widget.initial);
 
-  bool get _canSubmit {
-    final value = _controller.value;
-    return value.text.trim().isNotEmpty &&
-        !(value.isComposingRangeValid && !value.composing.isCollapsed);
-  }
+  bool get _canSubmit => _canSubmitMessage(_controller.value);
 
   @override
   void dispose() {

@@ -270,7 +270,9 @@ void main() {
         isEmpty,
         reason: 'The title and composer join the transcript without full-width rules.',
       );
-      await tester.tap(find.byTooltip('Host activity'));
+      await tester.tap(find.byTooltip('Project sidebar'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Tasks'));
       await tester.pumpAndSettle();
       expect(find.text('Fixture task'), findsOneWidget);
       expect(calls.where((m) => m == LinkMethods.open), hasLength(1));
@@ -463,7 +465,9 @@ void main() {
       title,
       findsOneWidget,
     ); // The host catalog, not a local optimistic rename.
-    final fileRail = find.byKey(const ValueKey('desktop-remote-files-toggle'));
+    final fileRail = find.byKey(
+      const ValueKey('desktop-remote-project-sidebar-toggle'),
+    );
     expect(fileRail.hitTestable(), findsOneWidget);
     final toggle = find.byKey(const ValueKey('host-toggle-sidebar'));
     await tester.tap(toggle);
@@ -530,7 +534,7 @@ void main() {
     await tester.pump();
     final local = find.byKey(const ValueKey('local-computer'));
     if (local.evaluate().isEmpty) {
-      await tester.tap(find.byTooltip('My computers'));
+      await tester.tap(find.byKey(const ValueKey('host-toggle-sidebar')));
       await tester.pump();
     }
     await tester.tap(local);
@@ -563,7 +567,24 @@ void main() {
     await tester.pump();
     expect(find.text('Helper bot'), findsNothing);
     expect(find.byTooltip('Back to host chats').hitTestable(), findsOneWidget);
-    expect(find.byTooltip('My computers').hitTestable(), findsOneWidget);
+    final directory = find.byKey(const ValueKey('host-toggle-sidebar'));
+    final catalog = find.byKey(const ValueKey('host-catalog'));
+    expect(directory.hitTestable(), findsOneWidget);
+    expect(find.text('Session directory'), findsOneWidget);
+    final titleBarTop = tester.getTopLeft(directory).dy;
+    await tester.tap(directory);
+    await tester.pump();
+    expect(catalog.hitTestable(), findsOneWidget);
+    expect(_composer, findsNothing);
+    expect(find.text('Return to current conversation'), findsOneWidget);
+    expect(tester.getTopLeft(directory).dy, titleBarTop);
+    expect(
+      tester.getRect(directory).bottom,
+      lessThanOrEqualTo(tester.getRect(catalog).top),
+    );
+    await tester.tap(directory);
+    await tester.pump();
+    expect(catalog, findsNothing);
     expect(_editor(tester).controller.text, 'Unsent');
     expect(_editor(tester), same(composer));
     expect(chats.opens, ['project']);
@@ -699,7 +720,7 @@ void main() {
     await _enterDraft(tester, 'Draft kept in memory');
     final local = find.byKey(const ValueKey('local-computer'));
     if (local.evaluate().isEmpty) {
-      await tester.tap(find.byTooltip('My computers'));
+      await tester.tap(find.byKey(const ValueKey('host-toggle-sidebar')));
       await tester.pump();
     }
     await tester.tap(local);
@@ -1093,6 +1114,8 @@ class _Chats extends ChangeNotifier implements DesktopHostChats {
   @override
   bool isCurrentConversation(LinkPeer? peer, DesktopHostChat chat) =>
       peer?.isClosed == false && identical(selected, chat);
+  @override
+  Null projectBranchView(LinkPeer? peer, DesktopHostChat chat) => null;
   @override
   bool busy = false;
   @override

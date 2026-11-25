@@ -203,9 +203,9 @@ void main() {
         final header = find.byType(ConversationCardHeader);
         final composer = find.byType(DesktopHostComposer);
         final suggestions = find.byType(ReplySuggestionBar);
-        expect(find.byType(DesktopRemoteRail), findsOneWidget);
+        expect(find.byType(DesktopRemoteRail), findsNothing);
         expect(
-          find.byKey(const ValueKey('desktop-remote-files-toggle')),
+          find.byKey(const ValueKey('desktop-remote-project-sidebar-toggle')),
           findsOneWidget,
         );
         expect(header, findsOneWidget);
@@ -268,7 +268,9 @@ void main() {
         // Exercise the same open conversation with both navigation panes.
         tester.view.physicalSize = const Size(1024, 850);
         await tester.pumpAndSettle();
-        final files = find.byKey(const ValueKey('desktop-remote-files-toggle'));
+        final files = find.byKey(
+          const ValueKey('desktop-remote-project-sidebar-toggle'),
+        );
         await tester.tap(files);
         await tester.pumpAndSettle();
         final explorer = find.byKey(const ValueKey('desktop-remote-explorer'));

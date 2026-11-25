@@ -22,6 +22,7 @@ import '../chat/rewind_files_setting.dart';
 import '../customize/customization_store.dart';
 import '../customize/customizations.dart';
 import '../ide/file_service.dart';
+import '../ide/git/git_service.dart';
 import '../kernel/agent_kernel.dart' show KernelChoiceKind;
 import '../kernel/kernel_types.dart';
 import '../platform/native_path.dart';
@@ -81,6 +82,7 @@ class WorkspaceBridge {
     required this.peer,
     required this.device,
     this.branchOf,
+    this.onBranchChanged,
     this.filesOf = hostFilesOf,
     this.reachHost = reachProjectHost,
     this.uploadsOf = phoneUploadsOf,
@@ -99,6 +101,10 @@ class WorkspaceBridge {
 
   /// A project's Git branch, if it is a repository and it can be told.
   final String? Function(Project project)? branchOf;
+
+  /// Enables branch switching for paired desktops and refreshes the host's
+  /// branch cache and connected clients after Git has run.
+  final void Function(Project project)? onBranchChanged;
 
   /// A project's files: none but the projects listed are given out.
   final ProjectFiles Function(Project project) filesOf;
@@ -300,17 +306,7 @@ class WorkspaceBridge {
     final l10n = workspace.l10n();
     return LinkState(
       device: device(),
-      projects: [
-        for (final project in projects)
-          ProjectInfo(
-            id: project.path,
-            name: project.name,
-            path: project.root,
-            branch: branchOf?.call(project),
-            icon: workspace.iconOf(project)?.toJson(),
-            pinned: workspace.isPinnedProject(project),
-          ),
-      ],
+      projects: [for (final project in projects) _projectInfo(project)],
       sessions: [
         for (final thread in threads.take(maxSessions))
           SessionSummary(
@@ -350,6 +346,121 @@ class WorkspaceBridge {
           ? const []
           : const ['passes', 'rules', 'gap', 'lead'],
     );
+  }
+
+  ProjectInfo _projectInfo(Project project) {
+    final branch = branchOf?.call(project);
+    return ProjectInfo(
+      id: project.path,
+      name: project.name,
+      path: project.root,
+      branch: branch,
+      canSwitchBranch: _canSwitchBranch(project, branch),
+      icon: workspace.iconOf(project)?.toJson(),
+      pinned: workspace.isPinnedProject(project),
+    );
+  }
+
+  bool _canSwitchBranch(Project project, String? branch) =>
+      onBranchChanged != null &&
+      project.host == null &&
+      workspace.multiRootAt(project.path) == null &&
+      branch != null &&
+      branch.isNotEmpty;
+
+  Future<Object?> _projectBranches(
+    Map<String, Object?> params, {
+    required bool switchBranch,
+  }) async {
+    final project = _project(params['project']);
+    const unsupported = LinkRemoteException(
+      LinkErrors.unsupported,
+      'Branch switching requires a single local Git repository on the host',
+    );
+    if (!_canSwitchBranch(project, branchOf?.call(project))) throw unsupported;
+    final git = IdeGitService(project.root);
+    if (!await git.isRepositoryTop() ||
+        !_canSwitchBranch(_project(project.path), branchOf?.call(project))) {
+      throw unsupported;
+    }
+    if (_disposed || peer.isClosed) throw const LinkClosedException('gone');
+    try {
+      if (!switchBranch) {
+        final branches = await git.localBranches();
+        final head = await git.branchHead();
+        return {'branches': branches, 'head': head.oid, 'branch': ?head.branch};
+      }
+      final branch = params['branch'];
+      if (branch is! String || branch.isEmpty) {
+        throw const LinkRemoteException(LinkErrors.notFound, 'No branch named');
+      }
+      final root = await git.repositoryRoot();
+      if (root == null) throw unsupported;
+      if (!_switchingRepositories.add(root)) {
+        throw const LinkRemoteException(
+          LinkErrors.busy,
+          'A branch switch is in progress',
+        );
+      }
+      try {
+        await git.switchLocalBranch(
+          branch,
+          checkHead: (head) {
+            if (_disposed || peer.isClosed) {
+              throw const LinkClosedException('gone');
+            }
+            if (!_canSwitchBranch(
+              _project(project.path),
+              branchOf?.call(project),
+            )) {
+              throw unsupported;
+            }
+            if (head.oid != params['expectedHead'] ||
+                head.branch != params['expectedBranch']) {
+              throw const LinkRemoteException('stale', 'The host HEAD changed');
+            }
+            if (_repositoryHasActiveSession(project, root)) {
+              throw const LinkRemoteException(
+                LinkErrors.busy,
+                'A session is using this repository',
+              );
+            }
+          },
+        );
+      } finally {
+        _switchingRepositories.remove(root);
+        // A post-checkout hook can fail after HEAD has already moved.
+        onBranchChanged!(project);
+        pushState();
+      }
+      return null;
+    } on IdeGitException catch (error) {
+      throw LinkRemoteException(LinkErrors.gitRejected, error.message);
+    }
+  }
+
+  static final _switchingRepositories = <String>{};
+
+  bool _repositoryHasActiveSession(Project project, String root) {
+    bool overlaps(String path) {
+      final folder = p.normalize(path);
+      return p.equals(root, folder) ||
+          p.isWithin(root, folder) ||
+          p.isWithin(folder, root);
+    }
+
+    return workspace.threads.any((thread) {
+      if (!thread.isOpen || thread.project.host != null) return false;
+      if (!thread.session.isStreaming &&
+          thread.session.pendingInteraction == null &&
+          !thread.runsInBackground) {
+        return false;
+      }
+      return thread.project == project ||
+          overlaps(thread.project.root) ||
+          (workspace.multiRootAt(thread.project.path)?.folders.any(overlaps) ??
+              false);
+    });
   }
 
   LinkGroup _linkGroup(BotGroups groups, BotGroup group) {
@@ -466,13 +577,18 @@ class WorkspaceBridge {
     if (_stateTimer != null) return;
     _stateTimer = Timer(throttle, () {
       _stateTimer = null;
-      if (_disposed) return;
-      final json = state().toJson();
-      final text = jsonEncode(json);
-      if (text == _stateSent) return;
-      _stateSent = text;
-      peer.emit(LinkEvents.state, json);
+      pushState();
     });
+  }
+
+  /// Sends a changed catalog immediately, including after a branch switch.
+  void pushState() {
+    if (_disposed || peer.isClosed) return;
+    final json = state().toJson();
+    final text = jsonEncode(json);
+    if (text == _stateSent) return;
+    _stateSent = text;
+    peer.emit(LinkEvents.state, json);
   }
 
   /// Follows anew the agents whose conversation was opened again (see
@@ -559,6 +675,12 @@ class WorkspaceBridge {
         final json = state().toJson();
         _stateSent = jsonEncode(json);
         return json;
+      case LinkMethods.projectBranches:
+      case LinkMethods.switchProjectBranch:
+        return _projectBranches(
+          params,
+          switchBranch: method == LinkMethods.switchProjectBranch,
+        );
       case LinkMethods.open:
         final thread = _thread(params['session']);
         final id = idOf(thread);

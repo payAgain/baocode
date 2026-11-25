@@ -94,8 +94,8 @@ class MarkdownEditor extends StatefulWidget {
   /// without.
   final String Function(String markdown)? onPasteCopy;
 
-  /// Paste only the clipboard's text, without application-specific data or
-  /// paste callbacks.
+  /// Ignore the clipboard's editor-specific Markdown. If [onPaste] does not
+  /// handle the paste, use plain text.
   final bool pastePlainText;
 
   /// Code blocks' colors.
@@ -2181,13 +2181,13 @@ class MarkdownEditorState extends State<MarkdownEditor>
     if (widget.readOnly) return;
     final (:text, :clip) = await MdClipboard.instance.read();
     if (!mounted) return;
-    if (!widget.pastePlainText) {
-      if (clip != null && clip.fromPlain == controller.plain) {
-        insertText(widget.onPasteCopy?.call(clip.markdown) ?? clip.markdown);
-        return;
-      }
-      if (widget.onPaste != null && await widget.onPaste!()) return;
+    if (!widget.pastePlainText &&
+        clip != null &&
+        clip.fromPlain == controller.plain) {
+      insertText(widget.onPasteCopy?.call(clip.markdown) ?? clip.markdown);
+      return;
     }
+    if (widget.onPaste != null && await widget.onPaste!()) return;
     if (!mounted || text == null || text.isEmpty) return;
     insertText(MdAtoms.strip(text));
   }

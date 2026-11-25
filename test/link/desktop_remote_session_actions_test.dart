@@ -1,7 +1,10 @@
 import 'dart:async';
 
 import 'package:bao_link/bao_link.dart';
+import 'package:baocode/chat/widgets/inline_code.dart';
+import 'package:baocode/chat/widgets/user_message_bubble.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
+import 'package:baocode/link/desktop_host_project_history.dart';
 import 'package:baocode/link/desktop_remote_session_actions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -65,7 +68,13 @@ void main() {
     host.update('first', items: [plan], sessionActions: {'startPlan': true});
     await tester.pumpAndSettle();
     await _tap(tester, 'Start host plan');
-    expect(find.text('Fixture plan'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.text('Fixture plan'),
+      ),
+      findsOneWidget,
+    );
     expect(host.actions, isEmpty);
     await _tap(tester, 'Start plan');
     expect(host.actions.single.$1, LinkMethods.startPlan);
@@ -116,21 +125,23 @@ void main() {
   ) async {
     final host = await _Host.show(tester);
     await host.select(tester, 'first');
+    const newest = [
+      {'t': 'text', 'text': 'Fixture reply'},
+      {'t': 'user', 'text': 'Newer prompt'},
+    ];
     host.update(
       'first',
-      items: [
-        {'t': 'text', 'text': 'Fixture reply'},
-        {'t': 'user', 'text': 'Newer prompt'},
-        {'t': 'user', 'text': 'Hidden queued prompt', 'queued': true},
-      ],
+      items: newest,
       earlier: true,
       sessionActions: {'edit': true},
     );
     await tester.pumpAndSettle();
     host.earlierItems = [
-      {'t': 'text', 'text': 'Already present reply'},
+      {'t': 'future-item'},
+      {'t': 'user', 'text': '<system-reminder>hidden</system-reminder>'},
       {'t': 'user', 'text': 'Older prompt'},
     ];
+    final expectedWindow = linkDigest([...host.earlierItems, ...newest]);
     await host.chats.earlier();
     await tester.pumpAndSettle();
     host.reply = (method, _) => method == LinkMethods.rewindPlan
@@ -142,21 +153,31 @@ void main() {
             'setting': 'revert',
           }
         : null;
-    await _tap(tester, 'Edit old message');
-    expect(find.text('Hidden queued prompt'), findsNothing);
-    await _tap(tester, 'Older prompt');
+    expect(find.text('Edit old message'), findsNothing);
+    await _tapBubble(tester, 'Older prompt');
+    expect(find.byType(AlertDialog), findsNothing);
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.controller!.text, 'Older prompt');
     await tester.enterText(find.byType(TextField), 'Revised prompt');
     await _tap(tester, 'Review edit');
     expect(host.actions.single.$1, LinkMethods.rewindPlan);
-    expect(host.actions.single.$2['index'], 1);
+    expect(host.actions.single.$2, {
+      'session': 'first',
+      'index': 2,
+      'expectedWindow': expectedWindow,
+    });
     expect(find.textContaining('fixture.txt'), findsOneWidget);
     expect(find.textContaining('changed.txt'), findsOneWidget);
     await _tap(tester, 'Keep files and resend');
     expect(host.actions.last.$1, LinkMethods.edit);
-    expect(host.actions.last.$2, containsPair('session', 'first'));
-    expect(host.actions.last.$2, containsPair('index', 1));
-    expect(host.actions.last.$2, containsPair('text', 'Revised prompt'));
-    expect(host.actions.last.$2, containsPair('revertFiles', false));
+    expect(host.actions.last.$2, {
+      'session': 'first',
+      'index': 2,
+      'expectedWindow': expectedWindow,
+      'text': 'Revised prompt',
+      'revertFiles': false,
+    });
+    expect(find.byType(TextField), findsNothing);
     await host.close(tester);
   });
 
@@ -175,8 +196,7 @@ void main() {
     await tester.pumpAndSettle();
     final response = Completer<Object?>();
     host.reply = (method, _) => response.future;
-    await _tap(tester, 'Edit old message');
-    await _tap(tester, 'Fixture original');
+    await _tapBubble(tester, 'Fixture original');
     await _tap(tester, 'Review edit');
     expect(host.actions.single.$1, LinkMethods.rewindPlan);
     await host.select(tester, 'second');
@@ -189,6 +209,59 @@ void main() {
     expect(find.textContaining('stale.txt'), findsNothing);
     expect(find.text('Keep files and resend'), findsNothing);
     expect(host.actions, hasLength(1));
+    await host.close(tester);
+  });
+
+  testWidgets('a replacement window invalidates a painted confirmation', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester);
+    await host.select(tester, 'first');
+    host.update(
+      'first',
+      items: [
+        {'t': 'user', 'text': 'Original'},
+      ],
+      sessionActions: {'edit': true},
+    );
+    await tester.pumpAndSettle();
+    await _tapBubble(tester, 'Original');
+    await _tap(tester, 'Review edit');
+    expect(find.text('Keep files and resend'), findsOneWidget);
+    host.update(
+      'first',
+      items: [
+        {'t': 'user', 'text': 'Replacement'},
+      ],
+      sessionActions: {'edit': true},
+    );
+    await tester.idle();
+    await tester.tap(find.text('Keep files and resend'));
+    await tester.pumpAndSettle();
+    expect(host.actions.single.$1, LinkMethods.rewindPlan);
+    expect(find.byType(TextField), findsNothing);
+    await host.close(tester);
+  });
+
+  testWidgets('attachment prompts keep their read-only viewer', (tester) async {
+    final host = await _Host.show(tester);
+    await host.select(tester, 'first');
+    host.update(
+      'first',
+      items: [
+        {
+          't': 'user',
+          'text': 'Prompt with attachment',
+          'images': [<String, Object?>{}],
+        },
+      ],
+      sessionActions: {'edit': true},
+    );
+    await tester.pumpAndSettle();
+    await _tapBubble(tester, 'Prompt with attachment', prefix: true);
+    expect(find.byType(UserMessageViewer), findsOneWidget);
+    expect(find.byType(TextField), findsNothing);
+    expect(host.actions, isEmpty);
     await host.close(tester);
   });
 
@@ -319,8 +392,27 @@ Future<void> _tap(WidgetTester tester, String label) async {
   await tester.pumpAndSettle();
 }
 
+Future<void> _tapBubble(
+  WidgetTester tester,
+  String text, {
+  bool prefix = false,
+}) async {
+  final bubble = find.byWidgetPredicate(
+    (widget) =>
+        widget is UserMessageBubble &&
+        (prefix ? widget.text.startsWith(text) : widget.text == text),
+  );
+  await tester.tap(
+    find
+        .descendant(of: bubble, matching: find.byType(InlineCodeText))
+        .hitTestable(),
+  );
+  await tester.pumpAndSettle();
+}
+
 class _Host {
   final chats = DesktopHostChats();
+  final actionKey = GlobalKey<DesktopRemoteSessionActionsState>();
   late final LinkPeer peer;
   late final LinkPeer _host;
   final _slimmers = <String, LinkSessionSlimmer>{};
@@ -342,13 +434,29 @@ class _Host {
             listenable: fixture.chats,
             builder: (context, _) {
               final chat = fixture.chats.selected;
-              return chat == null
-                  ? const SizedBox()
-                  : DesktopRemoteSessionActions(
-                      peer: fixture.peer,
-                      chat: chat,
-                      chats: fixture.chats,
-                    );
+              if (chat == null) return const SizedBox();
+              final history = fixture.chats.projectHistory;
+              return Column(
+                children: [
+                  if (history != null)
+                    Expanded(
+                      child: DesktopHostProjectHistory(
+                        feed: history,
+                        earlierEnabled: !fixture.chats.busy,
+                        openMessageEditor: (index, item) => fixture
+                            .actionKey
+                            .currentState
+                            ?.openMessageEditor(history, index, item),
+                      ),
+                    ),
+                  DesktopRemoteSessionActions(
+                    key: fixture.actionKey,
+                    peer: fixture.peer,
+                    chat: chat,
+                    chats: fixture.chats,
+                  ),
+                ],
+              );
             },
           ),
         ),

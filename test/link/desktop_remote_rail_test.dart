@@ -5,6 +5,7 @@ import 'package:bao_link/bao_link.dart';
 import 'package:baocode/ide/file_service.dart';
 import 'package:baocode/l10n/l10n.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
+import 'package:baocode/link/desktop_remote_activity.dart';
 import 'package:baocode/link/desktop_remote_rail.dart';
 import 'package:baocode/link/workspace_bridge.dart';
 import 'package:baocode/workspace/workspace.dart';
@@ -52,7 +53,7 @@ void main() {
         await _mount(tester, client);
         await _click(
           tester,
-          find.byKey(const ValueKey('desktop-remote-files-toggle')),
+          find.byKey(const ValueKey('desktop-remote-project-sidebar-toggle')),
         );
         await _click(tester, find.text('example.bin'));
         expect(calls.map((call) => call.$1), [
@@ -120,7 +121,7 @@ void main() {
       await _mount(tester, client);
       await _click(
         tester,
-        find.byKey(const ValueKey('desktop-remote-files-toggle')),
+        find.byKey(const ValueKey('desktop-remote-project-sidebar-toggle')),
       );
       await _click(tester, find.text('example.bin'));
       await _click(
@@ -182,7 +183,7 @@ void main() {
       final originalBounds = tester.getRect(input);
       expect(calls, isEmpty);
 
-      await tester.tap(find.bySemanticsLabel('Files'));
+      await tester.tap(find.byTooltip('Project sidebar'));
       await tester.pumpAndSettle();
       final explorer = find.byKey(const ValueKey('desktop-remote-explorer'));
       expect(
@@ -223,7 +224,7 @@ void main() {
       expect(tester.state(find.byType(EditableText).first), same(pane));
       expect(pane.widget.controller.text, 'unsent draft');
       await tester.tap(
-        find.byKey(const ValueKey('desktop-remote-files-toggle')),
+        find.byKey(const ValueKey('desktop-remote-project-sidebar-toggle')),
       );
       await tester.pumpAndSettle();
       expect(explorer, findsNothing);
@@ -263,7 +264,7 @@ void main() {
       await _mount(tester, client);
       await _click(
         tester,
-        find.byKey(const ValueKey('desktop-remote-files-toggle')),
+        find.byKey(const ValueKey('desktop-remote-project-sidebar-toggle')),
       );
       expect(find.text('src'), findsOneWidget);
       expect(find.text('escaped.txt'), findsNothing);
@@ -315,7 +316,9 @@ void main() {
       title: 'Other conversation',
       projectId: _project,
     );
-    final toggle = find.byKey(const ValueKey('desktop-remote-files-toggle'));
+    final toggle = find.byKey(
+      const ValueKey('desktop-remote-project-sidebar-toggle'),
+    );
     final explorer = find.byKey(const ValueKey('desktop-remote-explorer'));
     try {
       await _mount(tester, client);
@@ -378,7 +381,7 @@ void main() {
     );
     try {
       await _mount(tester, client);
-      await _click(tester, find.bySemanticsLabel('Files'));
+      await _click(tester, find.byTooltip('Project sidebar'));
       await _click(tester, find.text('lib'));
       for (final (file, message) in [
         ('ruled-out.bin', englishLocalizations.placeholderBinary),
@@ -413,7 +416,7 @@ void main() {
   });
 
   testWidgets(
-    'compact layout docks below the chat and hides the rail for other kinds',
+    'compact project sidebar keeps the hidden chat and draft mounted',
     (tester) async {
       tester.view.devicePixelRatio = 1;
       tester.view.physicalSize = const Size(430, 480);
@@ -435,15 +438,18 @@ void main() {
           find.byType(EditableText),
         );
         await tester.enterText(input, 'compact draft');
-        await _click(tester, find.bySemanticsLabel('Files'));
+        await _click(tester, find.byTooltip('Project sidebar'));
         await _click(tester, find.text('example.md'));
         final explorer = find.byKey(const ValueKey('desktop-remote-explorer'));
-        expect(
-          tester.getRect(input).bottom,
-          lessThanOrEqualTo(tester.getRect(explorer).top),
-        );
+        expect(explorer.hitTestable(), findsOneWidget);
         expect(find.text('Compact preview'), findsOneWidget);
+        expect(input.hitTestable(), findsNothing);
+        await _click(tester, find.byTooltip('Close project sidebar'));
         expect(input.hitTestable(), findsOneWidget);
+        expect(
+          tester.state<EditableTextState>(find.byType(EditableText)),
+          same(editor),
+        );
         expect(editor.widget.controller.text, 'compact draft');
         for (final kind in ['bot', 'group']) {
           await _mount(
@@ -457,7 +463,7 @@ void main() {
             ),
           );
           expect(
-            find.byKey(const ValueKey('desktop-remote-files-toggle')),
+            find.byKey(const ValueKey('desktop-remote-project-sidebar-toggle')),
             findsNothing,
           );
           expect(explorer, findsNothing);
@@ -487,13 +493,15 @@ Future<void> _mount(
 }) => tester.pumpWidget(
   MaterialApp(
     home: Scaffold(
-      body: DesktopRemoteRail(
-        peer: peer,
-        chat: chat,
-        child: const Align(
-          alignment: Alignment.bottomCenter,
-          child: TextField(),
-        ),
+      body: DesktopRemoteActivity(
+        key: ValueKey((peer, chat.kind, chat.id)),
+        session: null,
+        hostName: 'Fixture host',
+        files: chat.kind == 'project'
+            ? DesktopRemoteRail(peer: peer, chat: chat)
+            : null,
+        builder: (context, button) =>
+            Column(children: [?button, const Spacer(), const TextField()]),
       ),
     ),
   ),

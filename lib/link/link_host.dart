@@ -1280,6 +1280,14 @@ class LinkHost extends ChangeNotifier {
       device: _deviceInfo,
       branchOf: (project) =>
           project.host == null ? platform?.branchOf(project.root) : null,
+      onBranchChanged: connection.groupWorkspace && platform != null
+          ? (project) {
+              platform?.branchOf(project.root, refresh: true);
+              for (final other in _connections) {
+                if (other != connection) other.bridge?.pushState();
+              }
+            }
+          : null,
       filesOf: filesOf,
       reachHost: reachHost,
       customizations: customizations,

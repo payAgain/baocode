@@ -63,6 +63,20 @@ class DesktopHostProjectHistoryFeed extends ChangeNotifier
     return const [];
   }
 
+  /// Wire indexes include rows that failed to decode or were filtered out.
+  int? wireIndexAt(int index, UserMessageItem item) {
+    if (index < 0 ||
+        index >= _items.length ||
+        !identical(_items[index], item)) {
+      return null;
+    }
+    for (final (wireIndex, entry) in _wire.indexed) {
+      if (entry == null) continue;
+      if (index-- == 0) return identical(entry, item) ? wireIndex : null;
+    }
+    return null;
+  }
+
   @override
   int get itemCount => _items.length;
   @override

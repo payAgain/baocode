@@ -46,6 +46,18 @@ import 'widgets/hover_builder.dart';
 import 'widgets/turn_footer.dart';
 import 'widgets/user_message_bubble.dart';
 
+/// An editor supplied by a history owner that handles submission itself.
+/// The builder's `isOpen` guards work that outlives the inline editor.
+typedef ChatHistoryMessageEditor = ({
+  bool Function() isCurrent,
+  Widget Function(
+    ScrollController scrollController,
+    bool Function() isOpen,
+    VoidCallback onClose,
+  )
+  build,
+});
+
 /// Virtualized, selectable conversation history followed by the live turn.
 /// Sticks to the bottom while the user is there.
 class ChatHistoryView extends StatefulWidget {
@@ -65,6 +77,7 @@ class ChatHistoryView extends StatefulWidget {
     this.autoLoadEarlier = true,
     this.earlierEnabled = true,
     this.hostTranscript = false,
+    this.openMessageEditor,
   });
 
   /// The conversation shown: a session's, or a subagent's.
@@ -113,6 +126,10 @@ class ChatHistoryView extends StatefulWidget {
 
   /// Older hosts may have finished answers without turn timing metadata.
   final bool hostTranscript;
+
+  /// Supplies an inline editor for this row, or null to open the viewer.
+  final ChatHistoryMessageEditor? Function(int index, UserMessageItem item)?
+  openMessageEditor;
 
   @override
   State<ChatHistoryView> createState() => _ChatHistoryViewState();
@@ -499,6 +516,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
   /// edited (e.g. a subagent's), it opens read only, in a viewer in the
   /// editor's place ([_viewerScroll] scrolling it).
   int? _editingIndex;
+  ChatHistoryMessageEditor? _messageEditor;
   String _editingText = '';
   List<ImageAttachment> _editingImages = const [];
   final GlobalKey _editorPlaceholderKey = GlobalKey();
@@ -920,6 +938,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
       _stickyKeys.clear();
       _stickyIndices = const {};
       _editingIndex = null;
+      _messageEditor = null;
       _closingIndex = null;
       _foldOpen.clear();
       _unfoldedTurns.clear();
@@ -2267,8 +2286,10 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
     if (startedStreaming ||
         (editing != null &&
             (editing >= _feed.itemCount ||
-                _feed.itemAt(editing) is! UserMessageItem))) {
+                _feed.itemAt(editing) is! UserMessageItem ||
+                _messageEditor?.isCurrent() == false))) {
       _editingIndex = null;
+      _messageEditor = null;
       _feed.editing = null;
     }
     // Sending a message always brings the live turn into view.
@@ -2298,9 +2319,14 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
     _wantEarlier();
   }
 
-  void _startEditing(int index) {
+  void _startEditing(int index, UserMessageItem shown) {
+    if (index >= _feed.itemCount) return;
     final item = _feed.itemAt(index);
-    if (item is! UserMessageItem) return;
+    if (item is! UserMessageItem ||
+        (widget.openMessageEditor != null && !identical(item, shown))) {
+      return;
+    }
+    final messageEditor = widget.openMessageEditor?.call(index, item);
     // Until the editor reports its height, hold the message's.
     final laidOut = _laidOutItems().where((box) => _indexOf(box) == index);
     if (_feed.canEditMessages) {
@@ -2310,6 +2336,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
     setState(() {
       _closingIndex = null;
       _editingIndex = index;
+      _messageEditor = messageEditor;
       _editingText = item.text;
       _editingImages = item.images;
       _editComposerKey = GlobalKey();
@@ -2640,7 +2667,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
                           key: ValueKey(('sticky', index)),
                           text: item.text,
                           images: item.images,
-                          onEdit: () => _startEditing(index),
+                          onEdit: () => _startEditing(index, item),
                         ),
                       ),
                     ),
@@ -2658,6 +2685,11 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
 
   Widget _buildEditorLayer(int index) {
     final closing = _editingIndex == null;
+    final messageEditor = _messageEditor;
+    bool isOpen() =>
+        mounted &&
+        _editingIndex != null &&
+        identical(_messageEditor, messageEditor);
     return Positioned.fill(
       // The editor's text area scrolls on its own. It is not inside the list,
       // so its scroll notifications would reach the history's scrollbar as
@@ -2705,7 +2737,8 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
                                             ))
                                   : _editorOpened,
                               closing: closing,
-                              border: _feed.canEditMessages
+                              border:
+                                  _feed.canEditMessages || messageEditor != null
                                   ? AppColors.bubbleBorder(focused: true)
                                   : AppColors.bubbleBorder(),
                               child: child,
@@ -2740,7 +2773,15 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
                               child: TapRegion(
                                 groupId: _editorTapRegion,
                                 onTapOutside: _handleTapOutsideEditor,
-                                child: !_feed.canEditMessages
+                                child: messageEditor != null
+                                    ? messageEditor.build(
+                                        _viewerScroll,
+                                        isOpen,
+                                        () {
+                                          if (isOpen()) _cancelEditing();
+                                        },
+                                      )
+                                    : !_feed.canEditMessages
                                     ? UserMessageViewer(
                                         text: _editingText,
                                         images: _editingImages,
@@ -3047,7 +3088,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
         expanded: _isExpanded(index),
         onToggle: () => _toggle(index),
         onEdit: item is UserMessageItem && item.fromAgent == null
-            ? () => _startEditing(index)
+            ? () => _startEditing(index, item)
             : null,
         onMoveToBackground: _feed.moveToBackgroundAt(index),
         onStop: _feed.stopAt(index),

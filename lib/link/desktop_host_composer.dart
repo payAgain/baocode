@@ -246,18 +246,57 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
     _focus.requestFocus();
   }
 
+  int get _availableImageBytes =>
+      remoteAttachmentLimit -
+      _images.fold<int>(0, (sum, image) => sum + image.size);
+
   void _pickImage(DesktopRemoteMediaTarget target) => unawaited(
     _mediaAction(target, (current) async {
       final image = await pickRemoteAttachment(
         target: target,
-        availableBytes:
-            remoteAttachmentLimit -
-            _images.fold<int>(0, (sum, image) => sum + image.size),
+        availableBytes: _availableImageBytes,
         isCurrent: current,
       );
       if (image != null && current()) _images.add(image);
     }),
   );
+
+  Future<bool> _pasteImages(DesktopRemoteMediaTarget target) async {
+    var handled = false;
+    await _mediaAction(target, (current) async {
+      final images = await WindowControls.readPasteboardImages();
+      if (!current() || images.isEmpty) return;
+      handled = true;
+      if (_images.length + images.length > remoteAttachmentCount) {
+        throw const RemoteTooManyImages();
+      }
+      var remaining = _availableImageBytes;
+      final attachments = <DesktopRemotePickedImage>[];
+      for (final image in images) {
+        final extension = switch (image.mediaType) {
+          'image/png' => 'png',
+          'image/jpeg' => 'jpg',
+          'image/gif' => 'gif',
+          'image/webp' => 'webp',
+          _ => throw const RemoteUnsupportedImage(),
+        };
+        final name = image.name;
+        final attachment = DesktopRemotePickedImage.checked(
+          target: target,
+          name: name != null && remoteFileName(name)
+              ? name
+              : 'image.$extension',
+          type: image.mediaType,
+          bytes: image.bytes,
+          availableBytes: remaining,
+        );
+        remaining -= attachment.size;
+        attachments.add(attachment);
+      }
+      _images.addAll(attachments);
+    });
+    return handled || !_current(target);
+  }
 
   void _upload(DesktopRemoteMediaTarget target) => unawaited(
     _mediaAction(target, (current) async {
@@ -403,6 +442,9 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
                       focusNode: _focus,
                       shrinkWrap: true,
                       pastePlainText: true,
+                      onPaste: target == null
+                          ? null
+                          : () => _pasteImages(target),
                       placeholder: widget.placeholder,
                       onKey: _handleKey,
                       style: composerEditorStyle(context),

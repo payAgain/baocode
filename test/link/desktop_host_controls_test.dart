@@ -189,6 +189,96 @@ void main() {
     expect(host.actions, isEmpty);
   });
 
+  testWidgets(
+    'branch menu targets the host project and waits for its catalog',
+    (tester) async {
+      final host = await _Host.show(tester, git: true);
+      final switchReply = Completer<Object?>();
+      host.reply = (method, params) => method == LinkMethods.projectBranches
+          ? _gitBranches
+          : switchReply.future;
+      await _tap(tester, 'First session');
+      await _tap(tester, _project.branch!);
+      expect(host.actions.single.$1, LinkMethods.projectBranches);
+      expect(host.actions.single.$2, {'project': _project.id});
+      await _tap(tester, 'feature/topic');
+      expect(host.actions.last.$1, LinkMethods.switchProjectBranch);
+      expect(host.actions.last.$2, {
+        'project': _project.id,
+        'branch': 'feature/topic',
+        'expectedHead': _gitBranches['head'],
+        'expectedBranch': _project.branch,
+      });
+      expect(find.text(_project.branch!), findsOneWidget);
+      switchReply.complete(null);
+      await tester.pumpAndSettle();
+      expect(find.text(_project.branch!), findsOneWidget);
+      host.updateBranch('feature/topic');
+      await tester.pumpAndSettle();
+      expect(find.text(_project.branch!), findsNothing);
+      expect(find.text('feature/topic'), findsOneWidget);
+    },
+  );
+
+  testWidgets('Git rejection stays on its session and preserves the branch', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, git: true);
+    final reply = Completer<Object?>();
+    const error = LinkRemoteException(
+      LinkErrors.gitRejected,
+      'Local changes would be overwritten',
+    );
+    host.reply = (method, params) =>
+        method == LinkMethods.projectBranches ? _gitBranches : reply.future;
+    await _tap(tester, 'First session');
+    await _tap(tester, _project.branch!);
+    await _tap(tester, 'feature/topic');
+    await _tap(tester, 'Second session');
+    reply.completeError(error);
+    await tester.pumpAndSettle();
+    expect(find.text(error.message), findsNothing);
+    expect(find.text(_project.branch!), findsOneWidget);
+    host.reply = (method, params) {
+      if (method == LinkMethods.projectBranches) return _gitBranches;
+      throw error;
+    };
+    await _tap(tester, _project.branch!);
+    await _tap(tester, 'feature/topic');
+    expect(find.text(error.message), findsOneWidget);
+    expect(find.text(_project.branch!), findsOneWidget);
+  });
+
+  testWidgets('a late branch list is ignored after switching away and back', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, git: true);
+    final reply = Completer<Object?>();
+    host.reply = (_, _) => reply.future;
+    await _tap(tester, 'First session');
+    await _tap(tester, _project.branch!);
+    expect(find.text('Loading branches…'), findsOneWidget);
+    await host.chats.open(
+      host.chats.chats.singleWhere((chat) => chat.id == 'second'),
+    );
+    await tester.pumpAndSettle();
+    await _tap(tester, 'First session');
+    reply.complete(_gitBranches);
+    await tester.pumpAndSettle();
+    expect(find.text('feature/topic'), findsNothing);
+    expect(host.actions.single.$1, LinkMethods.projectBranches);
+  });
+
+  testWidgets('the branch label on an old host never requests branches', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, legacy: true);
+    await _tap(tester, 'First session');
+    expect(find.text(_project.branch!), findsOneWidget);
+    expect(find.byKey(const ValueKey('host-branch-picker')), findsNothing);
+    expect(host.actions, isEmpty);
+  });
+
   testWidgets('an open effort menu cannot change a newly selected host model', (
     tester,
   ) async {
@@ -320,6 +410,12 @@ const _project = ProjectInfo(
   branch: 'fixture-branch',
 );
 
+final _gitBranches = {
+  'branches': [_project.branch!, 'feature/topic'],
+  'head': '0123456789abcdef0123456789abcdef01234567',
+  'branch': _project.branch!,
+};
+
 LinkChoice _mode(String selected) => LinkChoice(
   kind: 'mode',
   selected: selected,
@@ -379,9 +475,11 @@ List<LinkChoice> _choices({
 ];
 
 class _Host {
-  _Host({required this.legacy});
+  _Host({required this.legacy, required this.git});
 
   final bool legacy;
+  final bool git;
+  String branch = _project.branch!;
   final actions = <(String, Map<String, Object?>)>[];
   LinkRequestHandler? reply;
   final chats = DesktopHostChats();
@@ -389,8 +487,12 @@ class _Host {
   late final LinkPeer _client;
   final _slimmers = <String, LinkSessionSlimmer>{};
 
-  static Future<_Host> show(WidgetTester tester, {bool legacy = false}) async {
-    final host = _Host(legacy: legacy);
+  static Future<_Host> show(
+    WidgetTester tester, {
+    bool legacy = false,
+    bool git = false,
+  }) async {
+    final host = _Host(legacy: legacy, git: git);
     final (a, b) = MemoryLinkConnection.pair(
       a: 'fixture-client',
       b: 'fixture-host',
@@ -425,35 +527,50 @@ class _Host {
     return host;
   }
 
+  void updateBranch(String name) {
+    branch = name;
+    _host.emit(LinkEvents.state, _catalog());
+  }
+
+  Map<String, Object?> _catalog() => LinkState(
+    device: const DeviceInfo(
+      name: 'Fixture Host',
+      kind: 'desktop',
+      system: 'windows',
+    ),
+    projects: [
+      ProjectInfo(
+        id: _project.id,
+        name: _project.name,
+        path: _project.path,
+        branch: branch,
+        canSwitchBranch: git,
+      ),
+    ],
+    bots: const [
+      LinkBot(id: 'bot', name: 'Private helper', session: 'bot-session'),
+    ],
+    groups: const [LinkGroup(id: 'group', name: 'Fixture group')],
+    sessions: [
+      SessionSummary(
+        id: 'first',
+        project: _project.id,
+        title: 'First session',
+        updatedAt: DateTime(2026),
+      ),
+      SessionSummary(
+        id: 'second',
+        project: _project.id,
+        title: 'Second session',
+        updatedAt: DateTime(2026),
+      ),
+    ],
+  ).toJson();
+
   FutureOr<Object?> _handle(String method, Map<String, Object?> params) {
     switch (method) {
       case LinkMethods.state:
-        return LinkState(
-          device: const DeviceInfo(
-            name: 'Fixture Host',
-            kind: 'desktop',
-            system: 'windows',
-          ),
-          projects: const [_project],
-          bots: const [
-            LinkBot(id: 'bot', name: 'Private helper', session: 'bot-session'),
-          ],
-          groups: const [LinkGroup(id: 'group', name: 'Fixture group')],
-          sessions: [
-            SessionSummary(
-              id: 'first',
-              project: _project.id,
-              title: 'First session',
-              updatedAt: DateTime(2026),
-            ),
-            SessionSummary(
-              id: 'second',
-              project: _project.id,
-              title: 'Second session',
-              updatedAt: DateTime(2026),
-            ),
-          ],
-        ).toJson();
+        return _catalog();
       case LinkMethods.open:
         final session = params['session']! as String;
         if (legacy) {

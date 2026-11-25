@@ -159,6 +159,17 @@ class DesktopHostChats extends ChangeNotifier {
         selected?.projectId == chat.projectId;
   }
 
+  /// Identity of the currently followed project view that may switch branches.
+  /// A close/reopen of the same conversation gets a new identity.
+  Object? projectBranchView(LinkPeer? peer, DesktopHostChat chat) {
+    if (chat.kind != 'project' ||
+        !isCurrentConversation(peer, chat) ||
+        !_projects.any((p) => p.id == chat.projectId && p.canSwitchBranch)) {
+      return null;
+    }
+    return _view;
+  }
+
   List<DesktopRemoteImage> projectImages(LinkPeer? peer, DesktopHostChat chat) {
     if (chat.kind != 'project' || !isCurrentConversation(peer, chat)) {
       return const [];

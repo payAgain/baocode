@@ -4,14 +4,18 @@ import 'dart:convert';
 import 'package:bao_link/bao_link.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../chat/chat_history_view.dart';
 import '../chat/chat_models.dart';
 import '../chat/panels/interaction_panel.dart';
 import '../chat/widgets/agent_step.dart' show AgentStep;
 import '../kernel/kernel_types.dart';
 import '../l10n/l10n.dart';
+import '../theme/app_theme.dart';
 import 'chat_codec.dart';
 import 'desktop_host_chats.dart';
+import 'desktop_host_project_history_feed.dart';
 import 'desktop_remote_session_actions_snapshot.dart';
 import 'interaction_codec.dart';
 
@@ -34,11 +38,11 @@ class DesktopRemoteSessionActions extends StatefulWidget {
   final bool enabled;
 
   @override
-  State<DesktopRemoteSessionActions> createState() =>
-      _DesktopRemoteSessionActionsState();
+  DesktopRemoteSessionActionsState createState() =>
+      DesktopRemoteSessionActionsState();
 }
 
-class _DesktopRemoteSessionActionsState
+class DesktopRemoteSessionActionsState
     extends State<DesktopRemoteSessionActions> {
   Object? _follow;
   Object? _operation;
@@ -261,81 +265,91 @@ class _DesktopRemoteSessionActionsState
     );
   }
 
-  void _edit(
-    DesktopRemoteSessionSnapshot snapshot,
-    List<_EditTarget> messages,
+  /// Binds the clicked row to the exact follow and unfiltered wire window.
+  ChatHistoryMessageEditor? openMessageEditor(
+    DesktopHostProjectHistoryFeed feed,
+    int index,
+    UserMessageItem item,
   ) {
-    bool valid() {
+    final snapshot = _snapshot;
+    if (snapshot == null ||
+        !_available(snapshot) ||
+        !_canEdit(snapshot) ||
+        _operation != null ||
+        _unsupported.contains(LinkMethods.edit) ||
+        listEquals(_editedItems, snapshot.items) ||
+        !identical(widget.chats.projectHistory, feed)) {
+      return null;
+    }
+    final wireIndex = feed.wireIndexAt(index, item);
+    if (wireIndex == null || wireIndex >= snapshot.items.length) return null;
+    final original = _editableText(snapshot.items[wireIndex]);
+    if (original == null) return null;
+
+    bool isCurrent() {
+      if (!mounted) return false;
       final current = _snapshot;
-      return _canEdit(current) && listEquals(current!.items, snapshot.items);
+      return identical(current?.follow, snapshot.follow) &&
+          identical(widget.chats.projectHistory, feed) &&
+          _canEdit(current) &&
+          listEquals(current!.items, snapshot.items);
     }
 
-    unawaited(
-      _run(snapshot, LinkMethods.edit, valid, (peer, id) async {
-        final target = await _ask<_EditTarget>(
-          snapshot,
-          valid,
-          (context) => AlertDialog(
-            title: Text(_text(context, 'Edit old message', '编辑旧消息')),
-            content: SizedBox(
-              width: 480,
-              height: 260,
-              child: ListView.builder(
-                itemCount: messages.length,
-                itemBuilder: (context, index) {
-                  final message = messages[index];
-                  return ListTile(
-                    title: Text(
-                      message.text,
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    onTap: () => Navigator.pop(context, message),
-                  );
-                },
-              ),
-            ),
-            actions: [_cancel(context)],
-          ),
-        );
-        if (target == null || !_available(snapshot) || !valid()) return;
-        final text = await _ask<String>(
-          snapshot,
-          valid,
-          (context) => _MessageDialog(
-            initial: target.text,
-            title: _text(context, 'Edit old message', '编辑旧消息'),
-            submit: _text(context, 'Review edit', '查看编辑影响'),
-          ),
-        );
-        if (text == null || !_available(snapshot) || !valid()) return;
-        final params = {
-          'session': id,
-          'index': target.index,
-          'expectedWindow': linkDigest(snapshot.items),
-        };
-        Object? review;
-        try {
-          review = await peer.call(LinkMethods.rewindPlan, params);
-        } on LinkRemoteException catch (error) {
-          // Older hosts can edit the conversation but cannot preview files.
-          if (error.code != LinkErrors.unknown) rethrow;
-        }
-        if (!_available(snapshot) || !valid()) return;
-        final restore = await _ask<bool>(
-          snapshot,
-          valid,
-          (context) => _RewindDialog(review: review),
-        );
-        if (restore == null || !_available(snapshot) || !valid()) return;
-        await peer.call(LinkMethods.edit, {
-          ...params,
-          'text': text,
-          'revertFiles': restore,
-        });
-        if (_current(snapshot) && valid()) _editedItems = snapshot.items;
-      }),
+    return (
+      isCurrent: isCurrent,
+      build: (scrollController, isOpen, onClose) => _InlineMessageEditor(
+        initial: original,
+        scrollController: scrollController,
+        onClose: onClose,
+        onReview: (text) =>
+            _edit(snapshot, wireIndex, text, () => isOpen() && isCurrent()),
+      ),
     );
+  }
+
+  Future<bool> _edit(
+    DesktopRemoteSessionSnapshot snapshot,
+    int index,
+    String text,
+    bool Function() valid,
+  ) async {
+    if (!mounted ||
+        _unsupported.contains(LinkMethods.edit) ||
+        listEquals(_editedItems, snapshot.items)) {
+      return false;
+    }
+    var submitted = false;
+    await _run(snapshot, LinkMethods.edit, valid, (peer, id) async {
+      final params = {
+        'session': id,
+        'index': index,
+        'expectedWindow': linkDigest(snapshot.items),
+      };
+      Object? review;
+      try {
+        review = await peer.call(LinkMethods.rewindPlan, params);
+      } on LinkRemoteException catch (error) {
+        // Older hosts can edit the conversation but cannot preview files.
+        if (error.code != LinkErrors.unknown) rethrow;
+      }
+      if (!_available(snapshot) || !valid()) return;
+      final restore = await _ask<bool>(
+        snapshot,
+        () => _available(snapshot) && valid(),
+        (context) => _RewindDialog(review: review),
+      );
+      if (restore == null || !_available(snapshot) || !valid()) return;
+      await peer.call(LinkMethods.edit, {
+        ...params,
+        'text': text,
+        'revertFiles': restore,
+      });
+      submitted = true;
+      if (_current(snapshot) && listEquals(_snapshot?.items, snapshot.items)) {
+        _editedItems = snapshot.items;
+      }
+    });
+    return submitted;
   }
 
   /// Recheck the live model in the route as well as immediately after it
@@ -429,10 +443,6 @@ class _DesktopRemoteSessionActionsState
       final delivery =
           _canDeliver(snapshot) && !_unsupported.contains(LinkMethods.send);
       if (!listEquals(_editedItems, snapshot.items)) _editedItems = null;
-      final messages =
-          _canEdit(snapshot) && !_unsupported.contains(LinkMethods.edit)
-          ? _editTargets(snapshot)
-          : const <_EditTarget>[];
       final ready = widget.enabled && !snapshot.busy && _operation == null;
       final children = <Widget>[
         if (request != null &&
@@ -482,17 +492,6 @@ class _DesktopRemoteSessionActionsState
             ),
         ],
       ];
-      if (messages.isNotEmpty) {
-        children.add(
-          TextButton.icon(
-            onPressed: ready && _editedItems == null
-                ? () => _edit(snapshot, messages)
-                : null,
-            icon: const Icon(Icons.edit_outlined, size: 16),
-            label: Text(_text(context, 'Edit old message', '编辑旧消息')),
-          ),
-        );
-      }
       if (delivery) {
         children.addAll([
           TextButton.icon(

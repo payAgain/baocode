@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../chat/chat_history_view.dart';
+import '../chat/chat_models.dart';
 import '../chat/chat_width.dart';
 import '../chat/widgets/chat_minimap.dart';
 import '../chat/host_transcript_scope.dart';
@@ -16,12 +17,15 @@ class DesktopHostProjectHistory extends StatelessWidget {
     required this.earlierEnabled,
     this.emptyLabel,
     this.onPickReply,
+    this.openMessageEditor,
   });
 
   final DesktopHostProjectHistoryFeed feed;
   final bool earlierEnabled;
   final String? emptyLabel;
   final ValueChanged<String>? onPickReply;
+  final ChatHistoryMessageEditor? Function(int index, UserMessageItem item)?
+  openMessageEditor;
 
   @override
   Widget build(BuildContext context) {
@@ -45,6 +49,7 @@ class DesktopHostProjectHistory extends StatelessWidget {
           autoLoadEarlier: false,
           earlierEnabled: earlierEnabled,
           hostTranscript: true,
+          openMessageEditor: openMessageEditor,
         ),
       ),
     );
