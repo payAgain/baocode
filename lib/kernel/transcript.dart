@@ -71,6 +71,8 @@ class Transcript {
   /// Whether the last turn to end was stopped rather than done.
   bool lastTurnInterrupted = false;
 
+  int lastTurnToolIterations = 0;
+
   /// Whether the last turn to end was one the agent took up on its own
   /// (see [TurnStarted.unprompted]).
   bool lastTurnUnprompted = false;
@@ -111,6 +113,11 @@ class Transcript {
 
   InteractionRequest? get pendingInteraction =>
       _pending.isEmpty ? null : _pending.values.first;
+
+  bool get hasQueuedMessages =>
+      _queued.isNotEmpty ||
+      queuedInPlace &&
+          _items.any((item) => item is UserMessageItem && item.queued);
 
   /// The messages waiting their turn (see [UserMessageItem.queued]), with
   /// their ids, the next first.
@@ -169,6 +176,7 @@ class Transcript {
         :final interrupted,
         :final worked,
         :final usage,
+        :final toolIterations,
       ):
         if (!_endedTurns.add(turnId)) return false;
         lastTurnUnprompted = activeTurn == turnId && _activeUnprompted;
@@ -180,6 +188,7 @@ class Transcript {
         output = null;
         lastTurnEndSeq = event.seq;
         lastTurnInterrupted = interrupted;
+        lastTurnToolIterations = toolIterations;
         _pending.clear();
         _settleStreaming();
         if (worked != null) {

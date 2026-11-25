@@ -298,6 +298,129 @@ void main() {
     });
   });
 
+  test(
+    'auto compaction refreshes the Bot system prompt within a turn',
+    () async {
+      const originalPrompt = 'You are an agent. Use the maple convention.';
+      const refreshedPrompt = 'You are an agent. Use the cedar convention.';
+      const summary = 'The naming convention was updated.';
+      const promptFile = 'host-convention.txt';
+      h = await Harness.start(
+        systemPrompt: originalPrompt,
+        restrictedContext: true,
+        refreshSystemPromptOnCompaction: true,
+        tools: ['Write'],
+        environment: {'CLAUDE_CODE_MAX_CONTEXT_TOKENS': '200000'},
+      );
+      final refreshRequests = <Map<String, Object?>>[];
+      final requestsBeforeRefresh = <int>[];
+      h.onRequest = (request) async {
+        refreshRequests.add(request);
+        requestsBeforeRefresh.add(h.model.turns.length);
+        return {
+          'system_prompt':
+              'You are an agent. Use the ${h.file(promptFile)} convention.',
+        };
+      };
+      h.model.script.addAll([
+        Reply(
+          Reply.tool('Write', {
+            'file_path': p.join(h.cwd, promptFile),
+            'content': 'cedar',
+          }).blocks,
+          stopReason: 'tool_use',
+          usage: {'input_tokens': 199000, 'output_tokens': 1},
+        ),
+        Reply.text('<summary>$summary</summary>'),
+        Reply.text('Updated.'),
+        Reply.text('Still up to date.'),
+      ]);
+      final sessionId = h.engine.session.sessionId;
+
+      await h.turn('Update the naming convention.');
+      expect(h.file(promptFile), 'cedar');
+      expect(h.lastResult['result'], 'Updated.');
+      expect(h.lastResult['session_id'], sessionId);
+      expect(refreshRequests, [
+        {'subtype': 'refresh_system_prompt'},
+      ]);
+      expect(requestsBeforeRefresh, [2]);
+      final boundary = h.of('system', 'compact_boundary').single;
+      expect(boundary['session_id'], sessionId);
+      expect(boundary['compact_metadata'], containsPair('trigger', 'auto'));
+      expect(
+        boundary['compact_metadata'],
+        containsPair('system_prompt_refreshed', true),
+      );
+
+      final [initial, summarizing, resumed] = h.model.turns;
+      expect(jsonEncode(initial.body['system']), contains(originalPrompt));
+      expect(
+        jsonEncode(summarizing.body['system']),
+        contains('summary of a conversation'),
+      );
+      expect(sentIn(summarizing), contains('Made the file'));
+      final resumedMessages = sentIn(resumed);
+      expect(resumedMessages, contains(summary));
+      expect(resumedMessages, isNot(contains('Made the file')));
+      expect(jsonEncode(resumed.body['system']), contains(refreshedPrompt));
+      expect(
+        jsonEncode(resumed.body['system']),
+        isNot(contains(originalPrompt)),
+      );
+
+      await h.turn('Continue.');
+      expect(h.lastResult['result'], 'Still up to date.');
+      expect(h.lastResult['session_id'], sessionId);
+      expect(refreshRequests, hasLength(1));
+      final nextSystem = jsonEncode(h.model.turns.last.body['system']);
+      expect(nextSystem, contains(refreshedPrompt));
+      expect(nextSystem, isNot(contains(originalPrompt)));
+    },
+  );
+
+  test(
+    'a withdrawn Bot note is replaced before the next model request',
+    () async {
+      const oldNote = 'Withdrawn maple convention';
+      const keptNote = 'Frozen cedar convention';
+      h = await Harness.start(
+        systemPrompt: '$oldNote. $keptNote.',
+        restrictedContext: true,
+        refreshSystemPromptOnCompaction: true,
+        tools: ['Write'],
+      );
+      h.onPromptCheck = () async => {
+        'valid': true,
+        if (h.model.turns.isNotEmpty) 'system_prompt': keptNote,
+      };
+      h.model.script.addAll([
+        Reply.tool('Write', {
+          'file_path': p.join(h.cwd, 'fixture.txt'),
+          'content': 'done',
+        }),
+        Reply.text('Complete'),
+      ]);
+      await h.turn('Write the text');
+
+      final [before, after] = h.model.turns;
+      final first = jsonEncode(before.body['system']);
+      final second = jsonEncode(after.body['system']);
+      expect(first, contains(oldNote));
+      expect(second, contains(keptNote));
+      expect(second, isNot(contains(oldNote)));
+      final check = h.sent.lastWhere(
+        (event) =>
+            event['type'] == 'control_request' &&
+            (event['request'] as Map)['subtype'] == 'check_system_prompt',
+      );
+      expect(
+        h.of('system', 'host_prompt_applied').single['prompt_request_id'],
+        check['request_id'],
+      );
+    },
+  );
+
   group('MCP', () {
     test("the host's own server, through the control channel", () async {
       final calls = <Map>[];

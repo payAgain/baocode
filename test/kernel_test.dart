@@ -2143,6 +2143,88 @@ void main() {
       kernel.dispose();
     });
 
+    test(
+      'counts top-level tool iterations by assistant message id per turn',
+      () async {
+        final cli = FakeCli();
+        final (:kernel, transcript: _, :events) = claude(cli);
+        addTearDown(kernel.dispose);
+
+        Map<String, Object?> tool(
+          String messageId,
+          String callId,
+          String name,
+          Map<String, Object?> input, {
+          String? parent,
+        }) => {
+          'type': 'assistant',
+          'uuid': 'envelope-$callId',
+          'parent_tool_use_id': parent,
+          'message': {
+            'id': messageId,
+            'role': 'assistant',
+            'content': [
+              {'type': 'tool_use', 'id': callId, 'name': name, 'input': input},
+            ],
+          },
+        };
+        const result = {
+          'type': 'result',
+          'subtype': 'success',
+          'is_error': false,
+        };
+
+        kernel.send(const KernelTurn(id: 'u1', text: 'look at my code'));
+        await pumpEventQueue();
+        final discarded = tool('msg-4', 'r4', 'Read', {'file_path': '/d.dart'});
+        cli
+          ..push(tool('msg-1', 'r1', 'Read', {'file_path': '/a.dart'}))
+          ..push(tool('msg-1', 'r2', 'Read', {'file_path': '/b.dart'}))
+          ..push(
+            tool('msg-2', 'a1', 'Agent', {
+              'description': 'Look',
+              'prompt': 'look',
+            }),
+          )
+          ..push(
+            tool('msg-3', 'r3', 'Read', {'file_path': '/c.dart'}, parent: 'a1'),
+          )
+          ..push(discarded)
+          ..push({
+            'type': 'tombstone',
+            'uuid': 'envelope-tombstone',
+            'message': discarded,
+          })
+          ..push(result);
+        await pumpEventQueue();
+
+        kernel.send(const KernelTurn(id: 'u2', text: 'say hi'));
+        await pumpEventQueue();
+        cli
+          ..push({
+            'type': 'assistant',
+            'uuid': 'envelope-text',
+            'parent_tool_use_id': null,
+            'message': {
+              'id': 'msg-5',
+              'role': 'assistant',
+              'content': [
+                {'type': 'text', 'text': 'Hi.'},
+              ],
+            },
+          })
+          ..push(result);
+        await pumpEventQueue();
+
+        expect(
+          events.whereType<TurnEnded>().map(
+            (e) => (e.turnId, e.toolIterations),
+          ),
+          [('u1', 2), ('u2', 0)],
+        );
+      },
+    );
+
     test('a turn done is kept by its session and prompt, for its footer '
         'later; one stopped too, its work to fold', () async {
       final kept = _KeptTurns();

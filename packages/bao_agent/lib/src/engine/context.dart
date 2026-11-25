@@ -96,6 +96,10 @@ class SessionContext {
   /// subagents, memory files, the repository.
   Future<void> load() async {
     final session = this.session;
+    if (session.options.restrictedContext) {
+      _loaded = true;
+      return;
+    }
     session.plugins = loadPlugins(session.paths, session.settings);
     reloadExtensions();
     git = await GitSnapshot.of(session.cwd, session.commandEnvironment);
@@ -106,6 +110,7 @@ class SessionContext {
   /// with them the rest.
   void reloadPlugins() {
     final session = this.session;
+    if (session.options.restrictedContext) return;
     session.reloadSettings();
     session.plugins = loadPlugins(session.paths, session.settings);
     reloadExtensions();
@@ -115,6 +120,7 @@ class SessionContext {
   /// added or changed).
   void reloadExtensions() {
     final session = this.session;
+    if (session.options.restrictedContext) return;
     final loaded = loadPromptCommands(
       paths: session.paths,
       cwd: session.cwd,

@@ -501,6 +501,7 @@ class CompactionNote {
   const CompactionNote({
     this.auto = false,
     this.tooLong = false,
+    this.systemPromptRefreshed = false,
     this.before,
     this.after,
     this.window,
@@ -512,6 +513,9 @@ class CompactionNote {
   /// Forced by the API refusing the conversation as longer than the model
   /// takes, before [window] was full.
   final bool tooLong;
+
+  /// The runtime refreshed its host-owned prompt at this boundary.
+  final bool systemPromptRefreshed;
 
   /// The tokens before and after it, as known.
   final int? before;

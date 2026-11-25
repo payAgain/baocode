@@ -50,6 +50,7 @@ Future<String> askClaudeHaiku(
   List<({String name, ImageAttachment image})> images = const [],
   ClaudeHaikuTools? tools,
   String? session,
+  int? maxOutputTokens,
 }) async {
   final host = location == null ? null : RemoteLocation.hostOf(location);
   final providers = ModelProviders.current;
@@ -75,6 +76,8 @@ Future<String> askClaudeHaiku(
       images: images,
       tools: tools,
       session: session,
+      model: exact && maxOutputTokens != null ? model : null,
+      maxOutputTokens: maxOutputTokens,
     );
   }
   final (provider, info) = custom;
@@ -107,6 +110,7 @@ Future<String> askClaudeHaiku(
     env: env,
     images: images,
     tools: tools,
+    maxOutputTokens: maxOutputTokens,
   );
 }
 

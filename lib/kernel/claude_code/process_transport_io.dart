@@ -17,7 +17,7 @@ import 'claude_settings_file.dart';
 import 'local_claude_io.dart';
 
 /// Claude Code as a child process, over its stdin and stdout.
-class ProcessTransport implements ClaudeCodeTransport {
+class ProcessTransport implements ClaudeExternalTransport {
   ProcessTransport._(this._process, {this.executable}) {
     _live.add(this);
     unawaited(registry.add(_process.pid));
@@ -109,6 +109,13 @@ class ProcessTransport implements ClaudeCodeTransport {
     if (!Directory(launch.cwd).existsSync()) {
       throw ClaudeFolderGone(launch.cwd);
     }
+    // On resume, newer CLIs can otherwise reuse the old recorded prompt
+    // even when the host passes a fresh prompt file.
+    final rebuildPrompt =
+        launch.resume != null &&
+        launch.ownPrompt &&
+        launch.refreshSystemPromptOnCompaction &&
+        await LocalClaude.runtime.versionAtLeast(cli, const [2, 1, 257]);
     // A key goes in a file only the user reads, not the command line.
     final settingsFile = launch.hasSecrets
         ? await ClaudeSettingsFile.write(launch.settings)
@@ -143,7 +150,10 @@ class ProcessTransport implements ClaudeCodeTransport {
     try {
       final process = await Process.start(
         cli.executable,
-        started.arguments,
+        [
+          ...started.arguments,
+          if (rebuildPrompt) ...['--system-prompt-snapshot', 'off'],
+        ],
         workingDirectory: launch.cwd,
         environment: {
           ...cli.environment,

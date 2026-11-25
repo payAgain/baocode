@@ -665,6 +665,9 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
   @override
   bool get isStreaming => _transcript.activeTurn != null;
 
+  /// The host identity of the turn currently running in this session.
+  String? get activeTurnId => _transcript.activeTurn;
+
   @override
   bool get isUnprompted => _transcript.activeTurnUnprompted;
 
@@ -713,6 +716,8 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
 
   /// Sequence of the last turn to end, to tell whether it was seen.
   int get lastTurnEndSeq => _transcript.lastTurnEndSeq;
+
+  int get lastTurnToolIterations => _transcript.lastTurnToolIterations;
 
   /// What the agent said last, if it said anything after the last message
   /// sent (this run, or in the history read).
@@ -1207,10 +1212,11 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
     OpenEditor? Function()? editor,
     UserPlace? from,
     List<String> notes = const [],
+    String? turnId,
   }) {
     if (message.isEmpty || !canSend) return;
     final turn = KernelTurn(
-      id: newTurnId(),
+      id: turnId ?? newTurnId(),
       // Pastes too long to send, kept in files the agent reads; a remote
       // project's agent cannot, and is sent them.
       text: switch (kernelContext.cwd) {
@@ -1240,6 +1246,9 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
     final variant = (8 + _random.nextInt(4)).toRadixString(16);
     return '${hex(8)}-${hex(4)}-4${hex(3)}-$variant${hex(3)}-${hex(12)}';
   }
+
+  /// Includes queued messages shown in place in the conversation.
+  bool get hasQueuedMessages => _transcript.hasQueuedMessages;
 
   /// The messages sent while the agent works, waiting their turn, with
   /// their ids: the next first. Not in the conversation until taken up.

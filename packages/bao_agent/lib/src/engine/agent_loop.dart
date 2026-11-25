@@ -44,6 +44,7 @@ class LoopResult {
     required this.reason,
     required this.lastText,
     required this.requests,
+    this.toolIterations = 0,
     required this.usage,
     required this.apiDuration,
     this.error,
@@ -53,6 +54,7 @@ class LoopResult {
   final String reason;
   final String lastText;
   final int requests;
+  final int toolIterations;
 
   /// The turn's tokens, all its requests together.
   final Map<String, Object?> usage;
@@ -158,6 +160,7 @@ class AgentLoop {
     'output_tokens': 0,
   };
   int _requests = 0;
+  int _toolIterations = 0;
   Duration _apiTime = Duration.zero;
 
   /// The calls refused, as the result reports them.
@@ -232,6 +235,7 @@ class AgentLoop {
         }
         return _result('end_turn');
       }
+      _toolIterations++;
       final stopped = await _runCalls(calls, cancel);
       if (cancel.isCancelled) return _interrupted(during: true, calls: calls);
       if (stopped) return _result('stopped');
@@ -287,8 +291,12 @@ class AgentLoop {
     final maxTokens = _maxTokens(info);
     final settings = _thinking(info, maxTokens);
     _addContext(conversation, inline: inline, settings: settings);
+    // The main loop can keep running after compaction replaces the host's
+    // first system block. Appended instructions and subagent prompts stay put.
+    final own = isMain ? session.systemPrompt : null;
     final texts = [
-      ...prompt.system,
+      ?own,
+      ...(own == null ? prompt.system : prompt.system.skip(1)),
       if (!inline) prompt.context,
     ].where((text) => text.trim().isNotEmpty).toList();
     final systemBlocks = [
@@ -558,6 +566,9 @@ class AgentLoop {
     var attempts = 0;
     while (true) {
       attempts++;
+      if (isMain && session.options.refreshSystemPromptOnCompaction) {
+        await session.refreshSystemPrompt(onlyWithdrawn: true);
+      }
       final request = buildRequest();
       try {
         return await _stream(request, cancel);
@@ -812,6 +823,7 @@ class AgentLoop {
     reason: reason,
     lastText: _lastText,
     requests: _requests,
+    toolIterations: _toolIterations,
     usage: {..._usage},
     apiDuration: _apiTime,
     error: error,

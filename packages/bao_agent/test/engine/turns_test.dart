@@ -60,6 +60,28 @@ void main() {
     expect(messages.every((m) => m['session_id'] != null), isTrue);
   });
 
+  test('tool iterations count responses containing tools', () async {
+    h = await Harness.start(
+      files: {'a.txt': 'A', 'b.txt': 'B', 'c.txt': 'C'},
+      script: [
+        Reply([
+          for (final name in ['a', 'b'])
+            {
+              'type': 'tool_use',
+              'id': 'toolu_$name',
+              'name': 'Read',
+              'input': {'file_path': '$name.txt'},
+            },
+        ]),
+        Reply.tool('Read', {'file_path': 'c.txt'}),
+        Reply.text('Read all three files.'),
+      ],
+    );
+    await h.turn('Read the files');
+    expect(h.lastResult['num_turns'], 3);
+    expect(h.lastResult['tool_iterations'], 2);
+  });
+
   test(
     'the session file: a chain of lines as Claude Code writes them',
     () async {
@@ -169,6 +191,35 @@ void main() {
     expect(jsonDecode(session.apiConfig().userId!), {
       'session_id': session.sessionId,
     });
+  });
+
+  test('restricted host sessions omit workspace memory and hooks', () async {
+    h = await Harness.start(
+      files: {'CLAUDE.md': 'The workspace memory must not reach this room.'},
+      settings: {
+        'hooks': {
+          'UserPromptSubmit': [
+            {
+              'hooks': [
+                {'type': 'command', 'command': 'echo unexpected-hook-result'},
+              ],
+            },
+          ],
+        },
+      },
+      systemPrompt: 'You are an agent. Reply in this room.',
+      restrictedContext: true,
+      strictMcpConfig: true,
+      tools: [],
+      script: [Reply.text('Hello.')],
+    );
+    await h.turn('Room message');
+    final request = h.model.turns.single;
+    final body = jsonEncode(request.body);
+    expect(body, contains('Reply in this room.'));
+    expect(body, isNot(contains('The workspace memory')));
+    expect(body, isNot(contains('unexpected-hook-result')));
+    expect(request.body['tools'] ?? const [], isEmpty);
   });
 
   test('images and @-mentioned files go to the model', () async {

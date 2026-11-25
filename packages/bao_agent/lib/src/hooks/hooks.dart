@@ -330,6 +330,7 @@ class HookRunner {
 
   /// Every hook in effect.
   List<Hook> get hooks {
+    if (session.options.restrictedContext) return const [];
     final out = <Hook>[];
     for (final group in session.settings.hooks) {
       out.addAll(

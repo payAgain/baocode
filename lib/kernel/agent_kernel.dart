@@ -77,13 +77,23 @@ class KernelContext {
 
 // --- Capabilities -----------------------------------------------------------
 
+/// A prompt prepared for a launch, with any fresh snapshot to bind once
+/// the runtime supplies its session ID.
+typedef KernelSessionPrompt = ({
+  String text,
+  void Function() Function(String)? save,
+  bool Function() withdrawn,
+});
+
 /// The folders an agent works in besides its directory, those of a
 /// multi-folder workspace, and what it is told of them.
 class KernelWorkspace {
   const KernelWorkspace({
     required this.folders,
-    this.instructions = '',
+    this._instructions = '',
+    this.sessionPrompt,
     this.ownPrompt = false,
+    this.refreshSystemPromptOnCompaction = false,
     this.tools,
     this.userServers = false,
     this.allowedTools = const [],
@@ -94,13 +104,26 @@ class KernelWorkspace {
   });
 
   final List<String> folders;
+  final String _instructions;
 
   /// Added to the agent's system prompt; or, when [ownPrompt], all of it.
-  final String instructions;
+  /// With no session selected, this shows the current workspace instructions.
+  String get instructions =>
+      sessionPrompt?.call(null, refresh: false).text ?? _instructions;
+
+  /// Resolves instructions for the specific session the kernel is launching.
+  final KernelSessionPrompt Function(
+    String? sessionId, {
+    required bool refresh,
+  })?
+  sessionPrompt;
 
   /// Whether [instructions] are its whole system prompt, in place of the
   /// agent's own (a coding agent's): for one that is not one.
   final bool ownPrompt;
+
+  /// Whether a successful compaction can reread the host's own prompt.
+  final bool refreshSystemPromptOnCompaction;
 
   /// When the messages sent while it works are taken up, over the user's
   /// setting; theirs when null.

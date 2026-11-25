@@ -174,13 +174,28 @@ void main() {
     test(
       '/compact: summed up, and the conversation goes on from there',
       () async {
-        h = await Harness.start();
+        const originalPrompt = 'You are an agent. Use the old fruit list.';
+        const refreshedPrompt = 'You are an agent. Use the new fruit list.';
+        var hostPrompt = originalPrompt;
+        h = await Harness.start(
+          systemPrompt: hostPrompt,
+          refreshSystemPromptOnCompaction: true,
+        );
+        h.onRequest = (request) async =>
+            request['subtype'] == 'refresh_system_prompt'
+            ? {'system_prompt': hostPrompt}
+            : const {};
         h.model.script.addAll([
           Reply.text('first answer'),
           Reply.text('<summary>We talked about apples.</summary>'),
           Reply.text('after'),
         ]);
         await h.turn('tell me about apples');
+        expect(
+          jsonEncode(h.model.turns.single.body['system']),
+          contains(originalPrompt),
+        );
+        hostPrompt = refreshedPrompt;
         await h.turn('/compact keep the fruit');
         final summarizing = h.model.requests.firstWhere(
           (r) =>
@@ -189,10 +204,18 @@ void main() {
         );
         expect(sentIn(summarizing), contains('keep the fruit'));
         final boundary = h.of('system', 'compact_boundary').single;
-        expect((boundary['compact_metadata'] as Map)['trigger'], 'manual');
+        expect(boundary['compact_metadata'], containsPair('trigger', 'manual'));
+        expect(
+          boundary['compact_metadata'],
+          containsPair('system_prompt_refreshed', true),
+        );
         expect(h.lastResult['result'], 'Compacted.');
         await h.turn('and now?');
-        final next = h.model.turns.last.body['messages'] as List;
+        final nextBody = h.model.turns.last.body;
+        final nextSystem = jsonEncode(nextBody['system']);
+        expect(nextSystem, contains(refreshedPrompt));
+        expect(nextSystem, isNot(contains(originalPrompt)));
+        final next = nextBody['messages'] as List;
         expect(jsonEncode(next.first), contains('We talked about apples.'));
         expect(jsonEncode(next), isNot(contains('first answer')));
         final lines = kept();
@@ -203,6 +226,26 @@ void main() {
         expect(lines.where((l) => l['isCompactSummary'] == true), hasLength(1));
       },
     );
+
+    test('/compact with no summary leaves the Bot prompt frozen', () async {
+      const original = 'Keep the original memory snapshot.';
+      h = await Harness.start(
+        systemPrompt: original,
+        refreshSystemPromptOnCompaction: true,
+        script: [Reply.text('first'), Reply.text(''), Reply.text('next')],
+      );
+      h.onRequest = (request) async {
+        expect(request['subtype'], isNot('refresh_system_prompt'));
+        return const {};
+      };
+      await h.turn('remember apples');
+      await h.turn('/compact');
+      expect(h.lastResult['result'], 'Nothing to compact.');
+      expect(h.of('system', 'compact_boundary'), isEmpty);
+      await h.turn('keep going');
+      expect(jsonEncode(h.model.turns.last.body['system']), contains(original));
+      expect(sentIn(h.model.turns.last), contains('remember apples'));
+    });
 
     test('a long conversation is compacted on its own', () async {
       h = await Harness.start();

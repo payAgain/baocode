@@ -339,7 +339,7 @@ Future<String> askRemoteHaiku(
 
 /// Claude Code on a remote host, over its server: the same lines as a
 /// local process's ([ProcessTransport]).
-class RemoteClaudeTransport implements ClaudeCodeTransport {
+class RemoteClaudeTransport implements ClaudeExternalTransport {
   RemoteClaudeTransport._(this._process) {
     _live.add(this);
     _process.stdout

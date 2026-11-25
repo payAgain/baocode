@@ -37,6 +37,7 @@ Future<String> askClaudeHaiku(
   List<({String name, ImageAttachment image})> images = const [],
   ClaudeHaikuTools? tools,
   String? session,
+  int? maxOutputTokens,
 }) async {
   void kept(String line) {
     if (env != null || !line.contains('"result"')) return;
@@ -67,6 +68,7 @@ Future<String> askClaudeHaiku(
       stream: true,
       message: true,
       tools: tools,
+      maxOutputTokens: maxOutputTokens,
       onLine: (line) {
         timer.add(line, clock.elapsed);
         kept(line);
@@ -83,6 +85,7 @@ Future<String> askClaudeHaiku(
     env: env,
     tools: tools,
     stream: false,
+    maxOutputTokens: maxOutputTokens,
     onLine: (line) {
       stdout.writeln(line);
       kept(line);
@@ -126,6 +129,7 @@ Future<(String, int)> _run(
   required void Function(String line) onLine,
   bool message = false,
   ClaudeHaikuTools? tools,
+  int? maxOutputTokens,
   void Function()? onStart,
 }) async {
   if (ClaudeCore.current() == ClaudeCore.builtin ||
@@ -139,6 +143,7 @@ Future<(String, int)> _run(
       stream: stream,
       message: message,
       tools: tools,
+      maxOutputTokens: maxOutputTokens,
       onLine: onLine,
       onStart: onStart,
     );
@@ -148,6 +153,7 @@ Future<(String, int)> _run(
   // mangle it on the command line.
   final settings = {
     'env': ?env,
+    if (maxOutputTokens != null) 'disableAllHooks': true,
     // A provider's model, not swapped for one of Claude's (#219).
     if (env != null && model != null)
       'availableModels': allowedModels(env, [model]),
@@ -185,6 +191,10 @@ Future<(String, int)> _run(
           for (final name in ClaudeModelVariables.inherited) name: '',
         ...ClaudeEntrypoint.of(env, cli.environment),
         ...ClaudeEnvironment.stateDirectory(cli.environment),
+        if (maxOutputTokens != null) ...{
+          'CLAUDE_CODE_MAX_OUTPUT_TOKENS': '$maxOutputTokens',
+          'MAX_THINKING_TOKENS': '0',
+        },
       },
       includeParentEnvironment: Platform.isWindows,
       runInShell: cli.throughShell,
@@ -242,6 +252,7 @@ Future<(String, int)> _runBuiltin(
   required bool message,
   required ClaudeHaikuTools? tools,
   required void Function(String line) onLine,
+  int? maxOutputTokens,
   void Function()? onStart,
 }) async {
   final base = await ClaudeEnvironment.of();
@@ -264,7 +275,15 @@ Future<(String, int)> _runBuiltin(
     permissionMode: 'dontAsk',
     persist: false,
     flagSettings: {
-      'env': ?env,
+      if (env != null || maxOutputTokens != null)
+        'env': {
+          ...?env,
+          if (maxOutputTokens != null) ...{
+            'CLAUDE_CODE_MAX_OUTPUT_TOKENS': '$maxOutputTokens',
+            'MAX_THINKING_TOKENS': '0',
+          },
+        },
+      if (maxOutputTokens != null) 'disableAllHooks': true,
       if (env != null && model != null)
         'availableModels': allowedModels(env, [model]),
       ...?tools?.settings,

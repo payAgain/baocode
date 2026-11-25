@@ -451,6 +451,11 @@ class ClaudeCodeKernel
   /// What the process was started with, its flag settings' permission
   /// rules sent again with the [ExtensionSwitches] as they change.
   ClaudeLaunch? _launched;
+  void Function() Function(String)? _saveSessionPrompt;
+  void Function()? _forgetSessionPrompt;
+  ({String requestId, String sessionId, KernelSessionPrompt prompt})?
+  _preparedPrompt;
+  bool Function()? _promptWithdrawn;
 
   /// The [ExtensionSwitches] the process has: at start, then each change
   /// sent ([_applySwitches]).
@@ -617,6 +622,7 @@ class ClaudeCodeKernel
         }
       }
       final workspace = _workspace;
+      final prompt = workspace?.sessionPrompt?.call(_sessionId, refresh: false);
       _launchedProvider = target.provider;
       _launchedModel = custom != null ? _model : null;
       _modelRefused = false;
@@ -655,8 +661,10 @@ class ClaudeCodeKernel
           readable: RemoteLocation.isRemote(_cwd)
               ? RemoteDrops.folders
               : [?PasteStore.directory],
-          instructions: workspace?.instructions,
+          instructions: prompt?.text ?? workspace?.instructions,
           ownPrompt: workspace?.ownPrompt ?? false,
+          refreshSystemPromptOnCompaction:
+              workspace?.refreshSystemPromptOnCompaction ?? false,
           tools: workspace?.tools,
           userServers: workspace?.userServers ?? false,
           allowed: workspace?.allowedTools ?? const [],
@@ -680,6 +688,8 @@ class ClaudeCodeKernel
         return;
       }
       _transport = transport;
+      _saveSessionPrompt = prompt?.save;
+      _promptWithdrawn = prompt?.withdrawn;
       // Share the request merger; custom providers record their calls already.
       _usage = switch (custom) {
         // The CLI's calls are not through the proxy: kept a turn each.
@@ -822,16 +832,33 @@ class ClaudeCodeKernel
       transport.close();
     }
     _transport = null;
+    _saveSessionPrompt = null;
+    _forgetSessionPrompt?.call();
+    _forgetSessionPrompt = null;
+    _preparedPrompt = null;
+    _promptWithdrawn = null;
     _cliWorking = false;
     _releaseWanted = false;
   }
 
   /// Runs [write] once ready and after the writes before it; a failure to
   /// start ends the turn.
-  void _whenReady(void Function(ClaudeCodeTransport transport) write) {
+  void _whenReady(
+    void Function(ClaudeCodeTransport transport) write, {
+    bool checkPrompt = false,
+  }) {
     _writes = _writes
         .then((_) => _ensureStarted())
-        .then((_) {
+        .then((_) async {
+          if (checkPrompt &&
+              _transport is ClaudeExternalTransport &&
+              _promptWithdrawn?.call() == true) {
+            _teardown();
+            await _ensureStarted();
+            if (_promptWithdrawn?.call() == true) {
+              throw StateError('The conversation prompt changed during launch');
+            }
+          }
           if (_transport case final transport?) write(transport);
         })
         .catchError((Object error) {
@@ -844,6 +871,7 @@ class ClaudeCodeKernel
               ),
             );
             _endTurn(interrupted: true);
+            _releaseScopedTurn();
           }
         });
   }
@@ -1025,6 +1053,7 @@ class ClaudeCodeKernel
     final ask = _work == 'ask';
     if (hold) {
       _held[turn.id] = ask;
+      if (turn.now && _holdsScopedTurns) sendQueuedNow(turn.id);
     } else {
       _write(turn, ask: ask);
     }
@@ -1035,10 +1064,17 @@ class ClaudeCodeKernel
   /// turn: one of them waits there at a time (see [_holds]), the rest here.
   final Map<String, bool> _held = {};
 
+  /// An external Bot process must settle before it can load a withdrawn
+  /// prompt's replacement. Keep follow-ups at the host until then.
+  bool get _holdsScopedTurns =>
+      (_transport == null || _transport is ClaudeExternalTransport) &&
+      _workspace?.sessionPrompt != null;
+
   /// Whether a message queued now waits in [_held]: while another waits in
   /// the CLI, unless messages join the turn running (then all wait there,
   /// but for one sent now, to be taken up alone).
   bool get _holds {
+    if (_holdsScopedTurns) return true;
     final waiting = _queued.where((id) => !_held.containsKey(id));
     return waiting.any((id) => _sent[id]?.now ?? false) ||
         (waiting.isNotEmpty && _queuedMessages == QueuedMessages.afterTurn);
@@ -1112,7 +1148,9 @@ class ClaudeCodeKernel
       // Queued behind the turn running: stopped once it is sent, so it is
       // taken up next, as when the user stops the turn.
       if (turn.now && _queued.contains(turn.id) && !spareBackground) cancel();
-    });
+      // The built-in core can take up any follow-ups held during startup.
+      _release();
+    }, checkPrompt: true);
   }
 
   /// [turn] as it shows once sent, until the CLI reads it back: a message
@@ -1129,7 +1167,12 @@ class ClaudeCodeKernel
     );
   }
 
+  final _turnEvidenceItems = <String>{};
+  final _turnSuccessfulCommands = <String, String>{};
+
   void _beginTurn(String id, {bool unprompted = false}) {
+    _turnEvidenceItems.clear();
+    _turnSuccessfulCommands.clear();
     _turn = id;
     _limitHit(null);
     _turnStarted = DateTime.now();
@@ -1143,10 +1186,12 @@ class ClaudeCodeKernel
     required bool interrupted,
     Duration? worked,
     TurnUsage? usage,
+    int? toolIterations,
   }) {
     final turn = _turn;
     if (turn == null) return;
     _turn = null;
+    _preparedPrompt = null;
     if (interrupted) _cancelSdkCalls();
     worked ??= switch (_turnStarted) {
       final started? => DateTime.now().difference(started),
@@ -1181,9 +1226,22 @@ class ClaudeCodeKernel
     if (_onAgy) unawaited(_agyQuota.refresh());
     // Stopped too: its work folds all the same (the session file tells it
     // was stopped).
-    if (worked != null) {
-      if ((_turnStats, _sessionId) case (final stats?, final session?)) {
-        stats.write(session, turn, (worked: worked, usage: usage));
+    final iterations = toolIterations ?? _translator.toolIterations;
+    if ((_turnStats, _sessionId) case (final stats?, final session?)) {
+      final timing = worked == null ? null : (worked: worked, usage: usage);
+      if (stats case final TurnCompletionStore completions) {
+        completions.writeCompletion(session, turn, timing, (
+          succeeded: !interrupted,
+          toolIterations: iterations,
+          itemIds: _turnEvidenceItems.toList(),
+          successfulCommands: Map.of(_turnSuccessfulCommands),
+          noteDigests: {
+            for (final note in _sent[turn]?.notes ?? const <String>[])
+              turnNoteDigest(note),
+          },
+        ));
+      } else if (timing != null) {
+        stats.write(session, turn, timing);
       }
     }
     emit(
@@ -1193,6 +1251,7 @@ class ClaudeCodeKernel
         interrupted: interrupted,
         worked: worked,
         usage: usage,
+        toolIterations: iterations,
       ),
     );
   }
@@ -1243,6 +1302,15 @@ class ClaudeCodeKernel
   @override
   void sendQueuedNow(String turnId) {
     if (!_queued.contains(turnId)) return;
+    if (_holdsScopedTurns && _held.containsKey(turnId)) {
+      _reorderHere([turnId, ..._queued.where((id) => id != turnId)]);
+      if (_turn case final active?) {
+        _whenReady((_) {
+          if (_turn == active && _held.containsKey(turnId)) _tell('interrupt');
+        });
+      }
+      return;
+    }
     if (!_running) {
       // The queue is shown before the process finishes starting. Keep the
       // request behind its pending writes, then check the queue again.
@@ -1969,11 +2037,15 @@ class ClaudeCodeKernel
         _controlRequest(message);
       case 'control_cancel_request':
         final id = message['request_id'] as String?;
+        if (_preparedPrompt?.requestId == id) _preparedPrompt = null;
         if (id != null && _permissions.remove(id) != null) {
           emit(InteractionResolved(nextSeq, id));
         }
       case 'system' when message['subtype'] == 'init':
         _sessionId = message['session_id'] as String? ?? _sessionId;
+        if ((_sessionId, _saveSessionPrompt) case (final id?, final save?)) {
+          if (_keepSessionPrompt(id, save)) _saveSessionPrompt = null;
+        }
         _reportedModel = message['model'] as String?;
         // Started again on the model picked, not on the one in its place.
         if (_reportedModel != _fallback) _fallback = null;
@@ -2013,9 +2085,24 @@ class ClaudeCodeKernel
           _beginTurn('${message['uuid'] ?? 'own:$nextSeq'}', unprompted: true);
         }
         _translator.translate(message);
+      case 'system' when message['subtype'] == 'host_prompt_applied':
+        _acceptPreparedPrompt(message['prompt_request_id']);
       case 'system' when message['subtype'] == 'compact_boundary':
-        _translator.translate(message);
-        _compacted(message);
+        final metadata = message['compact_metadata'];
+        final boundary =
+            metadata is Map<String, Object?> &&
+                metadata['system_prompt_refreshed'] == true &&
+                !_acceptPreparedPrompt(metadata['prompt_request_id'])
+            ? {
+                ...message,
+                'compact_metadata': {
+                  ...metadata,
+                  'system_prompt_refreshed': false,
+                },
+              }
+            : message;
+        _translator.translate(boundary);
+        _compacted(boundary);
       // The picked model's safeguards flagged a message: the session goes
       // on on another (a subagent's alone, 'local', leaves it as it is).
       case 'system' when message['subtype'] == 'model_refusal_fallback':
@@ -2072,6 +2159,34 @@ class ClaudeCodeKernel
     }
   }
 
+  bool _acceptPreparedPrompt(Object? requestId) {
+    final pending = _preparedPrompt;
+    if (pending == null ||
+        pending.requestId != requestId ||
+        pending.sessionId != _sessionId) {
+      return false;
+    }
+    _preparedPrompt = null;
+    _promptWithdrawn = pending.prompt.withdrawn;
+    final save = pending.prompt.save;
+    return save == null || _keepSessionPrompt(pending.sessionId, save);
+  }
+
+  bool _keepSessionPrompt(
+    String sessionId,
+    void Function() Function(String) save,
+  ) {
+    _forgetSessionPrompt?.call();
+    _forgetSessionPrompt = null;
+    try {
+      _forgetSessionPrompt = save(sessionId);
+      return true;
+    } on Object {
+      debugPrint('The conversation memory snapshot could not be saved');
+      return false;
+    }
+  }
+
   void _controlRequest(Map<String, Object?> message) {
     final id = message['request_id'] as String?;
     final request = (message['request'] as Map?)?.cast<String, Object?>();
@@ -2086,6 +2201,44 @@ class ClaudeCodeKernel
         unawaited(_mcpMessage(id, request));
       case 'hook_callback':
         unawaited(_hookCallback(id, request));
+      case 'refresh_system_prompt' || 'check_system_prompt'
+          when _turn != null &&
+              _launched?.ownPrompt == true &&
+              _launched?.refreshSystemPromptOnCompaction == true:
+        // Only the current workspace can supply this snapshot. The runtime
+        // cannot ask for a different Bot or conversation scope.
+        try {
+          final workspace = _workspace;
+          if (workspace != null &&
+              workspace.ownPrompt &&
+              workspace.refreshSystemPromptOnCompaction) {
+            final check = request['subtype'] == 'check_system_prompt';
+            if (check && _promptWithdrawn?.call() != true) {
+              control.respond(id, {'valid': true});
+              return;
+            }
+            final prompt = workspace.sessionPrompt?.call(
+              _sessionId,
+              refresh: !check,
+            );
+            if ((prompt, _sessionId) case (final prepared?, final sessionId?)) {
+              _preparedPrompt = (
+                requestId: id,
+                sessionId: sessionId,
+                prompt: prepared,
+              );
+            }
+            control.respond(id, {
+              if (check) 'valid': true,
+              'system_prompt': prompt?.text ?? workspace.instructions,
+              'prompt_request_id': id,
+            });
+            return;
+          }
+        } on Object {
+          // An unreadable saved snapshot must not undo the compaction.
+        }
+        control.refuse(id, 'The conversation prompt is unavailable');
       default:
         control.refuse(id, 'Not supported by this client');
     }
@@ -2166,6 +2319,7 @@ class ClaudeCodeKernel
       ClaudeSdkCall(
         cwd: _cwd,
         sessionId: _sessionId,
+        turnId: _turn,
         cancelled: _sdkCallsCancelled.future,
         ask: _sdkAsk,
       ),
@@ -2302,6 +2456,8 @@ class ClaudeCodeKernel
     }
     _endTurn(
       interrupted: message['subtype'] != 'success',
+      // The built-in engine counts accepted replies after any stream retries.
+      toolIterations: claudeInt(message['tool_iterations']),
       worked: switch (message['duration_ms']) {
         final num ms => Duration(milliseconds: ms.round()),
         _ => null,
@@ -2321,7 +2477,24 @@ class ClaudeCodeKernel
         _ => TurnUsage(costUsd: turnCost),
       },
     );
+    _releaseScopedTurn();
     unawaited(_refreshContext(completed: _custom == null));
+  }
+
+  void _releaseScopedTurn() {
+    if (!_holdsScopedTurns || _held.isEmpty) return;
+    // The host's settlement handlers apply pending snapshot changes before
+    // the next message is passed to the CLI process.
+    scheduleMicrotask(() {
+      if (_disposed || _turn != null || _held.isEmpty) return;
+      final MapEntry(key: id, value: ask) = _held.entries.first;
+      _held.remove(id);
+      _queued.remove(id);
+      final turn = _sent[id]!;
+      _beginTurn(id);
+      emit(ItemUpserted(nextSeq, id, _sentItem(turn)));
+      _write(turn, ask: ask);
+    });
   }
 
   // --- Goal ------------------------------------------------------------------------
@@ -2974,6 +3147,30 @@ class ClaudeCodeKernel
   /// forwarded here as it says it (see PortForwards.notice).
   @override
   void emit(KernelEvent event) {
+    if (_turn != null && !_translator.replaying && _remoteHost == null) {
+      switch (event) {
+        case ItemUpserted(:final id, item: final ChatItem? item) ||
+            ItemCompleted(:final id, item: final ChatItem? item):
+          if (item is TerminalItem ||
+              item is AssistantTextItem ||
+              item is NoticeItem && item.kind == NoticeKind.error) {
+            _turnEvidenceItems.add(id);
+          }
+          if (item case final TerminalItem terminal) {
+            if (terminal.status == CommandStatus.succeeded &&
+                !terminal.background) {
+              _turnSuccessfulCommands[id] = terminalEvidenceDigest(terminal);
+            } else {
+              _turnSuccessfulCommands.remove(id);
+            }
+          }
+        case ItemRemoved(:final id):
+          _turnEvidenceItems.remove(id);
+          _turnSuccessfulCommands.remove(id);
+        default:
+          break;
+      }
+    }
     super.emit(event);
     if (event
         case ItemUpserted(

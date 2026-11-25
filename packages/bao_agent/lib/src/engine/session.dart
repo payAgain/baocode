@@ -53,10 +53,12 @@ class EngineOptions {
     this.configDir,
     this.productName = 'BaoCode',
     this.systemPrompt,
+    this.refreshSystemPromptOnCompaction = false,
     this.coreSystemPrompt,
     this.tools,
     this.maxTurns,
     this.strictMcpConfig = false,
+    this.restrictedContext = false,
     this.slashCommands = true,
     this.canAsk = true,
   });
@@ -84,12 +86,15 @@ class EngineOptions {
     configDir: asText(json['configDir']),
     productName: asText(json['productName']) ?? 'BaoCode',
     systemPrompt: asString(json['systemPrompt']),
+    refreshSystemPromptOnCompaction:
+        json['refreshSystemPromptOnCompaction'] == true,
     coreSystemPrompt: asString(json['coreSystemPrompt']),
     tools: json['tools'] is List
         ? [...asList(json['tools']).whereType<String>()]
         : null,
     maxTurns: asInt(json['maxTurns']),
     strictMcpConfig: json['strictMcpConfig'] == true,
+    restrictedContext: json['restrictedContext'] == true,
     slashCommands: json['slashCommands'] != false,
     canAsk: json['canAsk'] != false,
   );
@@ -143,6 +148,7 @@ class EngineOptions {
 
   /// The system prompt in place of the agent's own (`--system-prompt`).
   final String? systemPrompt;
+  final bool refreshSystemPromptOnCompaction;
 
   /// Replaces the agent's own default core instructions while keeping memory,
   /// output style, budget, and any appended host instructions.
@@ -156,6 +162,9 @@ class EngineOptions {
 
   /// Only the servers given here, none of the user's (`--strict-mcp-config`).
   final bool strictMcpConfig;
+
+  /// Whether this host-owned session skips local plugins and instructions.
+  final bool restrictedContext;
 
   /// Whether `/name` runs a command (`--disable-slash-commands` when not).
   final bool slashCommands;
@@ -185,10 +194,12 @@ class EngineOptions {
     'configDir': ?configDir,
     'productName': productName,
     'systemPrompt': ?systemPrompt,
+    'refreshSystemPromptOnCompaction': refreshSystemPromptOnCompaction,
     'coreSystemPrompt': ?coreSystemPrompt,
     'tools': ?tools,
     'maxTurns': ?maxTurns,
     'strictMcpConfig': strictMcpConfig,
+    'restrictedContext': restrictedContext,
     'slashCommands': slashCommands,
     'canAsk': canAsk,
   };
@@ -216,6 +227,7 @@ class AgentSession {
     required this.options,
     required this._emit,
     required this.hostRequest,
+    this._readSystemPrompt,
     ModelClient Function(ApiConfig config)? clientFactory,
   }) : cwd = p.normalize(options.cwd),
        _clientFactory = clientFactory ?? AnthropicClient.new {
@@ -250,6 +262,27 @@ class AgentSession {
     Map<String, Object?> fields,
   )
   hostRequest;
+
+  final Future<({String text, String requestId})?> Function({
+    required bool onlyWithdrawn,
+  })?
+  _readSystemPrompt;
+  String? _systemPromptOverride;
+  String? get systemPrompt => _systemPromptOverride ?? options.systemPrompt;
+
+  Future<String?> refreshSystemPrompt({bool onlyWithdrawn = false}) async {
+    final read = _readSystemPrompt;
+    if (read == null || options.systemPrompt == null) return null;
+    final prompt = await read(onlyWithdrawn: onlyWithdrawn);
+    if (prompt == null) return null;
+    _systemPromptOverride = prompt.text;
+    if (onlyWithdrawn) {
+      emitSystem('host_prompt_applied', {
+        'prompt_request_id': prompt.requestId,
+      });
+    }
+    return prompt.requestId;
+  }
 
   late final PermissionEngine permissions;
   late final FileCheckpoints checkpoints;

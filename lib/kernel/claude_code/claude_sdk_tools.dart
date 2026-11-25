@@ -23,6 +23,7 @@ class ClaudeSdkCall {
   const ClaudeSdkCall({
     required this.cwd,
     this.sessionId,
+    this.turnId,
     this.cancelled,
     this.toolUseId,
     this.ask,
@@ -34,6 +35,9 @@ class ClaudeSdkCall {
   /// to give (the request's own is not kept). None where the kernel cannot.
   final ClaudeSdkAsk? ask;
   final String? sessionId;
+
+  /// The host kernel's active turn, independent of model-supplied arguments.
+  final String? turnId;
 
   /// The tool use it answers, as Claude Code says (`_meta`'s
   /// `claudecode/toolUseId`): its step's in the conversation
@@ -264,6 +268,7 @@ abstract final class ClaudeSdkTools {
             ClaudeSdkCall(
               cwd: call.cwd,
               sessionId: call.sessionId,
+              turnId: call.turnId,
               cancelled: cancel.future,
               ask: call.ask,
               toolUseId: switch (params['_meta']) {
