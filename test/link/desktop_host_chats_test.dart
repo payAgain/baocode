@@ -266,16 +266,15 @@ void main() {
         desktop.chats.singleWhere((chat) => chat.kind == 'bot'),
       );
       await pumpEventQueue();
-      expect(_texts(desktop), ['private prompt', 'private reply']);
       expect(desktop.projectHistory, isNull);
-      await desktop.earlier();
       expect(_texts(desktop), [
         'older private prompt',
         'older private reply',
         'private prompt',
         'private reply',
       ]);
-      expect(WorkspaceBridge.idOf(bots.threadOf(bot)!), 'private-kept');
+      expect(bots.privateSessionId(bot), 'private-kept');
+      expect(bots.threadOf(bot)!.record, isNull);
       await otherClient.call(LinkMethods.send, {
         'bot': bot.id,
         'text': 'other client private prompt',

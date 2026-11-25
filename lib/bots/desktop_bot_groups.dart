@@ -400,8 +400,11 @@ class _GroupMessage extends StatelessWidget {
         ),
       );
     }
+    final literal = ChatCodec.literalBotText(message.text);
     final parts = message.mine
         ? [(ChatCodec.botSayTag, message.text)]
+        : literal != null
+        ? [(ChatCodec.botSayTag, literal)]
         : [
             for (final (tag, text) in ChatCodec.botParts(
               ChatCodec.withoutBotEvents(message.text),

@@ -186,6 +186,8 @@ void main() {
       final send = {'group': id, 'text': 'Start', 'id': 'first'};
       final result = await peer.call(LinkMethods.sendGroup, send);
       expect(await peer.call(LinkMethods.sendGroup, send), result);
+      // The receipt acknowledges the saved message before the dispatch timer.
+      await Future<void>.delayed(Duration.zero);
       expect(told, [leo.id]);
       expect((await groupState()).holder, leo.id);
       expect((await groupState()).toJson(), containsPair('lead', leo.id));

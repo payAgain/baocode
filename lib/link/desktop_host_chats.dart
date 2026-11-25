@@ -45,6 +45,7 @@ class DesktopHostMessage {
     required this.text,
     required this.sender,
     required this.mine,
+    this.queued = false,
     this.images = const [],
     this.groupReplyTarget,
     this.groupReference,
@@ -53,6 +54,7 @@ class DesktopHostMessage {
   final String text;
   final String sender;
   final bool mine;
+  final bool queued;
   final List<DesktopRemoteImage> images;
   final DesktopHostGroupQuote? groupReplyTarget;
   final ({int sequence, DesktopHostGroupQuote? target})? groupReference;
@@ -959,16 +961,20 @@ class DesktopHostChats extends ChangeNotifier {
           final system =
               ChatCodec.botEvent(user) != null ||
               (text.isEmpty && _hiddenNotes.hasMatch(raw));
-          if (item['queued'] != true) showReply = !groupNote && !system;
+          final queued = item['queued'] == true;
+          if (!queued) showReply = !groupNote && !system;
           if (group || system) continue;
           final from = item['agent'];
-          // The visible words can survive a merged or queued private prompt,
-          // but its media cannot be attributed to the private turn.
-          final showImages = !bot || (showReply && !groupNote);
+          // A split host explicitly marks queued items from its private view.
+          // A merged note from a legacy host cannot establish media routing.
+          final privateQueued = queued && item['privateQueued'] == true;
+          final showImages =
+              !bot || (!groupNote && (showReply || privateQueued));
           yield* _lines(
             [text],
             from is String && from.isNotEmpty ? from : 'You',
             mine: from == null,
+            queued: bot && queued && from == null,
             attachment: showImages && hasImage,
             images: showImages
                 ? DesktopRemoteImage.message(images: images, markdown: text)
@@ -1084,12 +1090,20 @@ class DesktopHostChats extends ChangeNotifier {
     Iterable<String> lines,
     String sender, {
     bool mine = false,
+    bool queued = false,
     bool attachment = false,
     List<DesktopRemoteImage> images = const [],
   }) sync* {
+    var shownText = false;
     for (final text in lines) {
       if (text.isNotEmpty) {
-        yield DesktopHostMessage(text: text, sender: sender, mine: mine);
+        shownText = true;
+        yield DesktopHostMessage(
+          text: text,
+          sender: sender,
+          mine: mine,
+          queued: queued,
+        );
       }
     }
     if (attachment || images.isNotEmpty) {
@@ -1097,6 +1111,7 @@ class DesktopHostChats extends ChangeNotifier {
         text: _attachment,
         sender: sender,
         mine: mine,
+        queued: queued && !shownText,
         images: List.unmodifiable(images),
       );
     }

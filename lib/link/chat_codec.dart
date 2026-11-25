@@ -162,7 +162,7 @@ abstract final class ChatCodec {
     String text,
   ) => [
     for (final match in _botParts.allMatches(text))
-      if (match[3]!.trim() case final part when part.isNotEmpty)
+      if (_botPartText(match) case final part when part.isNotEmpty)
         (
           tag: match[1]!,
           text: part,
@@ -181,6 +181,37 @@ abstract final class ChatCodec {
   );
 
   static final _botRef = RegExp('$botRefAttribute="\\s*#?(\\d+)\\s*"');
+
+  /// Literal text explicitly forwarded by the host. XML-like bot markers in
+  /// the user's message cannot become extra chat bubbles or routing tags.
+  static const _literalAttribute = 'literal="yes"';
+  static const _literalOpen = '<$botSayTag $_literalAttribute>';
+  static const _literalClose = '</$botSayTag>';
+
+  static String literalBotSay(String text) =>
+      '$_literalOpen${text.replaceAll('&', '&amp;').replaceAll('<', '&lt;')}'
+      '$_literalClose';
+
+  static String? literalBotText(String message) {
+    if (!message.startsWith(_literalOpen) || !message.endsWith(_literalClose)) {
+      return null;
+    }
+    final body = message.substring(
+      _literalOpen.length,
+      message.length - _literalClose.length,
+    );
+    return body.contains('<') ? null : _unescapeLiteral(body);
+  }
+
+  static String _unescapeLiteral(String text) =>
+      text.replaceAll('&lt;', '<').replaceAll('&amp;', '&');
+
+  static String _botPartText(RegExpMatch match) {
+    final text = match[3]!;
+    return match[2]?.trim() == _literalAttribute
+        ? _unescapeLiteral(text)
+        : text.trim();
+  }
 
   /// What a bot's reply [text] suggests the user say next
   /// ([botSuggestTag]), each once closed: not among what it shows.

@@ -1,6 +1,11 @@
+import 'dart:async';
+
 import '../chat/chat_models.dart';
+import '../chat/chat_session.dart';
 import '../chat/composer/composer_files.dart';
 import '../link/chat_codec.dart';
+import 'bot.dart';
+import 'bots.dart';
 
 enum DesktopBotMessageKind { user, reply, narration, chat }
 
@@ -11,6 +16,8 @@ typedef DesktopBotMessage = ({
   List<ImageAttachment> images,
   Uri? imageUrl,
   DateTime? sentAt,
+  bool queued,
+  ({String delivery, List<int> sequences})? recallSources,
 });
 
 /// The user's own prompts, with any app notes cut out. The attachment
@@ -45,6 +52,8 @@ List<DesktopBotMessage> desktopBotMessages(
     List<ImageAttachment> images = const [],
     Uri? imageUrl,
     DateTime? sentAt,
+    bool queued = false,
+    ({String delivery, List<int> sequences})? recallSources,
   }) {
     if (text.isEmpty && images.isEmpty && imageUrl == null) return;
     if (previewOnly && (text.isEmpty || kind == DesktopBotMessageKind.chat)) {
@@ -57,6 +66,8 @@ List<DesktopBotMessage> desktopBotMessages(
       images: images,
       imageUrl: imageUrl,
       sentAt: sentAt,
+      queued: queued,
+      recallSources: recallSources,
     ));
   }
 
@@ -67,7 +78,16 @@ List<DesktopBotMessage> desktopBotMessages(
     if (previewOnly && item is ToolCallItem) continue;
     final privateSend = ChatCodec.botSentToUser(item);
     if (item is ToolCallItem && privateSend != null) {
-      add(DesktopBotMessageKind.reply, words(privateSend), images: item.images);
+      final hits = item.input['recallHits'];
+      final delivery = item.callId;
+      add(
+        DesktopBotMessageKind.reply,
+        words(privateSend),
+        images: item.images,
+        recallSources: delivery != null && hits is List<int> && hits.isNotEmpty
+            ? (delivery: delivery, sequences: hits)
+            : null,
+      );
       continue;
     }
     switch (item) {
@@ -92,6 +112,7 @@ List<DesktopBotMessage> desktopBotMessages(
                 : display + codeAppendix(references.values),
             images: item.images,
             sentAt: item.sentAt,
+            queued: item.queued,
           );
         }
       case UserMessageItem(queued: false) when previewOnly:
@@ -141,4 +162,197 @@ List<DesktopBotMessage> desktopBotMessages(
     }
   }
   return messages;
+}
+
+/// Only chat-facing items belong in the public DM window. Carry the worker's
+/// item index for actions on the current conversation, never for archived data.
+Iterable<({ChatItem item, int? index, DateTime? at})> privateBotItems(
+  ChatSession session, {
+  bool legacy = false,
+  bool active = false,
+  int? beforeIndex,
+  String? Function(String id)? cardSession,
+}) sync* {
+  var inPrivate = !legacy;
+  DateTime? at;
+  for (
+    var index = 0;
+    index < session.itemCount && (beforeIndex == null || index < beforeIndex);
+    index++
+  ) {
+    final item = session.itemAt(index);
+    if (item case UserMessageItem(:final queued, :final sentAt)) {
+      final event = ChatCodec.botEvent(item);
+      final own = item.fromAgent == null && item.fromSession == null;
+      if (!queued) {
+        at = sentAt;
+        inPrivate = !legacy || own && event == null;
+      }
+      if (!own || event != null) continue;
+      final visible = UserMessageItem(
+        text: ChatCodec.withoutBotEvents(item.text),
+        queued: active && queued,
+        images: item.images,
+        stopped: item.stopped,
+        sentAt: sentAt,
+      );
+      yield (item: visible, index: active ? index : null, at: sentAt);
+    } else if (item case ToolCallItem(:final images)
+        when ChatCodec.botSentToUser(item) != null) {
+      final sent = ChatCodec.botSentToUser(item)!;
+      yield (
+        item: ToolCallItem(
+          kind: ToolKind.message,
+          target: ChatCodec.botToUser,
+          tool: ChatCodec.botSendTool,
+          input: {'to': ChatCodec.botToUser, 'text': sent},
+          images: images,
+        ),
+        index: null,
+        at: at,
+      );
+    } else if (inPrivate && item is AssistantTextItem) {
+      final text = StringBuffer();
+      for (final (tag, part) in ChatCodec.botParts(
+        ChatCodec.withoutBotEvents(item.text),
+      )) {
+        final visible = tag == ChatCodec.botCardTag && cardSession != null
+            ? cardSession(part)
+            : part;
+        if (visible != null) text.writeln('<$tag>$visible</$tag>');
+      }
+      if (active) {
+        for (final suggestion in ChatCodec.botSuggestions(item.raw)) {
+          text.writeln(
+            '<${ChatCodec.botSuggestTag}>$suggestion</${ChatCodec.botSuggestTag}>',
+          );
+        }
+      }
+      if (text.isNotEmpty) {
+        yield (
+          item: AssistantTextItem(text.toString().trim()),
+          index: null,
+          at: at,
+        );
+      }
+    } else if (inPrivate &&
+        item is ToolCallItem &&
+        (item.status == ToolStatus.succeeded ||
+            active && item.status == ToolStatus.running) &&
+        (item.kind == ToolKind.image || item.tool == ChatCodec.botImageTool)) {
+      final url = ChatCodec.botImageUrl(item);
+      yield (
+        item: ToolCallItem(
+          kind: item.kind,
+          target: '',
+          tool: item.kind == ToolKind.image ? null : ChatCodec.botImageTool,
+          status: item.status,
+          input: {'url': ?url},
+          images: item.images,
+        ),
+        index: null,
+        at: at,
+      );
+    }
+  }
+}
+
+/// Merges the retained private transcript and explicit private deliveries with
+/// the current worker's projected items. Only current prompts carry an index
+/// for an edit. Deliveries are ordered by the host's send time.
+List<({ChatItem item, int? index})> privateBotTimeline(
+  Bots bots,
+  Bot bot,
+  ChatSession session,
+  List<ChatItem> history, {
+  String? Function(String id)? cardSession,
+  bool includeRecallSources = false,
+}) {
+  final deliveries = bots
+      .privateDeliveries(bot, includeRecallSources: includeRecallSources)
+      .iterator;
+  var hasDelivery = deliveries.moveNext();
+  final entries = <({ChatItem item, int? index})>[];
+  void addDelivery() {
+    final delivery = deliveries.current;
+    if (delivery.item.input['hostCommand'] case final String request) {
+      entries.add((
+        item: UserMessageItem(text: request, sentAt: delivery.at),
+        index: null,
+      ));
+    }
+    entries.add((item: delivery.item, index: null));
+    hasDelivery = deliveries.moveNext();
+  }
+
+  void add(ChatItem item, int? index, DateTime? at) {
+    while (at != null && hasDelivery && !deliveries.current.at.isAfter(at)) {
+      addDelivery();
+    }
+    entries.add((item: item, index: index));
+  }
+
+  for (final item in history) {
+    add(item, null, item is UserMessageItem ? item.sentAt : null);
+  }
+  for (final (:item, :index, :at) in privateBotItems(
+    session,
+    active: true,
+    cardSession: cardSession,
+  )) {
+    add(item, index, at);
+  }
+  while (hasDelivery) {
+    addDelivery();
+  }
+  for (final item in bots.pendingPrivateItems(bot)) {
+    entries.add((item: item, index: null));
+  }
+  return entries;
+}
+
+/// Reads projected history without attaching a UI or preparing a model.
+Future<void> loadBotChatHistory(ChatSession session) async {
+  if (session.loadingHistory) {
+    final loaded = Completer<void>();
+    void changed() {
+      if (!session.loadingHistory && !loaded.isCompleted) loaded.complete();
+    }
+
+    session.addListener(changed);
+    try {
+      changed();
+      await loaded.future.timeout(const Duration(seconds: 20));
+    } on TimeoutException {
+      // Still show every loaded and attributable message.
+    } finally {
+      session.removeListener(changed);
+    }
+  }
+  while (session.hasEarlierHistory) {
+    final before = session.prependedCount;
+    await session.loadEarlier();
+    if (session.prependedCount == before) break;
+  }
+}
+
+Future<List<ChatItem>> loadPrivateBotHistory(
+  Bots bots,
+  Bot bot, {
+  String? Function(String id)? cardSession,
+}) async {
+  final history = <ChatItem>[];
+  for (final thread in bots.privateHistory(bot)) {
+    final session = thread.session;
+    await loadBotChatHistory(session);
+    history.addAll([
+      for (final (:item, index: _, at: _) in privateBotItems(
+        session,
+        legacy: bots.isLegacyPrivateThread(bot, thread),
+        cardSession: cardSession,
+      ))
+        item,
+    ]);
+  }
+  return history;
 }

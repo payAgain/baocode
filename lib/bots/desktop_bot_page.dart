@@ -1,9 +1,10 @@
 import 'dart:async';
 
+import 'package:bao_link/bao_link.dart' show LinkMethods, LinkRemoteException;
 import 'package:flutter/material.dart';
 
 import '../chat/chat_keys.dart';
-import '../chat/chat_models.dart' show UserMessageItem;
+import '../chat/chat_models.dart' show ChatItem;
 import '../chat/chat_session.dart';
 import '../chat/composer/composer.dart';
 import '../chat/stop_confirmation.dart';
@@ -11,7 +12,7 @@ import '../chat/widgets/user_message_bubble.dart';
 import '../kernel/kernel_types.dart' show KernelHealthStatus;
 import '../keybindings/chat_keybindings.dart';
 import '../l10n/l10n.dart';
-import '../link/chat_codec.dart';
+import '../link/bot_memory_management.dart';
 import '../theme/app_theme.dart';
 import '../workspace/editor_launcher.dart' show openExternal;
 import '../workspace/session_tools.dart';
@@ -46,9 +47,10 @@ class DesktopBotPage extends StatefulWidget {
 class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
   final _scroll = ScrollController();
   ChatSession? _session;
+  List<ChatItem> _archived = const [];
+  bool _loadingArchived = false;
   bool _workspaceReady = false;
   bool _syncScheduled = false;
-  bool _triedEarlier = false;
   Bot? get _bot => switch (widget.botId) {
     final id? => widget.bots.byId(id),
     null => widget.bots.bots.where((bot) => bot.assistant).firstOrNull,
@@ -112,24 +114,62 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
     _session?.removeListener(_sessionChanged);
     _session?.detach();
     _session = session;
-    _triedEarlier = false;
+    _archived = const [];
+    _loadingArchived = false;
     session?.addListener(_sessionChanged);
     session?.attach();
+    if ((session, _bot) case (final session?, final bot?)) {
+      _loadingArchived = true;
+      unawaited(_loadArchive(bot, session));
+    }
     if (_scroll.hasClients) _scroll.jumpTo(0);
+  }
+
+  Future<void> _loadArchive(Bot bot, ChatSession session) async {
+    try {
+      final items = await loadPrivateBotHistory(widget.bots, bot);
+      if (mounted && identical(_session, session)) {
+        setState(() => _archived = items);
+      }
+    } finally {
+      if (mounted && identical(_session, session)) {
+        setState(() => _loadingArchived = false);
+      }
+    }
   }
 
   void _sessionChanged() => setState(() {});
 
-  bool _canStop(ChatSession session) {
-    if (!identical(_session, session) || !session.isStreaming) return false;
-    // A private prompt queued during a group turn doesn't change the turn
-    // being answered. Only the surface that owns that turn may stop it.
-    for (var i = session.itemCount - 1; i >= 0; i--) {
-      if (session.itemAt(i) case final UserMessageItem item when !item.queued) {
-        return ChatCodec.botGroupOf(item) == null;
-      }
+  void _activateArchived(Bot bot, ChatSession? session, AgentThread thread) {
+    if (!identical(_session, session) || _bot?.id != bot.id) return;
+    try {
+      widget.bots.activateConversation(bot, thread);
+    } on StateError catch (error) {
+      ScaffoldMessenger.maybeOf(context)
+          ?.showSnackBar(SnackBar(content: Text(error.message)));
     }
-    return !session.hasEarlierHistory;
+  }
+
+  bool _canStop(ChatSession session) =>
+      identical(_session, session) && session.isStreaming;
+
+  Future<void> _refine(Bot bot, String focus) async {
+    final management = BotMemoryManagement(widget.bots, reviewer: 'desktop');
+    final zh = Localizations.localeOf(context).languageCode == 'zh';
+    String message;
+    try {
+      await management.call(LinkMethods.refineBotMemory, {
+        'bot': bot.id,
+        'focus': focus,
+      });
+      message = zh ? '已安排复盘。' : 'Review queued.';
+    } on LinkRemoteException catch (error) {
+      message = error.message;
+    }
+    if (mounted) {
+      ScaffoldMessenger.maybeOf(context)
+          ?.showSnackBar(SnackBar(content: Text(message)));
+    }
   }
 
   @override
@@ -158,6 +198,15 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
     final l10n = context.l10n;
     final bot = _bot;
     final session = _session;
+    final archives = bot == null || !_workspaceReady
+        ? const <AgentThread>[]
+        : widget.bots
+              .privateHistory(bot)
+              .reversed
+              .where(
+                (thread) => widget.bots.canActivateConversation(bot, thread),
+              )
+              .toList();
     final loading =
         !_workspaceReady ||
         (bot != null && session == null) ||
@@ -216,11 +265,32 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
                     ],
                   ),
                 ),
+                if (bot != null && archives.isNotEmpty)
+                  PopupMenuButton<AgentThread>(
+                    tooltip:
+                        Localizations.localeOf(context).languageCode == 'zh'
+                        ? '继续归档对话'
+                        : 'Resume archived conversation',
+                    icon: const Icon(Icons.history),
+                    onSelected: (thread) =>
+                        _activateArchived(bot, session, thread),
+                    itemBuilder: (context) => [
+                      for (final thread in archives)
+                        PopupMenuItem(
+                          value: thread,
+                          child: Text(thread.localizedTitle(l10n)),
+                        ),
+                    ],
+                  ),
                 if (widget.onSettings != null && bot != null)
                   TextButton.icon(
                     onPressed: widget.onSettings,
                     icon: const Icon(Icons.tune, size: 18),
-                    label: Text(Localizations.localeOf(context).languageCode == 'zh' ? 'Bot 设置' : 'Bot settings'),
+                    label: Text(
+                      Localizations.localeOf(context).languageCode == 'zh'
+                          ? 'Bot 设置'
+                          : 'Bot settings',
+                    ),
                   ),
               ],
             ),
@@ -234,9 +304,9 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
                       style: TextStyle(color: AppColors.textMuted),
                     ),
                   )
-                : session == null
+                : session == null || bot == null
                 ? const SizedBox.shrink()
-                : _history(context, session),
+                : _history(context, bot, session),
           ),
           if (session?.health.status == KernelHealthStatus.failed)
             TextButton.icon(
@@ -254,6 +324,7 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
                   draft: session.draft,
                   showSessionControls: false,
                   privatePromptText: desktopBotPromptText,
+                  preserveText: true,
                   canStop: () => _canStop(session),
                   canSubmit: () =>
                       identical(_session, session) &&
@@ -262,12 +333,20 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
                       session.health.status != KernelHealthStatus.failed &&
                       session.canSend,
                   onIntercept: (message) {
-                    // Like the phone, private bot chat has its own suggestion
-                    // policy and doesn't send ordinary chat's place notes.
-                    session.send(
-                      message,
-                      notes: widget.bots.suggestionNotes(bot, wanted: false),
-                    );
+                    final bots = widget.bots;
+                    final focus =
+                        message.images.isEmpty && message.mentions.isEmpty
+                        ? refineBotFocus(message.text)
+                        : null;
+                    if (focus != null && bots.memoryReview != null) {
+                      unawaited(_refine(bot, focus));
+                    } else {
+                      bots.sendPrivate(
+                        bot,
+                        message,
+                        notes: bots.suggestionNotes(bot, wanted: false),
+                      );
+                    }
                     if (_scroll.hasClients) _scroll.jumpTo(0);
                     return true;
                   },
@@ -279,24 +358,19 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
     );
   }
 
-  Widget _history(BuildContext context, ChatSession session) {
-    final messages = desktopBotMessages(
-      Iterable.generate(session.itemCount, session.itemAt),
-      hasEarlier: session.hasEarlierHistory,
+  Widget _history(BuildContext context, Bot bot, ChatSession session) {
+    final items = privateBotTimeline(
+      widget.bots,
+      bot,
+      session,
+      _archived,
+      includeRecallSources: true,
     );
-    final earlier = session.hasEarlierHistory;
-    if (messages.isEmpty &&
-        earlier &&
-        !session.loadingEarlier &&
-        !_triedEarlier) {
-      // A page can contain only group turns. Read one more automatically
-      // to find private messages, with the usual control for older pages.
-      _triedEarlier = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || !identical(session, _session)) return;
-        unawaited(session.loadEarlier());
-      });
-    }
+    final messages = desktopBotMessages(
+      items.map((entry) => entry.item),
+      hasEarlier: false,
+    );
+    final earlier = session.hasEarlierHistory || _loadingArchived;
     if (messages.isEmpty && !earlier) {
       return Center(
         child: Icon(Icons.chat_bubble_outline, color: AppColors.textFaint),
@@ -389,6 +463,21 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
                             : FontStyle.normal,
                       ),
                     ),
+                  if (message.recallSources case final recall?)
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        for (final sequence in recall.sequences)
+                          TextButton(
+                            onPressed: () => unawaited(
+                              _openRecallSource(recall.delivery, sequence),
+                            ),
+                            child: Text(
+                              _tr('Source #$sequence', '原话 #$sequence'),
+                            ),
+                          ),
+                      ],
+                    ),
                   for (final image in message.images)
                     Image.memory(
                       image.bytes,
@@ -396,6 +485,14 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
                       height: 180,
                       errorBuilder: (context, error, stackTrace) =>
                           const Icon(Icons.broken_image_outlined),
+                    ),
+                  if (message.queued)
+                    Text(
+                      context.l10n.queuedMessages(1),
+                      style: TextStyle(
+                        color: AppColors.textMuted,
+                        fontSize: 12,
+                      ),
                     ),
                   if (message.imageUrl case final url?)
                     TextButton.icon(
@@ -409,6 +506,64 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  String _tr(String en, String zh) =>
+      Localizations.localeOf(context).languageCode == 'zh' ? zh : en;
+
+  Future<void> _openRecallSource(String delivery, int sequence) async {
+    final bot = _bot;
+    if (bot == null) return;
+    final bots = widget.bots;
+    final window = await bots.openGroupRecallSource(bot, delivery, sequence);
+    if (!mounted || !identical(widget.bots, bots) || _bot?.id != bot.id) return;
+    final group = window?.anchor.reference.scope.groupId;
+    await showDialog<void>(
+      context: context,
+      builder: (dialog) => ListenableBuilder(
+        listenable: Listenable.merge([bots, bots.groups]),
+        builder: (context, _) {
+          final available =
+              window != null &&
+              bots.canOpenGroupRecallSource(bot, delivery, sequence);
+          return AlertDialog(
+            title: Text(
+              available
+                  ? '${bots.groups.byId(group!)!.name} · #$sequence'
+                  : _tr('Source message unavailable', '原话已不可用'),
+            ),
+            content: available
+                ? SizedBox(
+                    width: 560,
+                    child: SelectionArea(
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          for (final message in [
+                            ...window.before,
+                            window.anchor,
+                            ...window.after,
+                          ])
+                            ListTile(
+                              selected: identical(message, window.anchor),
+                              title: Text(message.text),
+                              subtitle: Text('#${message.sequence}'),
+                            ),
+                        ],
+                      ),
+                    ),
+                  )
+                : null,
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialog),
+                child: Text(MaterialLocalizations.of(dialog).closeButtonLabel),
+              ),
+            ],
+          );
+        },
       ),
     );
   }

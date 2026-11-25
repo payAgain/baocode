@@ -43,12 +43,16 @@ class _PeopleCatalog {
     }
     groupOptions = Set.unmodifiable(observedGroupOptions);
     botFlags = Set.unmodifiable(observedBotFlags);
+    botMemoryOptions = Set.unmodifiable(
+      _stringList(json['botMemoryOptions']) ?? const [],
+    );
   }
 
   final Map<String, Map<String, Object?>> botRows;
   final Map<String, Map<String, Object?>> groupRows;
   late final Set<String> groupOptions;
   late final Set<String> botFlags;
+  late final Set<String> botMemoryOptions;
 
   bool get hasBots => botRows.isNotEmpty;
   Iterable<Map<String, Object?>> get bots => botRows.values;

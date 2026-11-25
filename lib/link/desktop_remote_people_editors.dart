@@ -299,6 +299,20 @@ class _PeopleEditors {
             ),
         ],
         if (id != null) ...[
+          if (state._catalog?.botMemoryOptions.contains(
+                LinkMethods.botMemoryEntries,
+              ) ==
+              true)
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: OutlinedButton.icon(
+                onPressed: _busy
+                    ? null
+                    : () => state._openStructuredMemory(draft),
+                icon: const Icon(Icons.notes_outlined, size: 17),
+                label: Text(_tr('Memory and review', '记忆与审核')),
+              ),
+            ),
           Align(
             alignment: AlignmentDirectional.centerStart,
             child: OutlinedButton.icon(

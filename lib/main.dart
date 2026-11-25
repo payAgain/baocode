@@ -17,6 +17,9 @@ import 'package:bao_editor/monaco/flutter/language_assets.dart';
 import 'base/quiet_view.dart';
 import 'base/smooth_scroll.dart' show BaoScrollBehavior;
 import 'bash_exe/bao_bash.dart';
+import 'bots/bot.dart';
+import 'bots/bot_memory_review.dart';
+import 'bots/bot_memory_skill.dart';
 import 'bots/bots.dart';
 import 'browser/browser_bridge.dart';
 import 'browser/browser_tools.dart' show BrowserHistory;
@@ -54,7 +57,9 @@ import 'icons/emoji_sheet.dart';
 import 'icons/icon_library.dart';
 import 'icons/icon_storage.dart';
 import 'icons/site_icons.dart';
+import 'kernel/agent_kernel.dart' show KernelChoiceKind;
 import 'kernel/claude_code/claude_code_kernel.dart';
+import 'kernel/claude_code/claude_haiku.dart' show askClaudeHaiku;
 import 'kernel/claude_code/claude_core_setting.dart';
 import 'kernel/claude_code/claude_onboarding.dart';
 import 'kernel/claude_code/claude_path_setting.dart';
@@ -268,7 +273,176 @@ Future<void> main(List<String> arguments) async {
           chinese:
               (locale.locale ?? AppLocale.systemLocale()).languageCode == 'zh',
         );
-  unawaited(bots?.start());
+  if (bots != null) {
+    final directory = DataDirectory.current.botsDir;
+    final skills = BotMemorySkills(
+      store: PreferenceStore.file(p.join(directory, 'memory-skills.json')),
+      folders: bots.folders,
+      root: p.join(directory, 'memory-skills'),
+      resolveProject: (project) {
+        if (workspace.localProjectById(project) != null) return project;
+        final local = workspace.projects
+            .where((item) => item.path == project)
+            .firstOrNull;
+        return local == null ? null : workspace.localProjectId(local);
+      },
+      canUseProject: (id, project) =>
+          bots.byId(id)?.can(BotAbility.agents) == true &&
+          workspace.localProjectById(project) != null,
+      evidenceAvailable: (skill) =>
+          SessionTools.projectSkillEvidenceAvailable(workspace, skill),
+    );
+    final review = bots.memoryReview = BotMemoryReview(
+      store: PreferenceStore.file(p.join(directory, BotMemoryReview.fileName)),
+      scopeExists: bots.reviewScopeExists,
+      sourceGeneration: (scope) => scope.groupId == null
+          ? 0
+          : bots.groups.sourceGeneration(scope.groupId!),
+      readEvidence: bots.reviewEvidence,
+      readProjectEvidence: (scope, project, sessionId, source) =>
+          SessionTools.reviewProjectEvidence(
+            workspace,
+            scope,
+            project,
+            sessionId,
+            source,
+          ),
+      readMemory: (scope) =>
+          bots.userMemory(bots.byId(scope.botId)!, group: scope.groupId),
+      readProjectMemory: (scope, project) {
+        final access = bots.projectFactAccess(scope.botId, project);
+        return access == null ? null : bots.factMemory(access).memory;
+      },
+      applyProjectMemory:
+          (
+            scope,
+            project,
+            changes, {
+            required operationId,
+            required changeSources,
+          }) {
+            bots.applyReviewedProjectFacts(
+              scope.botId,
+              project,
+              changes,
+              operationId: operationId,
+              changeSources: changeSources,
+            );
+          },
+      applyMemory:
+          (
+            scope,
+            changes, {
+            required sessionId,
+            required messageId,
+            required operationId,
+            required changeSources,
+          }) {
+            final bot = bots.byId(scope.botId);
+            if (bot == null || !bots.reviewScopeExists(scope)) {
+              throw StateError('Review scope is unavailable');
+            }
+            bots.changeUserMemory(
+              bot,
+              changes,
+              group: scope.groupId,
+              session: sessionId,
+              sourceMessage: messageId,
+              operationId: operationId,
+              changeSources: changeSources,
+            );
+          },
+      foregroundBusy: () =>
+          bots.anyReviewForegroundBusy ||
+          workspace.threads.any(
+            (thread) => thread.status == ThreadStatus.running,
+          ),
+      ask: (request) async {
+        final bot = bots.byId(request.scope.botId);
+        if (bot == null) throw StateError('Review scope is unavailable');
+        final thread = bots.threadOf(bot, group: request.scope.groupId);
+        final model =
+            request.model ??
+            (thread?.isOpen == true
+                ? thread!.session.selected(KernelChoiceKind.model)
+                : null) ??
+            bot.model ??
+            workspace.newAgentModel;
+        if (model?.startsWith('@') == true &&
+            ModelProviders.current.resolve(model) == null) {
+          throw StateError('Review model is unavailable');
+        }
+        return askClaudeHaiku(
+          request.system,
+          request.prompt,
+          cancel: request.cancel,
+          model: model,
+          exact: true,
+          session: request.sessionId,
+          maxOutputTokens: request.maxOutputTokens,
+        );
+      },
+      skills: skills,
+    );
+    unawaited(
+      bots.start().then((_) async {
+        await workspace.restored;
+        SessionTools.memoryReviewFor = (cwd) {
+          final bot = bots.botAt(cwd);
+          return bot == null ||
+                  !bot.can(BotAbility.agents) ||
+                  bots.groupOfCwd(cwd) != null
+              ? null
+              : (scope: BotMemoryScope(botId: bot.id), review: review);
+        };
+        SessionTools.projectTaskBots = () => [
+          for (final bot in bots.bots)
+            if (bot.can(BotAbility.agents)) (id: bot.id, name: bot.name),
+        ];
+        Set<String> projectIds() => {
+          for (final project in workspace.projects)
+            ?workspace.localProjectId(project),
+        };
+        Map<String, String> sessionProjects() => {
+          for (final thread in workspace.threads)
+            if ((thread.id, workspace.localProjectId(thread.project)) case (
+              final id?,
+              final project?,
+            ))
+              id: project,
+        };
+        var projects = projectIds();
+        var sessions = sessionProjects();
+        workspace.addListener(() {
+          final current = projectIds();
+          final live = sessionProjects();
+          for (final path in projects.difference(current)) {
+            unawaited(review.invalidateProject(path).catchError((Object _) {}));
+          }
+          for (final MapEntry(key: id, value: project) in sessions.entries) {
+            if (current.contains(project) && live[id] != project) {
+              unawaited(
+                review
+                    .invalidateProject(project, sessionId: id)
+                    .catchError((Object _) {}),
+              );
+            }
+          }
+          projects = current;
+          sessions = live;
+        });
+        await SessionTools.recoverProjectTasks(
+          workspace,
+          store: PreferenceStore.file(
+            p.join(directory, 'memory-project-tasks.json'),
+          ),
+          review: review,
+          projectFacts: bots.projectFactPrompt,
+        ).catchError((Object _) {});
+        review.start();
+      }),
+    );
+  }
   // What a key's and a frame's work grows with, for their slow lines.
   FrameWatch.counts[workspace] = () =>
       '${workspace.threads.length} agents, '

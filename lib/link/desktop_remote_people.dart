@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../bots/desktop_bot_editor_ui.dart';
+import '../bots/desktop_bot_memory.dart';
 import '../chat/chat_models.dart' show ImageAttachment;
 import '../theme/app_theme.dart';
 import '../workspace/window_controls.dart';
@@ -309,6 +310,30 @@ class _DesktopRemotePeopleManagerState extends State<_BoundPeopleManager> {
       return data;
     }
     throw _PeopleProblem.unavailable;
+  }
+
+  Future<void> _openStructuredMemory(_PeopleDraft bot) async {
+    final peer = _peer;
+    final catalog = _catalog;
+    if (peer == null || catalog == null || bot.id == null || !_active(peer)) {
+      return;
+    }
+    await showDesktopBotMemory(
+      context,
+      botId: bot.id!,
+      name: bot.name,
+      groups: {
+        for (final group in catalog.groupRows.entries)
+          if (_stringList(group.value['members'])?.contains(bot.id) == true)
+            group.key: _text(group.value, 'name'),
+      },
+      methods: catalog.botMemoryOptions,
+      call: (method, args) async {
+        final result = await _call(peer, method, args);
+        if (result is! Map<String, Object?>) throw _PeopleProblem.unavailable;
+        return result;
+      },
+    );
   }
 
   Future<void> _openMemory(LinkPeer peer, _PeopleDraft bot) async {

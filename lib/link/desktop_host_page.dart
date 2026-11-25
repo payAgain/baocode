@@ -1520,6 +1520,11 @@ class _MessageBubble extends StatelessWidget {
             UserMessageBubble(text: message.text, textOnly: true)
           else
             MarkdownView(message.text, textOnly: true),
+          if (message.queued)
+            Text(
+              context.l10n.queuedMessages(1),
+              style: SettingsText.description,
+            ),
         ],
       ),
     ),

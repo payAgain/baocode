@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:bao_remote/client.dart' show SshServer;
 import 'package:flutter/foundation.dart';
@@ -328,6 +329,33 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
 
   List<Project> get projects => List.unmodifiable(_projects);
   final List<Project> _projects;
+  final _localProjectIds = <String, String>{};
+
+  bool _canIdentifyProject(Project project) =>
+      project.host == null && !isHidden(project) && _projects.contains(project);
+
+  /// Host identity for a registered local project. Explicit relocation keeps
+  /// the identity. An archived/detached workspace has no current identity.
+  String? localProjectId(Project project) {
+    if (!_canIdentifyProject(project)) return null;
+    return _localProjectIds.putIfAbsent(project.path, () {
+      final random = math.Random.secure();
+      final id = base64Url.encode(
+        List.generate(18, (_) => random.nextInt(256)),
+      );
+      // Keep the registration even when the project has no sessions yet.
+      if (!_folders.contains(project.path)) _folders.add(project.path);
+      // Serialize after putIfAbsent has published the ID.
+      scheduleMicrotask(() {
+        if (!_disposed) _save();
+      });
+      return id;
+    });
+  }
+
+  Project? localProjectById(String id) => _projects.where((project) {
+    return _localProjectIds[project.path] == id && _canIdentifyProject(project);
+  }).firstOrNull;
 
   List<AgentThread> get threads => List.unmodifiable(_threads);
   final List<AgentThread> _threads = [];
@@ -2208,6 +2236,7 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
   void deleteWorkspace(ProjectWorkspace workspace) {
     if (_workspaces.remove(workspace.path) == null) return;
     _folders.remove(workspace.path);
+    _localProjectIds.remove(workspace.path);
     _hiddenProjects[workspace.path] = DateTime.now();
     _save();
     notifyListeners();
@@ -2297,8 +2326,12 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
     String to,
     List<(KernelDescriptor, SessionRecord)> kept,
   ) {
-    _rekey(from, to);
     final listed = _projects.where((p) => p.path == to).firstOrNull;
+    // A move to a fresh registration carries the source identity. A merge
+    // into an existing project retains only that destination's identity.
+    final movingId = _localProjectIds.remove(from);
+    if (listed == null && movingId != null) _localProjectIds[to] = movingId;
+    _rekey(from, to);
     final project = listed ?? _projectNamed(to);
     final at = _projects.indexWhere((p) => p.path == from);
     if (listed != null) {
@@ -2539,7 +2572,10 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
     // Not one in the temporary folder: listed only for being kept here
     // (see [isHidden]).
     _folders.removeWhere(
-      (path) => listed.contains(path) && !inTempFolder(path),
+      (path) =>
+          listed.contains(path) &&
+          !inTempFolder(path) &&
+          !_localProjectIds.containsKey(path),
     );
     final paths = {for (final project in _projects) project.path};
     bool gone(String group) =>
@@ -2554,6 +2590,7 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
       _order.length,
       _projectIcons.length,
       _projectNames.length,
+      _localProjectIds.length,
       _addedFolders.length,
       for (final order in _order.values) order.length,
     ]);
@@ -2568,6 +2605,7 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
       (path, _) => !paths.contains(path) && !path.startsWith(_hostIcon),
     );
     _projectNames.removeWhere((path, _) => !paths.contains(path));
+    _localProjectIds.removeWhere((path, _) => !paths.contains(path));
     _addedFolders.removeWhere((path, _) => !paths.contains(path));
     for (final order in _order.values) {
       order.retainWhere(titles.containsKey);
@@ -2882,6 +2920,13 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
       _sshHosts.addAll(list('sshHosts'));
       _hostNames.addAll(strings(sidebar['hostNames']));
       _projectNames.addAll(strings(sidebar['projectNames']));
+      final projectId = RegExp(r'^[A-Za-z0-9_-]{24}$');
+      for (final entry in strings(sidebar['localProjectIds']).entries) {
+        if (projectId.hasMatch(entry.value) &&
+            !_localProjectIds.containsValue(entry.value)) {
+          _localProjectIds.putIfAbsent(entry.key, () => entry.value);
+        }
+      }
       if (sidebar['sshServers'] case final Map<Object?, Object?> servers) {
         for (final MapEntry(:key, :value) in servers.entries) {
           final server = SshServer.fromJson(value);
@@ -3038,6 +3083,8 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
         'sshHosts': [..._sshHosts],
         'hostNames': {..._hostNames},
         'projectNames': {..._projectNames},
+        if (_localProjectIds.isNotEmpty)
+          'localProjectIds': {..._localProjectIds},
         'sshServers': {
           for (final MapEntry(:key, :value) in _sshServers.entries)
             key: value.toJson(),

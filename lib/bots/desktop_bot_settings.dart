@@ -3,8 +3,11 @@ import 'package:flutter/material.dart';
 import '../l10n/l10n.dart';
 import '../theme/app_theme.dart';
 import 'bot.dart';
+import 'bot_memory_provider_settings.dart';
 import 'bots.dart';
 import 'desktop_bot_editor_ui.dart';
+import 'desktop_bot_memory.dart';
+import 'desktop_bot_memory_migration.dart';
 
 /// Creates or edits a bot in the same store used by the phone.
 class DesktopBotSettings extends StatefulWidget {
@@ -378,6 +381,45 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
                   ),
                 ],
               ),
+              if (bot != null)
+                BotEditorSection(
+                  title: label('Memory', '记忆'),
+                  children: [
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: OutlinedButton.icon(
+                        onPressed: () =>
+                            showLocalBotMemory(context, widget.bots, bot),
+                        icon: const Icon(Icons.notes_outlined),
+                        label: Text(label('Memory and review', '记忆与审核')),
+                      ),
+                    ),
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: OutlinedButton.icon(
+                        onPressed: () => showBotMemoryProviderSettings(
+                          context,
+                          widget.bots,
+                          bot,
+                        ),
+                        icon: const Icon(Icons.cloud_outlined),
+                        label: Text(label('External memory', '外部记忆')),
+                      ),
+                    ),
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: OutlinedButton.icon(
+                        onPressed: () => showDesktopBotMemoryMigration(
+                          context,
+                          widget.bots,
+                          bot,
+                        ),
+                        icon: const Icon(Icons.restore_outlined),
+                        label: Text(label('Legacy memory', '旧版记忆')),
+                      ),
+                    ),
+                  ],
+                ),
               if (_initial?.assistant == false)
                 BotEditorSection(
                   title: label('Destructive actions', '危险操作'),

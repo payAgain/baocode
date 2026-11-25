@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:bao_agent/bao_agent.dart' show AgentPaths;
 import 'package:bao_link/bao_link.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 
@@ -11,6 +13,7 @@ import '../bots/bot.dart';
 import '../bots/bot_group_prompt.dart' show BotGroup;
 import '../bots/bot_groups.dart';
 import '../bots/bots.dart';
+import '../bots/desktop_bot_messages.dart';
 import '../chat/chat_models.dart';
 import '../chat/chat_session.dart';
 import '../chat/composer/composer_files.dart' show fileReferenceText;
@@ -18,6 +21,9 @@ import '../chat/composer/composer_images.dart' show compactImage;
 import '../chat/composer/paste_store.dart';
 import '../chat/composer/remote_drops.dart';
 import '../chat/panels/context_usage_panel.dart' show ContextUsagePanel;
+import '../chat/review/review_store_stub.dart'
+    if (dart.library.io) '../chat/review/review_store_io.dart'
+    show realPathOf;
 import '../chat/rewind_files_setting.dart';
 import '../customize/customization_store.dart';
 import '../customize/customizations.dart';
@@ -29,6 +35,7 @@ import '../remote/project_host.dart';
 import '../remote/ssh_host.dart';
 import '../workspace/session_tools.dart';
 import '../workspace/workspace.dart';
+import 'bot_memory_management.dart';
 import 'chat_codec.dart';
 import 'interaction_codec.dart';
 import 'link_quota.dart';
@@ -124,6 +131,23 @@ class WorkspaceBridge {
 
   /// The user's bots; none told without.
   final Bots? bots;
+  late final BotMemoryManagement? _memory = bots == null
+      ? null
+      : BotMemoryManagement(
+          bots!,
+          reviewer: 'link:${peer.remote}',
+          isActive: () => !_disposed && !peer.isClosed,
+        );
+
+  Future<Map<String, Object?>> _refineMemory(
+    Bot bot,
+    String? group,
+    String focus,
+  ) => _memory!.call(LinkMethods.refineBotMemory, {
+    'bot': bot.id,
+    'group': ?group,
+    'focus': focus,
+  });
 
   /// The conversations' quota; none told without.
   final LinkQuota? quota;
@@ -139,6 +163,8 @@ class WorkspaceBridge {
   static const maxSessions = 300;
 
   final Map<String, _Follow> _follows = {};
+  final Map<String, _ArchivedPrivateFollow> _archivedFollows = {};
+  final Set<String> _retiredWindows = {};
 
   /// The groups the phone has open, each the last of its messages sent.
   final Map<String, int> _groupsOpen = {};
@@ -168,6 +194,8 @@ class WorkspaceBridge {
       follow.dispose();
     }
     _follows.clear();
+    _archivedFollows.clear();
+    _retiredWindows.clear();
     for (final watch in _watches.values) {
       watch.dispose();
     }
@@ -215,11 +243,37 @@ class WorkspaceBridge {
   /// A conversation's id ([SessionTools.idOf]: its session's, kept across
   /// runs) as the phones know it ([idOf]): a new agent's, given here, until
   /// the run ends.
-  String _phoneSession(String id) =>
-      switch (SessionTools.threadOf(workspace, id)) {
-        final thread? => idOf(thread),
-        null => id,
-      };
+  String _phoneSession(String id) {
+    final thread = SessionTools.threadOf(workspace, id);
+    if (thread == null) return id;
+    return _publicThread(thread) ? idOf(thread) : '';
+  }
+
+  bool _publicThread(AgentThread thread) => bots?.isBotThread(thread) != true;
+
+  String? _cardSession(String id) {
+    final thread = SessionTools.threadOf(workspace, id);
+    return thread != null &&
+            _publicThread(thread) &&
+            !thread.archived &&
+            workspace.listsInSidebar(thread)
+        ? idOf(thread)
+        : null;
+  }
+
+  Bot? _privateBot(Object? id) =>
+      id is String ? bots?.privateBotForSession(id) : null;
+
+  String _wireId(AgentThread thread) {
+    if (bots case final bots?) {
+      for (final bot in bots.bots) {
+        if (identical(bots.threadOf(bot), thread)) {
+          return bots.privateSessionId(bot);
+        }
+      }
+    }
+    return idOf(thread);
+  }
 
   /// The index of [thread]'s user message that [params] names by its
   /// `index` (counted from the phone's first item, as its updates are).
@@ -231,7 +285,18 @@ class WorkspaceBridge {
         'This agent cannot go back',
       );
     }
-    final follow = _follows[idOf(thread)];
+    final follow = _follows[_wireId(thread)];
+    if (!_publicThread(thread)) {
+      final index = identical(follow?.session, session)
+          ? follow?.privateMessageAt(params['index'], params['expectedWindow'])
+          : null;
+      if (index == null ||
+          session.isStreaming ||
+          session.pendingInteraction != null) {
+        throw const LinkRemoteException('stale', 'The conversation changed');
+      }
+      return index;
+    }
     final from = follow?.from ?? 0;
     if (params.containsKey('expectedWindow') &&
         (follow == null ||
@@ -256,10 +321,30 @@ class WorkspaceBridge {
   AgentThread _thread(Object? id) {
     if (id is String) {
       for (final thread in workspace.threads) {
-        if (idOf(thread) == id) return thread;
+        if (_publicThread(thread) && idOf(thread) == id) return thread;
       }
     }
-    throw LinkRemoteException(LinkErrors.notFound, 'No agent $id');
+    throw const LinkRemoteException(LinkErrors.notFound, 'No conversation');
+  }
+
+  static const _stalePrivate = LinkRemoteException(
+    'stale',
+    'The private chat changed',
+  );
+
+  void _checkPrivateWindow(Bot bot, Object? alias) {
+    if (alias != null && alias != _bots().privateSessionId(bot)) {
+      throw _stalePrivate;
+    }
+  }
+
+  /// The active DM alias is accepted only by chat-facing operations.
+  AgentThread _chatThread(Object? id) {
+    if (_privateBot(id) case final bot?) return _bots().threadFor(bot);
+    if (id is String && bots?.isStalePrivateSession(id) == true) {
+      throw _stalePrivate;
+    }
+    return _thread(id);
   }
 
   /// The project [id] (its path), one of those the phone is told of: no
@@ -267,7 +352,9 @@ class WorkspaceBridge {
   Project _project(Object? id) {
     if (id is String) {
       for (final project in workspace.sidebarProjects) {
-        if (project.path == id) return project;
+        if (project.path == id && bots?.isBotPath(project.path) != true) {
+          return project;
+        }
       }
     }
     throw LinkRemoteException(LinkErrors.notFound, 'No project $id');
@@ -285,14 +372,49 @@ class WorkspaceBridge {
   ProjectFiles _filesOf(Project project) =>
       _files[project.path] ??= filesOf(project);
 
+  bool _privatePath(String full) {
+    final bots = this.bots;
+    if (bots == null) return false;
+    final path = p.normalize(full);
+    if (bots.isBotPath(path)) return true;
+    for (final thread in workspace.threads) {
+      if (!_publicThread(thread) &&
+          thread.record?.path != null &&
+          p.equals(thread.record!.path!, path)) {
+        return true;
+      }
+    }
+    final root = bots.folders.root;
+    if (root == null) return false;
+    final encoded = AgentPaths.projectDirName(root);
+    final components = p.split(path);
+    for (var i = 1; i < components.length; i++) {
+      if (components[i - 1] == 'projects' &&
+          (components[i] == encoded || components[i].startsWith('$encoded-'))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<bool> _visiblePath(Project project, String full) async {
+    if (project.host != null || bots == null) return true;
+    if (_privatePath(full)) return false;
+    final resolved = await realPathOf(full);
+    return resolved == null || !_privatePath(resolved);
+  }
+
   // --- State ----------------------------------------------------------------
 
   LinkState state() {
-    final projects = workspace.sidebarProjects;
+    final projects = workspace.sidebarProjects.where(
+      (project) => bots?.isBotPath(project.path) != true,
+    );
     final listed = projects.toSet();
     final threads = [
       for (final thread in workspace.threads)
-        if (!thread.archived &&
+        if (_publicThread(thread) &&
+            !thread.archived &&
             listed.contains(thread.project) &&
             workspace.listsInSidebar(thread))
           thread,
@@ -349,6 +471,7 @@ class WorkspaceBridge {
       groupOptions: bots == null
           ? const []
           : const ['passes', 'rules', 'gap', 'lead'],
+      botMemoryOptions: _memory?.methods ?? const [],
     );
   }
 
@@ -421,10 +544,9 @@ class WorkspaceBridge {
   }
 
   LinkBot _linkBot(Bots bots, Bot bot) {
-    final thread = bots.threadOf(bot);
-    final session = thread == null ? null : idOf(thread);
+    final session = bots.privateSessionId(bot);
     // Read as it comes, while the phone follows it.
-    if (session != null && _follows.containsKey(session)) bots.seen(bot);
+    if (_follows.containsKey(session)) bots.seen(bot);
     return LinkBot(
       id: bot.id,
       name: bot.name,
@@ -478,28 +600,221 @@ class WorkspaceBridge {
   /// Follows anew the agents whose conversation was opened again (see
   /// [Workspace.reload]): the phone sent all of it, as when it opened it.
   void _refollow() {
+    for (final id in _retiredWindows.toList()) {
+      if (bots?.archivedPrivateSession(id) != null) continue;
+      _retiredWindows.remove(id);
+      _archivedFollows.remove(id);
+      _clearPrivateWindow(id);
+    }
     for (final MapEntry(key: id, value: follow) in [..._follows.entries]) {
+      if (follow.privateView != null) {
+        final bot = _privateBot(id);
+        if (bot == null) {
+          _follows.remove(id)?.dispose();
+          if (bots?.archivedPrivateSession(id) == null) {
+            _clearPrivateWindow(id);
+          } else {
+            _retiredWindows.add(id);
+          }
+          continue;
+        }
+        final thread = _bots().threadOf(bot);
+        if (thread == null || !thread.isOpen) continue;
+        if (identical(follow.session, thread.session)) {
+          follow._changed(); // Includes deliveries from a group worker.
+        } else {
+          unawaited(_rebindPrivate(id, bot, follow));
+        }
+        continue;
+      }
       final AgentThread thread;
       try {
         thread = _thread(id);
       } on LinkRemoteException {
+        _follows.remove(id)?.dispose();
         continue;
       }
-      if (!thread.isOpen || identical(thread.session, follow.session)) {
-        continue;
-      }
+      if (!thread.isOpen || identical(thread.session, follow.session)) continue;
       follow.dispose();
       final fresh = _follows[id] = follow.over(thread.session);
       peer.emit(LinkEvents.session, fresh.start());
     }
   }
 
+  void _clearPrivateWindow(String id) => peer.emit(
+    LinkEvents.session,
+    LinkSessionSlimmer().encode(
+      LinkSessionUpdate(session: id, start: 0, count: 0, items: const []),
+      full: true,
+    ),
+  );
+
+  final _rebinding = <String>{};
+
+  Future<void> _rebindPrivate(String id, Bot bot, _Follow previous) async {
+    if (!_rebinding.add(id)) return;
+    previous.dispose();
+    try {
+      final fresh = await _privateFollow(id, bot, previous.window);
+      if (_disposed ||
+          !identical(_follows[id], previous) ||
+          _privateBot(id)?.id != bot.id ||
+          !identical(_bots().threadOf(bot)?.session, fresh.session)) {
+        return;
+      }
+      _follows[id] = fresh;
+      peer.emit(LinkEvents.session, fresh.start());
+    } on LinkRemoteException {
+      // The chat was removed or replaced while its history was loading.
+    } finally {
+      _rebinding.remove(id);
+    }
+  }
+
+  Future<_Follow> _privateFollow(String id, Bot bot, int? window) async {
+    final bots = _bots();
+    final thread = bots.threadFor(bot);
+    final session = thread.session;
+    if (bots.privateHistory(bot).isNotEmpty) await loadBotChatHistory(session);
+    final history = await loadPrivateBotHistory(
+      bots,
+      bot,
+      cardSession: _cardSession,
+    );
+    if (_disposed ||
+        _privateBot(id)?.id != bot.id ||
+        !identical(bots.threadOf(bot), thread) ||
+        !identical(thread.session, session)) {
+      throw const LinkRemoteException('stale', 'The private chat changed');
+    }
+    return _Follow(
+      id: id,
+      session: session,
+      peer: peer,
+      throttle: throttle,
+      window: window,
+      pathOf: (_) => null,
+      sessionOf: _phoneSession,
+      quota: quota,
+      privateView: _PrivateView(bots, bot, session, history, _cardSession),
+    );
+  }
+
+  Future<Map<String, Object?>> _openArchive(
+    String id,
+    Bot bot,
+    AgentThread thread,
+    int? window,
+  ) async {
+    final session = thread.session;
+    await loadBotChatHistory(session);
+    if (_disposed ||
+        !identical(bots?.archivedPrivateSession(id)?.thread, thread)) {
+      throw _stalePrivate;
+    }
+    final items = [
+      for (final entry in privateBotItems(
+        session,
+        legacy: _bots().isLegacyPrivateThread(bot, thread),
+        cardSession: _cardSession,
+      ))
+        ChatCodec.encode(entry.item, session: _phoneSession),
+    ];
+    _retiredWindows.add(id);
+    final follow = _archivedFollows[id] = _ArchivedPrivateFollow(items, window);
+    return LinkSessionSlimmer().encode(
+      LinkSessionUpdate(
+        session: id,
+        start: 0,
+        count: items.length - follow.from,
+        items: items.sublist(follow.from),
+        earlier: window == null ? null : follow.from > 0,
+      ),
+      full: true,
+    );
+  }
+
   // --- Requests -------------------------------------------------------------
 
-  /// The phones' messages taken, by phone and message id, with what they
-  /// were answered: for the last [_takenKept], whatever the connection.
-  static final Map<String, Future<Object?>> _taken = {};
+  /// Requests without a durable store use a bounded process-local cache.
+  static final _taken =
+      <String, ({String fingerprint, Future<Object?> reply})>{};
   static const _takenKept = 200;
+
+  static Object? _orderedJson(Object? value) => switch (value) {
+    Map<String, Object?> map => {
+      for (final key in map.keys.toList()..sort()) key: _orderedJson(map[key]),
+    },
+    List values => [for (final value in values) _orderedJson(value)],
+    _ => value,
+  };
+
+  static String _requestDigest(Object? json) =>
+      sha256.convert(utf8.encode(jsonEncode(_orderedJson(json)))).toString();
+
+  ({String key, String fingerprint})? _requestId(
+    String method,
+    Map<String, Object?> params,
+  ) {
+    final id = params['id'];
+    if (id is! String || id.isEmpty) return null;
+    return (
+      key: _requestDigest([peer.remote, method, id]),
+      fingerprint: _requestDigest({
+        for (final MapEntry(:key, :value) in params.entries)
+          if (key != 'id') key: value,
+      }),
+    );
+  }
+
+  static const _requestConflict = LinkRemoteException(
+    'conflict',
+    'That request ID was used for a different message or conversation',
+  );
+
+  Map<String, Object?>? _privateReplay(
+    ({String key, String fingerprint}) request,
+  ) {
+    if (bots?.isDeletedPrivateRequest(request.key) == true) throw _stalePrivate;
+    final receipt = bots?.privateLinkReceipt(request.key);
+    if (receipt == null) return null;
+    if (!receipt.valid) throw _stalePrivate;
+    if (receipt.fingerprint != request.fingerprint) throw _requestConflict;
+    return {'session': receipt.alias};
+  }
+
+  Future<Object?> _take(
+    ({String key, String fingerprint})? request,
+    Future<Object?> Function() send, {
+    Map<String, Object?>? Function()? replay,
+  }) async {
+    if (request == null) return send();
+    if (replay?.call() case final receipt?) return receipt;
+    final (:key, :fingerprint) = request;
+    if (_taken[key] case final taken?) {
+      if (taken.fingerprint != fingerprint) throw _requestConflict;
+      final reply = await taken.reply;
+      if (reply case {'session': final String alias}
+          when bots?.isStalePrivateSession(alias) == true &&
+              bots?.archivedPrivateSession(alias) == null) {
+        throw _stalePrivate;
+      }
+      return reply;
+    }
+    final taking = _taken[key] = (fingerprint: fingerprint, reply: send());
+    if (_taken.length > _takenKept) _taken.remove(_taken.keys.first);
+    try {
+      final reply = await taking.reply;
+      if (replay?.call() != null &&
+          identical(_taken[key]?.reply, taking.reply)) {
+        _taken.remove(key);
+      }
+      return reply;
+    } on Object {
+      if (identical(_taken[key]?.reply, taking.reply)) _taken.remove(key);
+      rethrow;
+    }
+  }
 
   /// Where the user writes to [thread] from, as its agent is told: the
   /// phone; for a bot, nothing (its prompt has it so already).
@@ -507,22 +822,53 @@ class WorkspaceBridge {
       bots?.botAt(thread.project.path) == null ? UserPlace.phone : null;
 
   /// Sends [params]' message ([LinkMethods.send]).
-  Future<Object?> _send(Map<String, Object?> params) async {
+  Future<Object?> _send(
+    Map<String, Object?> params,
+    ({String key, String fingerprint})? request,
+  ) async {
     final text = (params['text'] as String? ?? '').trim();
-    if (text.isEmpty && _images(params['images']).isEmpty) return null;
     final images = await _compacted(params['images']);
     final AgentThread thread;
     var notes = const <String>[];
-    if (params['bot'] case final Object id) {
-      // Its conversation, whichever it is now: the last run's, once
-      // listed, not another started.
-      if (workspace.loading) await workspace.loaded;
-      final bot = _bot(id);
-      thread = _bots().threadFor(bot);
-      // What the user might say next, as the phone's switch has it.
-      notes = _bots().suggestionNotes(bot, wanted: params['suggest'] == true);
+    if (bots != null && workspace.loading) await workspace.loaded;
+    if (request != null) {
+      if (_privateReplay(request) case final receipt?) return receipt;
+    }
+    final bot = switch (params['bot']) {
+      final Object id => _bot(id),
+      null => _privateBot(params['session']),
+    };
+    if (bot != null) {
+      final bots = _bots();
+      final requested = params['session'];
+      final contextual =
+          params['now'] == true ||
+          params['duringTurn'] == true ||
+          params['expectedTurn'] != null ||
+          params['expectedWindow'] != null ||
+          params['ref'] != null;
+      if ((requested != null || contextual) &&
+          requested != bots.privateSessionId(bot)) {
+        throw _stalePrivate;
+      }
+      if (text.isEmpty && images.isEmpty) return null;
+      thread = bots.threadFor(bot);
+      if (images.isEmpty && !contextual) {
+        if (refineBotFocus(text) case final focus?) {
+          final alias = bots.privateSessionId(bot);
+          await _refineMemory(bot, null, focus);
+          return {'session': alias};
+        }
+      }
+      notes = bots.suggestionNotes(bot, wanted: params['suggest'] == true);
     } else if (params['session'] case final Object id) {
+      if (id is String && bots?.isStalePrivateSession(id) == true) {
+        throw _stalePrivate;
+      }
+      if (text.isEmpty && images.isEmpty) return null;
       thread = _thread(id);
+    } else if (text.isEmpty && images.isEmpty) {
+      return null;
     } else if (params['project'] case final String path) {
       thread = workspace.startAgent(_project(path));
     } else {
@@ -532,95 +878,130 @@ class WorkspaceBridge {
       );
     }
     final session = thread.session;
-    if (params['duringTurn'] == true &&
-        (!session.isStreaming ||
-            !session.canQueue ||
-            session.pendingInteraction != null ||
-            (params['now'] == true &&
-                (params['expectedTurn'] == null ||
-                    params['expectedTurn'] != _turnToken(session))))) {
+    final inTurn = params['duringTurn'] == true;
+    final now = params['now'] == true;
+    final expectedTurn = params['expectedTurn'];
+    if ((inTurn &&
+            (!session.isStreaming ||
+                !session.canQueue ||
+                session.pendingInteraction != null)) ||
+        ((inTurn || bot != null) && now && expectedTurn == null) ||
+        (expectedTurn != null && expectedTurn != _turnToken(session))) {
       throw const LinkRemoteException('stale', 'The running turn changed');
     }
     if (!session.canSend) {
       throw const LinkRemoteException('busy', 'The agent is at work');
     }
-    session.send(
-      _message(thread, params, images),
-      now: params['now'] == true,
-      from: _from(thread),
-      notes: notes,
-    );
-    return {'session': idOf(thread)};
+    final message = _message(thread, params, images);
+    if (bot != null) {
+      try {
+        _bots().sendPrivate(
+          bot,
+          message,
+          now: now,
+          notes: notes,
+          commandText: params['text'] as String?,
+          linkRequest: now ? null : request,
+        );
+      } on StateError catch (error) {
+        throw LinkRemoteException('stale', error.message);
+      }
+    } else {
+      session.send(message, now: params['now'] == true, from: _from(thread));
+    }
+    return {'session': _wireId(thread)};
   }
 
   Future<Object?> handle(String method, Map<String, Object?> params) async {
+    if (bots != null && workspace.loading) await workspace.loaded;
     switch (method) {
       case LinkMethods.state:
         final json = state().toJson();
         _stateSent = jsonEncode(json);
         return json;
       case LinkMethods.open:
-        final thread = _thread(params['session']);
-        final id = idOf(thread);
-        if (bots?.botAt(thread.project.path) case final bot?) {
-          bots!.seen(bot);
+        final requested = params['session'];
+        final bot = _privateBot(requested);
+        final window = switch (params['window']) {
+          final int count => math.max(0, count),
+          _ => null,
+        };
+        final _Follow follow;
+        final hadFollow = _follows.containsKey(requested);
+        if (bot != null) {
+          follow = await _privateFollow(requested as String, bot, window);
+          if (_disposed ||
+              _privateBot(requested)?.id != bot.id ||
+              !identical(_bots().threadOf(bot)?.session, follow.session)) {
+            throw _stalePrivate;
+          }
+          _bots().seen(bot);
+        } else if ((requested is String
+                ? bots?.archivedPrivateSession(requested)
+                : null)
+            case (:final bot, :final thread)) {
+          return _openArchive(requested as String, bot, thread, window);
+        } else {
+          final thread = _thread(requested);
+          follow = _Follow(
+            id: idOf(thread),
+            session: thread.session,
+            peer: peer,
+            throttle: throttle,
+            window: window,
+            pathOf: (full) => _phonePath(thread.project, full),
+            sessionOf: _phoneSession,
+            quota: quota,
+          );
         }
-        _follows.remove(id)?.dispose();
-        final follow = _follows[id] = _Follow(
-          id: id,
-          session: thread.session,
-          peer: peer,
-          throttle: throttle,
-          window: params['window'] as int?,
-          pathOf: (full) => _phonePath(thread.project, full),
-          sessionOf: _phoneSession,
-          quota: quota,
-        );
+        _follows.remove(follow.id)?.dispose();
+        _follows[follow.id] = follow;
         return follow.start(
           have: [
             for (final digest in (params['have'] as List?) ?? const [])
-              if (digest is String) digest,
+              if ((bot == null || hadFollow) && digest is String) digest,
           ],
         );
       case LinkMethods.earlier:
-        final follow = _follows[params['session']];
+        final id = params['session'];
+        if (id is String && _archivedFollows[id] != null) {
+          if (bots?.archivedPrivateSession(id) == null) throw _stalePrivate;
+          return _archivedFollows[id]!.earlier(params['count'] as int? ?? 50);
+        }
+        final follow = _follows[id];
         if (follow == null) {
           throw LinkRemoteException(
             LinkErrors.notFound,
             'No agent ${params['session']} followed',
           );
         }
-        return follow.earlier(params['count'] as int? ?? 50);
+        final page = await follow.earlier(params['count'] as int? ?? 50);
+        if (follow.privateView != null &&
+            (follow._disposed || !identical(_follows[id], follow))) {
+          throw _stalePrivate;
+        }
+        return page;
       case LinkMethods.quota:
-        final thread = _thread(params['session']);
+        final thread = _chatThread(params['session']);
         await quota?.refresh(thread.session);
         return null;
       case LinkMethods.close:
         if (params['session'] case final String id) {
           _follows.remove(id)?.dispose();
+          _archivedFollows.remove(id);
+          _retiredWindows.remove(id);
         }
         return null;
       case LinkMethods.send:
-        // Sent again (its answer lost on the way, the connection dropped):
-        // answered as it was, not taken twice.
-        final key = switch (params['id']) {
-          final String id => '${peer.remote}/$id',
-          _ => null,
-        };
-        if (key == null) return _send(params);
-        if (_taken[key] case final taken?) return taken;
-        final taking = _taken[key] = _send(params);
-        if (_taken.length > _takenKept) _taken.remove(_taken.keys.first);
-        try {
-          return await taking;
-        } on Object {
-          // Not taken (the agent busy…): it may be sent again.
-          _taken.remove(key);
-          rethrow;
-        }
+        final request = _requestId(method, params);
+        return _take(
+          request,
+          () => _send(params, request),
+          replay: request == null ? null : () => _privateReplay(request),
+        );
       case LinkMethods.edit:
-        final thread = _thread(params['session']);
         final images = await _compacted(params['images']);
+        final thread = _chatThread(params['session']);
         final index = _messageAt(thread, params);
         final message = _message(thread, params, images);
         if (message.isEmpty) return null;
@@ -643,7 +1024,21 @@ class WorkspaceBridge {
           'setting': RewindFilesSetting.current().name,
         };
       case LinkMethods.stop:
-        _thread(params['session']).session.stop();
+        final session = _chatThread(params['session']).session;
+        if (params.containsKey('expectedTurn') &&
+            params['expectedTurn'] != _turnToken(session)) {
+          throw const LinkRemoteException('stale', 'The running turn changed');
+        }
+        session.stop();
+        return null;
+      case LinkMethods.cancelQueued:
+        final bot = _privateBot(params['session']);
+        final id = params['queueId'];
+        if (bot == null ||
+            id is! String ||
+            !_bots().cancelPendingPrivate(bot, id)) {
+          throw _stalePrivate;
+        }
         return null;
       case LinkMethods.answer:
         final session = _thread(params['session']).session;
@@ -680,10 +1075,10 @@ class WorkspaceBridge {
         session.startPlan(workspace.l10n().planStartMessage);
         return null;
       case LinkMethods.choose:
-        final thread = _thread(params['session']);
+        final thread = _chatThread(params['session']);
         final kind = params['kind'] as String? ?? '';
         final option = params['option'] as String? ?? '';
-        final bot = bots?.botAt(thread.project.path);
+        final bot = _privateBot(params['session']);
         // A bot's agent asks nothing and works as one: only its model,
         // and how it thinks, are the user's to pick.
         if (bot != null && (kind == 'mode' || kind == 'permission')) {
@@ -837,7 +1232,9 @@ class WorkspaceBridge {
         _bots().delete(bot.id);
         return null;
       case LinkMethods.clearBotChat:
-        _bots().clearChat(_bot(params['bot']));
+        final bot = _bot(params['bot']);
+        _checkPrivateWindow(bot, params['session']);
+        _bots().clearChat(bot);
         return null;
       case LinkMethods.botMemory:
         final bot = _bot(params['bot']);
@@ -852,6 +1249,31 @@ class WorkspaceBridge {
           restart: true,
         );
         return null;
+      case LinkMethods.botMemoryEntries:
+      case LinkMethods.botMemoryFactScopes:
+      case LinkMethods.changeBotMemory:
+      case LinkMethods.botMemorySearch:
+      case LinkMethods.botMemorySource:
+      case LinkMethods.botMemoryReview:
+      case LinkMethods.configureBotMemoryReview:
+      case LinkMethods.refineBotMemory:
+      case LinkMethods.decideBotMemory:
+      case LinkMethods.botMemorySkills:
+      case LinkMethods.botMemorySkillRevisions:
+      case LinkMethods.maintainBotMemorySkill:
+      case LinkMethods.newBotConversation:
+      case LinkMethods.refreshBotMemory:
+        final memory = _memory;
+        if (memory == null) {
+          throw const LinkRemoteException(LinkErrors.unsupported, 'No bots');
+        }
+        if ((method == LinkMethods.newBotConversation ||
+                method == LinkMethods.refreshBotMemory) &&
+            params['group'] == null &&
+            params['session'] != null) {
+          _checkPrivateWindow(_bot(params['bot']), params['session']);
+        }
+        return memory.call(method, params);
       case LinkMethods.saveGroup:
         final members = [
           for (final member in (params['members'] as List?) ?? const [])
@@ -898,40 +1320,40 @@ class WorkspaceBridge {
         _groupsOpen.remove(params['group']);
         return null;
       case LinkMethods.sendGroup:
-        final group = _group(params['group']);
+        final target = params['group'];
         final text = (params['text'] as String? ?? '').trim();
         final images = _images(params['images']);
-        if (text.isEmpty && images.isEmpty) return null;
-        final key = switch (params['id']) {
-          final String id => '${peer.remote}/group/$id',
-          _ => null,
-        };
-        if (key != null) {
-          if (_taken[key] case final taken?) return taken;
+        final request = _requestId(method, params);
+        Map<String, Object?>? replay() {
+          if (request == null) return null;
+          final groups = _groups();
+          if (groups.isDeletedLinkRequest(request.key)) {
+            throw const LinkRemoteException('stale', 'The group was deleted');
+          }
+          final receipt = groups.linkSendReceipt(request.key);
+          if (receipt == null) return null;
+          if (receipt.group != target ||
+              receipt.fingerprint != request.fingerprint) {
+            throw _requestConflict;
+          }
+          return {'seq': receipt.seq};
         }
-        // Kept before its pictures are made smaller: one sent again
-        // meanwhile is answered as it, not taken twice.
-        final answer = () async {
+        return _take(request, () async {
+          final group = _group(target);
+          if (text.isEmpty && images.isEmpty) return null;
           final compacted = await Future.wait(images.map(compactImage));
-          return <String, Object?>{
+          if (replay() case final receipt?) return receipt;
+          _group(group.id);
+          return {
             'seq': _groups().send(
               group.id,
               text: text,
               images: compacted,
               ref: (params['ref'] as num?)?.toInt(),
+              linkRequest: request,
             ),
           };
-        }();
-        if (key == null) return answer;
-        _taken[key] = answer;
-        if (_taken.length > _takenKept) _taken.remove(_taken.keys.first);
-        try {
-          return await answer;
-        } on Object {
-          // Not taken: it may be sent again.
-          _taken.remove(key);
-          rethrow;
-        }
+        }, replay: replay);
       case LinkMethods.groupImage:
         final image = _groups().image(
           _group(params['group']).id,
@@ -1049,6 +1471,7 @@ class WorkspaceBridge {
       throw LinkRemoteException('bad', 'Not a picture: $path');
     }
     for (final full in candidates) {
+      if (!await _visiblePath(project, full)) continue;
       final Uint8List bytes;
       try {
         bytes = await readBytesThrough(files, full);
@@ -1069,6 +1492,7 @@ class WorkspaceBridge {
     await _reach(project);
     final (:files, paths: _) = _filesOf(project);
     for (final full in _candidates(project, path)) {
+      if (!await _visiblePath(project, full)) continue;
       final Uint8List bytes;
       try {
         bytes = await readBytesThrough(files, full);
@@ -1180,8 +1604,10 @@ class WorkspaceBridge {
   /// The changes not kept yet of [project]'s agents open, by path.
   Map<String, FileChange> _changesIn(Project project) => {
     for (final thread in workspace.threads)
-      if (thread.project == project && thread.isOpen)
-        for (final change in thread.session.fileChanges) change.path: change,
+      if (_publicThread(thread) && thread.project == project && thread.isOpen)
+        for (final change in thread.session.fileChanges)
+          if (project.host != null || !_privatePath(change.path))
+            change.path: change,
   };
 
   /// Where the file the phone names [path] in [project] may be, the likeliest
@@ -1288,7 +1714,9 @@ class WorkspaceBridge {
       }
       for (final path in listing.paths) {
         final relative = paths.relative(path, from: root).replaceAll(r'\', '/');
-        listed.add(name.isEmpty ? relative : '$name/$relative');
+        if (project.host != null || !_privatePath(path)) {
+          listed.add(name.isEmpty ? relative : '$name/$relative');
+        }
       }
       truncated |= listing.truncated;
     }
@@ -1319,7 +1747,7 @@ class WorkspaceBridge {
         ? roots.first.$2
         : roots.where((r) => r.$1 == path).firstOrNull?.$2 ??
               _fullPath(project, path);
-    if (full == null) {
+    if (full == null || !await _visiblePath(project, full)) {
       throw LinkRemoteException(LinkErrors.notFound, 'No folder $path');
     }
     final List<IdeFile> entries;
@@ -1328,13 +1756,19 @@ class WorkspaceBridge {
     } on Object {
       throw LinkRemoteException(LinkErrors.notFound, 'No folder $path');
     }
+    final visible = [
+      for (final entry in entries)
+        if (project.host != null ||
+            !_privatePath(_filesOf(project).paths.join(full, entry.name)))
+          entry,
+    ];
     return {
       'folders': [
-        for (final entry in entries)
+        for (final entry in visible)
           if (entry.isDirectory) entry.name,
       ],
       'files': [
-        for (final entry in entries)
+        for (final entry in visible)
           if (!entry.isDirectory) entry.name,
       ],
     };
@@ -1346,6 +1780,7 @@ class WorkspaceBridge {
     String? full;
     String? text;
     for (final candidate in _candidates(project, path)) {
+      if (!await _visiblePath(project, candidate)) continue;
       try {
         text = await files.read(candidate);
         full = candidate;
@@ -1367,7 +1802,11 @@ class WorkspaceBridge {
     }
     String? original;
     for (final thread in workspace.threads) {
-      if (thread.project != project || !thread.isOpen) continue;
+      if (!_publicThread(thread) ||
+          thread.project != project ||
+          !thread.isOpen) {
+        continue;
+      }
       final session = thread.session;
       final change = session.fileChanges
           .where((c) => paths.equals(c.path, file))
@@ -1670,6 +2109,46 @@ class WorkspaceBridge {
   }
 }
 
+class _ArchivedPrivateFollow {
+  _ArchivedPrivateFollow(this.items, this.window)
+    : from = window == null ? 0 : math.max(0, items.length - window);
+
+  final List<Map<String, Object?>> items;
+  final int? window;
+  int from;
+
+  Map<String, Object?> earlier(int count) {
+    if (window == null) {
+      throw const LinkRemoteException('bad', 'Not opened with a window');
+    }
+    final start = math.max<int>(0, from - math.max<int>(0, count));
+    final page = items.sublist(start, from);
+    from = start;
+    return {'items': page, 'earlier': from > 0};
+  }
+}
+
+/// The private timeline joins immutable archived turns, the current worker's
+/// visible items, and explicit private deliveries made by a group worker.
+class _PrivateView {
+  _PrivateView(
+    this.bots,
+    this.bot,
+    this.session,
+    this.history,
+    this.cardSession,
+  );
+
+  final Bots bots;
+  final Bot bot;
+  final ChatSession session;
+  final List<ChatItem> history;
+  final String? Function(String id) cardSession;
+
+  List<({ChatItem item, int? index})> get entries =>
+      privateBotTimeline(bots, bot, session, history, cardSession: cardSession);
+}
+
 /// An agent a phone follows: everything at first, then what changed, at
 /// most every [throttle].
 class _Follow {
@@ -1682,12 +2161,34 @@ class _Follow {
     required this.sessionOf,
     this.window,
     this.quota,
+    this.privateView,
   });
 
   final String id;
   final ChatSession session;
   final LinkPeer peer;
   final Duration throttle;
+  final _PrivateView? privateView;
+
+  List<ChatItem> _items() => switch (privateView) {
+    final view? => [for (final entry in view.entries) entry.item],
+    null => List.generate(session.itemCount, session.itemAt),
+  };
+
+  int? privateMessageAt(Object? index, Object? digest) {
+    if (index is! int || index < 0 || digest is! String) return null;
+    _syncFrom();
+    final entries = privateView!.entries;
+    final at = _from + index;
+    if (at >= entries.length ||
+        linkDigest([
+              for (final entry in entries.skip(_from)) _encode(entry.item),
+            ]) !=
+            digest) {
+      return null;
+    }
+    return entries[at].index;
+  }
 
   /// The same following, of [session] (its conversation read anew).
   _Follow over(ChatSession session) => _Follow(
@@ -1715,8 +2216,17 @@ class _Follow {
   /// Its quota, told as it changes.
   final LinkQuota? quota;
 
-  Map<String, Object?> _encode(ChatItem item) =>
-      ChatCodec.encode(item, session: sessionOf);
+  Map<String, Object?> _encode(ChatItem item) {
+    final encoded = ChatCodec.encode(item, session: sessionOf);
+    if (privateView case final view?
+        when item is UserMessageItem && item.queued) {
+      encoded['privateQueued'] = true;
+      if (view.bots.pendingPrivateId(view.bot, item) case final id?) {
+        encoded['queueId'] = id;
+      }
+    }
+    return encoded;
+  }
 
   /// The session's index of the phone's first item: 0 unless it has a
   /// [window].
@@ -1756,8 +2266,9 @@ class _Follow {
   /// those that are still as it has them left out.
   Map<String, Object?> start({List<String> have = const []}) {
     _prependedSeen = session.prependedCount;
+    final items = _items();
     if (window case final window?) {
-      _from = math.max(0, session.itemCount - window);
+      _from = math.max(0, items.length - window);
     }
     session
       ..attach()
@@ -1767,9 +2278,10 @@ class _Follow {
       // Not known, or old: nothing on the desktop may be asking now.
       unawaited(quota.refresh(session, force: false).catchError((_) {}));
     }
-    if (_had(have) case (:final from, :final same)) {
+    if (_had(have, items) case (:final from, :final same)
+        when privateView == null || same == have.length) {
       _from = from;
-      _sent = [for (var i = from; i < from + same; i++) session.itemAt(i)];
+      _sent = items.sublist(from, from + same);
       _sentJson = [for (final item in _sent) jsonEncode(_encode(item))];
       _restSent = null;
       if (_update() case final update?) {
@@ -1782,15 +2294,14 @@ class _Follow {
   /// Where the phone's first item ([have]'s) is in the session, and how
   /// many from there are as it has them: the most; null where none is
   /// (or the phone has nothing).
-  ({int from, int same})? _had(List<String> have) {
+  ({int from, int same})? _had(List<String> have, List<ChatItem> items) {
     if (have.isEmpty) return null;
-    final total = session.itemCount;
+    final total = items.length;
     // Looked for among the last items: as many as the phone has and as
     // came since, and a window more.
     final lowest = math.max(0, total - have.length - (window ?? 0) - 200);
     final digests = <int, String>{};
-    String digestAt(int i) =>
-        digests[i] ??= linkDigest(_encode(session.itemAt(i)));
+    String digestAt(int i) => digests[i] ??= linkDigest(_encode(items[i]));
     ({int from, int same})? best;
     for (var from = total - 1; from >= lowest; from--) {
       if (digestAt(from) != have.first) continue;
@@ -1828,14 +2339,15 @@ class _Follow {
   /// nothing did.
   LinkSessionUpdate? _update({bool full = false}) {
     _syncFrom();
-    final total = session.itemCount;
+    final all = _items();
+    final total = all.length;
     if (total < _from) {
       // Rewound to before the window.
       _from = total;
       full = true;
     }
     final count = total - _from;
-    final items = [for (var i = _from; i < total; i++) session.itemAt(i)];
+    final items = all.sublist(_from);
     final encoded = List<Map<String, Object?>?>.filled(count, null);
     var start = 0;
     if (!full) {
@@ -1849,23 +2361,28 @@ class _Follow {
         start++;
       }
     }
+    final private = privateView != null;
     final interaction = switch (session.pendingInteraction) {
-      final request? => InteractionCodec.encode(request),
-      null => null,
+      final request? when !private => InteractionCodec.encode(request),
+      _ => null,
     };
     final choices = _choices();
-    final changes = [for (final change in session.fileChanges) _change(change)];
-    final tasks = _tasks();
+    final changes = [
+      if (!private)
+        for (final change in session.fileChanges) _change(change),
+    ];
+    final tasks = private ? const <LinkTask>[] : _tasks();
     final earlier = window == null
         ? null
         : _from > 0 || session.hasEarlierHistory || session.loadingEarlier;
-    final goal = _goal(session.goal);
-    final context = _context(session.context);
+    final goal = private ? null : _goal(session.goal);
+    final context = private ? null : _context(session.context);
     final quota = this.quota?.of(session);
     final actions = {
       'queue': session.canQueue,
+      if (private) 'cancelQueued': true,
       'edit': session.canEditMessages,
-      'startPlan': session.canStartPlan,
+      'startPlan': !private && session.canStartPlan,
       'turn': ?_turnToken(session),
     };
     final restText = jsonEncode([
@@ -1957,7 +2474,20 @@ class _Follow {
   void _syncFrom() {
     final moved = session.prependedCount - _prependedSeen;
     _prependedSeen = session.prependedCount;
-    if (window != null) _from += moved;
+    if (window != null) {
+      if (privateView case final view?) {
+        if (moved > 0 && _from >= view.history.length) {
+          _from += privateBotItems(
+            session,
+            active: true,
+            beforeIndex: moved,
+            cardSession: view.cardSession,
+          ).length;
+        }
+      } else {
+        _from += moved;
+      }
+    }
   }
 
   /// Up to [count] items before the phone's first, oldest first, read from
@@ -1972,8 +2502,10 @@ class _Follow {
     // No await from here on: no update comes between taking the items and
     // telling of them.
     _syncFrom();
+    final all = _items();
+    _from = math.min(_from, all.length);
     final n = math.min(math.max(count, 0), _from);
-    final items = [for (var i = _from - n; i < _from; i++) session.itemAt(i)];
+    final items = all.sublist(_from - n, _from);
     final json = [for (final item in items) _encode(item)];
     _sent = [...items, ..._sent];
     _sentJson = [for (final item in json) jsonEncode(item), ..._sentJson];

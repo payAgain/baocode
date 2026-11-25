@@ -5439,7 +5439,18 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
     // the side panel at the left, before it, the side panel's nearest the
     // edge, over its rail.
     final atStart = !embedded && _sidePanel.atLeft;
+    final taskBots = !embedded && cardTools
+        ? SessionTools.projectTaskBotsFor(thread)
+        : const <({String id, String name})>[];
     final own = [
+      if (taskBots.isNotEmpty)
+        IconButton(
+          icon: const Icon(Icons.playlist_add, size: 18),
+          tooltip: Localizations.localeOf(context).languageCode == 'zh'
+              ? '发起 Bot 记忆项目任务'
+              : 'Start project task with Bot memory',
+          onPressed: () => unawaited(_sendProjectTask(thread, taskBots)),
+        ),
       if (cardTools) ...[
         // Only once it was talked in elsewhere: nothing new to read before.
         if (_reloadable(thread))
@@ -5636,6 +5647,90 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   /// read here, and can be read anew now (see [Workspace.reload]).
   bool _reloadable(AgentThread thread) =>
       thread.goneOnElsewhere && _workspace.canReload(thread);
+
+  Future<void> _sendProjectTask(
+    AgentThread thread,
+    List<({String id, String name})> bots,
+  ) async {
+    final chinese = Localizations.localeOf(context).languageCode == 'zh';
+    String? botId;
+    var text = '';
+    final task = await showDialog<({String bot, String text})>(
+      context: context,
+      builder: (dialog) => StatefulBuilder(
+        builder: (context, update) => AlertDialog(
+          title: Text(
+            chinese ? '发起 Bot 记忆项目任务' : 'Start project task with Bot memory',
+          ),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 440),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                DropdownButtonFormField<String>(
+                  decoration: const InputDecoration(labelText: 'Bot'),
+                  items: [
+                    for (final bot in bots)
+                      DropdownMenuItem(value: bot.id, child: Text(bot.name)),
+                  ],
+                  onChanged: (id) => update(() => botId = id),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  autofocus: true,
+                  minLines: 3,
+                  maxLines: 7,
+                  decoration: InputDecoration(
+                    labelText: chinese ? '项目任务' : 'Project task',
+                  ),
+                  onChanged: (value) => update(() => text = value),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialog).pop(),
+              child: Text(chinese ? '取消' : 'Cancel'),
+            ),
+            FilledButton(
+              onPressed: botId == null || text.trim().isEmpty
+                  ? null
+                  : () => Navigator.of(dialog).pop((bot: botId!, text: text)),
+              child: Text(chinese ? '发起任务' : 'Start task'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (task == null || !mounted) return;
+    try {
+      if (!SessionTools.projectTaskBotsFor(thread)
+          .any((bot) => bot.id == task.bot)) {
+        throw StateError('Project task is unavailable');
+      }
+      final target = _workspace.startAgent(thread.project);
+      await SessionTools.sendProjectTask(target, task.bot, task.text);
+      if (mounted) _workspace.select(target);
+    } on Object {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (dialog) => AlertDialog(
+          content: Text(
+            chinese ? '项目任务未发送。请检查 Bot 权限和会话状态。' : 'The task could not be sent. Check the Bot’s project access and the conversation’s status.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialog).pop(),
+              child: Text(chinese ? '确定' : 'OK'),
+            ),
+          ],
+        ),
+      );
+    }
+  }
 
   Widget _reloadButton(AgentThread thread) => SidebarIconButton(
     icon: Codicons.refresh,

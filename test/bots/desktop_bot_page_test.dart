@@ -42,12 +42,82 @@ const _main = Bot(
   folder: '/bots/assistant',
   assistant: true,
 );
+const _mainRuntime = '/bots/runtime/assistant/private';
+const _otherRuntime = '/bots/runtime/other/private';
 const _threadId = 'kept-main-bot';
 const _projectId = 'kept-project-chat';
 const _other = Bot(id: 'other', name: 'Tao', folder: '/bots/other');
 const _otherThreadId = 'kept-other-bot';
 
 void main() {
+  testWidgets('opens only retained source hits from a group recall reply', (
+    tester,
+  ) async {
+    final fixture = _Fixture(
+      Future.value([]),
+      (_) async => ClaudeHistoryPage([]),
+    );
+    addTearDown(fixture.dispose);
+    final load = fixture.workspace.load();
+    final bots = fixture.bots;
+    await bots.start();
+    await load;
+    final bot = bots.byId(_main.id)!;
+    final room = bots.groups.save(name: 'Planning', members: [bot.id]);
+    bots.groups.say(room.id, bot.id, 'Earlier context');
+    final hit = bots.groups.say(room.id, bot.id, 'Red tea was chosen');
+    bots.groups.say(room.id, bot.id, 'Later context');
+    await tester.pumpWidget(fixture.page());
+    await tester.pumpAndSettle();
+
+    await tester.runAsync(() async {
+      final replied = Completer<void>();
+      void changed() {
+        if (!replied.isCompleted && bots.privateDeliveries(bot).isNotEmpty) {
+          replied.complete();
+        }
+      }
+
+      bots.addListener(changed);
+      try {
+        bots.sendPrivate(
+          bot,
+          const ComposerMessage(text: '/recall-group "Planning" Red tea'),
+        );
+        await replied.future.timeout(const Duration(seconds: 5));
+      } finally {
+        bots.removeListener(changed);
+      }
+    });
+    await tester.pumpAndSettle();
+    final delivery = bots.privateDeliveries(bot).single;
+    final source = find.widgetWithText(TextButton, 'Source #${hit.seq}');
+    expect(source, findsOneWidget);
+    expect(delivery.item.input.containsKey('recallHits'), isFalse);
+    expect(
+      await bots.openGroupRecallSource(bot, delivery.id, hit.seq - 1),
+      isNull,
+    );
+
+    await tester.tap(source);
+    await tester.pumpAndSettle();
+    expect(find.text('Planning · #${hit.seq}'), findsOneWidget);
+    expect(find.text('Red tea was chosen'), findsOneWidget);
+    expect(find.text('Earlier context'), findsOneWidget);
+    expect(find.text('Later context'), findsOneWidget);
+
+    await tester.runAsync(
+      () => bots.groups
+          .deleteOriginal(room.id, hit.seq)
+          .timeout(const Duration(seconds: 5)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Source message unavailable'), findsOneWidget);
+    expect(find.text('Red tea was chosen'), findsNothing);
+    expect(await bots.openGroupRecallSource(bot, delivery.id, hit.seq), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('hub restores and opens the exact recent conversations', (
     tester,
   ) async {
@@ -60,7 +130,9 @@ void main() {
     final at = DateTime(2026, 2, 3, 14, 15);
     final groupAt = at.add(const Duration(hours: 1));
     final pages = <String?>[];
-    final fixture = _Fixture(Future.value([_kept().first]), (before) async {
+    final fixture = _Fixture(Future.value([_kept(legacy: true).first]), (
+      before,
+    ) async {
       pages.add(before);
       return before == null
           ? ClaudeHistoryPage([
@@ -117,7 +189,8 @@ void main() {
     expect(find.text('internal tool plan'), findsNothing);
     expect(pages, [null, 'head']);
     expect(fixture.cli, isEmpty);
-    expect(fixture.bots.threadOf(_main)?.id, _threadId);
+    expect(fixture.bots.privateSessionId(_main), _threadId);
+    expect(fixture.bots.threadOf(_main)?.record, isNull);
 
     final material = MaterialLocalizations.of(tester.element(find.text('Mia')));
     String time(DateTime date) =>
@@ -153,7 +226,7 @@ void main() {
     expect(find.text('saved phone question'), findsOneWidget);
     expect(find.text('saved phone answer'), findsOneWidget);
     expect(find.text('saved group answer'), findsNothing);
-    expect(fixture.cli.keys, [_main.folder]);
+    expect(fixture.cli.keys, [_mainRuntime]);
     await tester.tap(find.byTooltip('Back'));
     await tester.pumpAndSettle();
     await tester.tap(find.text(newBot.name));
@@ -213,12 +286,12 @@ void main() {
         'bot': _main.id,
         'text': 'new phone question',
       }),
-      {'session': _threadId},
+      {'session': fixture.bots.privateSessionId(_main)},
     );
     await tester.pumpAndSettle();
     expect(find.text('new phone question'), findsOneWidget);
     expect(badge(privateRow), findsNothing);
-    fixture.cli[_main.folder]!.push(
+    fixture.cli[_mainRuntime]!.push(
       _assistant('live', 'raw tool plan <bot_say>new private reply</bot_say>'),
     );
     await tester.pumpAndSettle();
@@ -309,7 +382,7 @@ void main() {
       }
     }))!;
     final requested = <String?>[];
-    final fixture = _Fixture(Future.value(_kept()), (before) async {
+    final fixture = _Fixture(Future.value(_kept(legacy: true)), (before) async {
       requested.add(before);
       return pages[before]!;
     });
@@ -333,7 +406,7 @@ void main() {
     final id = state.bots.single.session;
     expect(id, _threadId);
     final opened = LinkSessionUpdate.fromJson(
-      (await phone.call(LinkMethods.open, {'session': id, 'window': 2}))!
+      (await phone.call(LinkMethods.open, {'session': id, 'window': 1}))!
           as Map<String, Object?>,
     );
     expect(opened.earlier, isTrue);
@@ -346,7 +419,7 @@ void main() {
       'older phone question',
     );
     expect(
-      (ChatCodec.decode(earlier[1]) as AssistantTextItem).text,
+      (ChatCodec.decode(opened.items.single) as AssistantTextItem).text,
       '<bot_say>older phone reply</bot_say>',
     );
     expect(history['earlier'], isFalse);
@@ -363,13 +436,13 @@ void main() {
       Future.value([
         ..._kept(),
         ProjectRecord(
-          path: _other.folder,
+          path: _otherRuntime,
           sessions: [
             SessionRecord(
               id: _otherThreadId,
               title: 'Second bot conversation',
               updatedAt: DateTime(2026),
-              cwd: _other.folder,
+              cwd: _otherRuntime,
             ),
           ],
         ),
@@ -434,7 +507,7 @@ void main() {
     await tester.pumpWidget(fixture.page());
     expect(find.text('Mia'), findsOneWidget);
     expect(
-      fixture.workspace.threads.where((t) => t.project.path == _main.folder),
+      fixture.workspace.threads.where((t) => t.project.path == _mainRuntime),
       isEmpty,
     );
     expect(find.byType(ChatComposer), findsNothing);
@@ -451,7 +524,7 @@ void main() {
     await tester.tap(_send);
     await tester.pump();
     expect(_editor(tester).controller.text, 'hello from desktop');
-    expect(fixture.cli[_main.folder]?.users ?? [], isEmpty);
+    expect(fixture.cli[_mainRuntime]?.users ?? [], isEmpty);
     expect(find.text('Loading conversation…'), findsOneWidget);
 
     history.complete(
@@ -480,7 +553,10 @@ void main() {
     expect(_editor(tester).controller.text, 'hello from desktop');
     final events = <LinkEvent>[];
     final subscription = phone.events.listen(events.add);
-    await phone.call(LinkMethods.open, {'session': _threadId, 'window': 50});
+    await phone.call(LinkMethods.open, {
+      'session': fixture.bots.privateSessionId(_main),
+      'window': 50,
+    });
     await tester.pump();
     events.clear();
 
@@ -493,14 +569,14 @@ void main() {
     );
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump();
-    expect(fixture.cli[_main.folder]!.users, isEmpty);
+    expect(fixture.cli[_mainRuntime]!.users, isEmpty);
     await _type(tester, 'hello from desktop');
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump(const Duration(milliseconds: 20));
     await tester.pump();
     expect(_editor(tester).controller.text, isEmpty);
     expect(
-      jsonEncode(fixture.cli[_main.folder]!.users.single),
+      jsonEncode(fixture.cli[_mainRuntime]!.users.single),
       contains(BotSuggestions.off),
     );
     final raw = [
@@ -531,22 +607,22 @@ void main() {
         'bot': _main.id,
         'text': 'hello from phone',
       }),
-      {'session': _threadId},
+      {'session': fixture.bots.privateSessionId(_main)},
     );
     await tester.pump();
     expect(find.text('hello from phone'), findsOneWidget);
     expect(fixture.bots.threadOf(_main), same(original));
     expect(
-      fixture.workspace.threads.where((t) => t.project.path == _main.folder),
+      fixture.workspace.threads.where((t) => t.project.path == _mainRuntime),
       [original],
     );
 
-    fixture.cli[_main.folder]!.push(
+    fixture.cli[_mainRuntime]!.push(
       _assistant('live', 'internal text <bot_say>local stream'),
     );
     await tester.pump();
     expect(find.text('local stream'), findsNothing);
-    fixture.cli[_main.folder]!.push(
+    fixture.cli[_mainRuntime]!.push(
       _assistant('live', 'internal text <bot_say>local stream reply</bot_say>'),
     );
     await tester.pump();
@@ -563,7 +639,9 @@ void main() {
     'loads earlier private history, opens project cards and keeps draft on return',
     (tester) async {
       final history = <String?>[];
-      final fixture = _Fixture(Future.value(_kept()), (before) async {
+      final fixture = _Fixture(Future.value(_kept(legacy: true)), (
+        before,
+      ) async {
         history.add(before);
         return before == null
             ? ClaudeHistoryPage([
@@ -599,8 +677,7 @@ void main() {
       expect(find.textContaining(_threadId), findsNothing);
       await tester.tap(find.text('Project conversation'));
       expect(fixture.opened, [_projectId]);
-      await tester.tap(find.text('Load earlier messages'));
-      await tester.pump();
+      // Retained legacy pages are hydrated before the merged view is shown.
       expect(history, [null, 'private']);
       expect(find.text('older private message'), findsOneWidget);
       expect(find.textContaining('group response'), findsNothing);
@@ -688,7 +765,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(session.draft.content, isEmpty);
     expect(session.draft.images, isEmpty);
-    final wire = jsonEncode(fixture.cli[_main.folder]!.users.single);
+    final wire = jsonEncode(fixture.cli[_mainRuntime]!.users.single);
     expect(wire, contains('notes.md'));
     expect(wire, contains('private pasted attachment bytes'));
     expect(wire, contains(base64Encode(png)));
@@ -707,12 +784,12 @@ void main() {
 
     final open = LinkSessionUpdate.fromJson(
       (await phone.call(LinkMethods.open, {
-            'session': _threadId,
+            'session': fixture.bots.privateSessionId(_main),
             'window': 50,
           }))!
           as Map<String, Object?>,
     );
-    expect(open.session, _threadId);
+    expect(open.session, fixture.bots.privateSessionId(_main));
     final delivered = open.items
         .map(ChatCodec.decode)
         .whereType<UserMessageItem>()
@@ -756,7 +833,7 @@ void main() {
     expect(session.health.status, KernelHealthStatus.ready);
     await tester.tap(_send);
     await tester.pumpAndSettle();
-    expect(fixture.cli[_main.folder]!.users, hasLength(1));
+    expect(fixture.cli[_mainRuntime]!.users, hasLength(1));
     expect(find.text('keep this draft'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
     fixture.dispose();
@@ -773,8 +850,6 @@ void main() {
           'private question <bao-event>embedded note</bao-event>',
         ),
         _assistant('private-answer', '<bot_say>private response</bot_say>'),
-        _user('group', '<bao-event>[group g] hidden question</bao-event>'),
-        _assistant('group-answer', '<bot_say>hidden response</bot_say>'),
       ]),
       mainBot: _main.copyWith(chatOnly: true),
     );
@@ -788,7 +863,7 @@ void main() {
     final session = fixture.bots.threadOf(_main)!.session;
     final launch = fixture.launches.single;
     expect(launch.ownPrompt, isTrue);
-    expect(launch.tools, ['WebSearch', 'WebFetch', 'Read']);
+    expect(launch.tools, isEmpty);
     expect(launch.userServers, isFalse);
     expect(session.selected(KernelChoiceKind.mode), 'agent');
     expect(session.selected(KernelChoiceKind.permission), 'bypassPermissions');
@@ -822,14 +897,18 @@ void main() {
     await tester.pumpWidget(fixture.page());
     await tester.pumpAndSettle();
     final session = fixture.bots.threadOf(_main)!.session;
-    final cli = fixture.cli[_main.folder]!;
-    session.send(
-      const ComposerMessage(
-        text: '<bao-event>[group g] group input</bao-event>',
-      ),
+    final cli = fixture.cli[_mainRuntime]!;
+    final group = fixture.bots.groups.save(
+      name: 'Queue room',
+      members: [_main.id],
     );
-    await tester.pumpAndSettle();
-    expect(session.isStreaming, isTrue);
+    fixture.bots.groups.send(group.id, text: 'group input');
+    await tester.pump();
+    final groupSession = fixture.bots.threadOf(_main, group: group.id)!.session;
+    final groupCli =
+        fixture.cli[fixture.bots.runtimeFolder(_main, group: group.id)]!;
+    expect(groupSession.isStreaming, isTrue);
+    expect(session.isStreaming, isFalse);
     expect(find.byKey(const ValueKey('stop')), findsNothing);
 
     await _type(tester, 'first line');
@@ -839,22 +918,23 @@ void main() {
     expect(_editor(tester).controller.text, 'first line\n');
     await _type(tester, 'first line\nsecond line');
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pumpAndSettle();
-    expect(session.isStreaming, isTrue);
-    Iterable<UserMessageItem> queued() => Iterable.generate(
-      session.itemCount,
-      session.itemAt,
-    ).whereType<UserMessageItem>().where((item) => item.queued);
-    expect(queued().single.text, 'first line\nsecond line');
+    await tester.pump();
+    expect(groupSession.isStreaming, isTrue);
+    expect(session.isStreaming, isFalse);
     expect(_editor(tester).controller.text, isEmpty);
-    expect(cli.users.last['priority'], 'next');
+    expect(cli.users, isEmpty);
+    expect(find.textContaining('second line'), findsOneWidget);
 
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pumpAndSettle();
-    expect(cli.requests('interrupt'), isEmpty);
+    await tester.pump();
+    expect(groupCli.requests('interrupt'), isEmpty);
+    expect(groupCli.users, hasLength(1));
+    groupCli.push({'type': 'result', 'subtype': 'success', 'is_error': false});
+    await tester.pump();
+    expect(groupSession.isStreaming, isFalse);
     expect(session.isStreaming, isTrue);
-    expect(cli.users, hasLength(2));
-    expect(queued().single.text, 'first line\nsecond line');
+    expect(cli.users, hasLength(1));
+    expect(jsonEncode(cli.users.single), contains(r'first line\nsecond line'));
     expect(find.textContaining('group input'), findsNothing);
     await tester.pumpWidget(const SizedBox());
     fixture.dispose();
@@ -1005,15 +1085,15 @@ class _Catalog(this.listing) implements SessionCatalog {
   Future<void> delete(String id) async {}
 }
 
-List<ProjectRecord> _kept() => [
+List<ProjectRecord> _kept({bool legacy = false}) => [
   ProjectRecord(
-    path: _main.folder,
+    path: legacy ? _main.folder : _mainRuntime,
     sessions: [
       SessionRecord(
         id: _threadId,
         title: 'Bot conversation',
         updatedAt: DateTime(2026),
-        cwd: _main.folder,
+        cwd: legacy ? _main.folder : _mainRuntime,
       ),
     ],
   ),
