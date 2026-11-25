@@ -68,6 +68,7 @@ import 'file_open.dart';
 import 'file_preview.dart';
 import 'git_changes.dart';
 import 'side_panel_controller.dart';
+import 'side_panel_section_bar.dart';
 import '../../theme/svg_icons.dart';
 import '../../remote/remote_location.dart';
 import '../../remote/ports_view.dart';
@@ -684,7 +685,7 @@ class AgentSidePanelView extends StatelessWidget {
         color: AppColors.code,
         // The Git log its own cards.
         card: tabs.shown != SidePanelSection.changes || _git == null,
-        tabs: _SectionBar(
+        tabs: _LocalSectionBar(
           panel: panel,
           session: session,
           tabs: tabs,
@@ -1600,11 +1601,9 @@ class SidePanelRail extends StatelessWidget {
   );
 }
 
-/// The pages' bar, a strip of the editor's tabs: each page's icon and
-/// name (the icon alone where the panel is narrow), with a count of what
-/// is in it; then showing the lists and hiding the panel.
-class _SectionBar extends StatelessWidget {
-  const _SectionBar({
+/// Adapts the local conversation's sections and actions to the shared bar.
+class _LocalSectionBar extends StatelessWidget {
+  const _LocalSectionBar({
     required this.panel,
     required this.session,
     required this.tabs,
@@ -1627,14 +1626,8 @@ class _SectionBar extends StatelessWidget {
   /// See [AgentSidePanelView.leading].
   final Widget? leading;
 
-  /// What [leading] takes, with its gap.
-  static const _leadingWidth = 22.0 + 6;
-
   /// How many files Git has changed.
   final int changes;
-
-  /// Moving the panel and the close button, at the right.
-  static const _actionsWidth = 2 * 22.0 + 2 + 6;
 
   /// The pages there: the usage's once a call of the conversation is kept,
   /// the plan's once there is one.
@@ -1647,51 +1640,6 @@ class _SectionBar extends StatelessWidget {
     if (_portsHost(session) != null) SidePanelSection.ports,
   ];
 
-  /// What the tabs of [sections] take with their names (see
-  /// [_SectionTab]), with [counts] by page: more than that, they show only
-  /// their icons.
-  static double _fullWidth(
-    BuildContext context,
-    List<SidePanelSection> sections,
-    Map<SidePanelSection, int> counts,
-  ) {
-    final inherited = DefaultTextStyle.of(context).style;
-    final scaler = MediaQuery.textScalerOf(context);
-    double measure(String text, TextStyle style) {
-      final painter = TextPainter(
-        text: TextSpan(text: text, style: inherited.merge(style)),
-        maxLines: 1,
-        textDirection: TextDirection.ltr,
-        textScaler: scaler,
-      )..layout();
-      final width = painter.width;
-      painter.dispose();
-      return width;
-    }
-
-    var width = 0.0;
-    for (final section in sections) {
-      // Its padding, icon, label and the room to the next (see
-      // [_SectionTab]).
-      width +=
-          2 * _SectionTab.padding +
-          _SectionTab.iconSize +
-          _SectionTab.gap +
-          measure(section.label(context), _SectionTab.labelStyle) +
-          _SectionTab.spacing;
-      final count = counts[section] ?? 0;
-      if (count > 0) {
-        width +=
-            _SectionTab.gap +
-            math.max(
-              16,
-              2 * 4 + measure(IdeTitleBadge.text(count), IdeTitleBadge.style),
-            );
-      }
-    }
-    return width;
-  }
-
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
@@ -1703,168 +1651,59 @@ class _SectionBar extends StatelessWidget {
     // there does what one on the system's title bar does.
     return TitleBarDoubleClick(
       windowTitleBar: windowTitleBar,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final sections = _sections;
-          final shown = tabs.shown;
-          final compact =
-              constraints.maxWidth <
-              _fullWidth(context, sections, {
-                    SidePanelSection.changes: changes,
-                    SidePanelSection.terminal: running,
-                  }) +
-                  _actionsWidth +
-                  inset +
-                  (leading == null ? 0 : _leadingWidth);
-          return Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SizedBox(width: inset),
-              if (leading case final leading?) ...[
-                Center(child: leading),
-                const SizedBox(width: 6),
-              ],
-              // Flush with the card's edge, unless something is before.
-              if (inset > 0 || leading != null)
-                const SizedBox(width: IslandTab.lead),
-              for (final (i, section) in sections.indexed) ...[
-                if (i > 0)
-                  IslandTabSeparator(
-                    shown: shown != section && shown != sections[i - 1],
-                    width: _SectionTab.spacing,
-                  ),
-                _SectionTab(
-                  section: section,
-                  atStart: i == 0 && inset == 0 && leading == null,
-                  selected: shown == section,
-                  compact: compact,
-                  count: switch (section) {
-                    SidePanelSection.files ||
-                    SidePanelSection.usage ||
-                    SidePanelSection.plan ||
-                    SidePanelSection.ports => 0,
-                    SidePanelSection.changes => changes,
-                    SidePanelSection.terminal => running,
-                  },
-                  onTap: () => panel.showSection(session, section),
-                ),
-              ],
-              const SizedBox(width: _SectionTab.spacing),
-              const Spacer(),
-              // Where it, the sidebar and the conversations are.
-              Center(
-                child: Builder(
-                  builder: (context) => IdeActionButton(
-                    key: const ValueKey('side-panel-layout'),
-                    icon: Codicons.layout,
-                    tooltip: l10n.chatLayout,
-                    onPressed: () {
-                      final box = context.findRenderObject()! as RenderBox;
-                      unawaited(
-                        showChatLayoutPicker(
-                          context,
-                          anchor: box.localToGlobal(Offset.zero) & box.size,
-                          panel: panel,
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ),
-              const SizedBox(width: 2),
-              Center(
-                child: IdeActionButton(
-                  icon: Codicons.close,
-                  tooltip: KeybindingService.instance.titleWithKeybinding(
-                    l10n.sidePanelHide,
-                    ChatCommandIds.toggleSidePanel,
-                  ),
-                  onPressed: () => panel.hideFor(session),
-                ),
-              ),
-              const SizedBox(width: 2),
-            ],
-          );
-        },
-      ),
-    );
-  }
-}
-
-/// A page's tab, a browser's (see [IslandTab]): its icon and name (the
-/// icon alone [compact]), with a count of what is in it.
-class _SectionTab extends StatelessWidget {
-  const _SectionTab({
-    required this.section,
-    this.atStart = false,
-    required this.selected,
-    required this.compact,
-    required this.count,
-    required this.onTap,
-  });
-
-  final SidePanelSection section;
-
-  /// See [IslandTab.atStart].
-  final bool atStart;
-  final bool selected;
-  final bool compact;
-  final int count;
-  final VoidCallback onTap;
-
-  static const padding = 12.0;
-  static const iconSize = 13.0;
-  static const gap = 6.0;
-
-  /// Between two tabs: room for the one in front's foot, and the line
-  /// between two behind it.
-  static const spacing = 2.0;
-  static const labelStyle = TextStyle(fontSize: 12);
-
-  @override
-  Widget build(BuildContext context) {
-    final label = section.label(context);
-    final tab = IslandTab(
-      key: ValueKey(section),
-      active: selected,
-      atStart: atStart,
-      color: AppColors.code,
-      onTap: onTap,
-      builder: (context, foreground) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: padding),
-        child: Row(
+      child: SidePanelSectionBar(
+        color: AppColors.code,
+        inset: inset,
+        leading: leading,
+        sections: [
+          for (final section in _sections)
+            SidePanelSectionEntry(
+              key: ValueKey(section),
+              icon: section.icon,
+              label: section.label(context),
+              command: section.command,
+              selected: tabs.shown == section,
+              count: switch (section) {
+                SidePanelSection.changes => changes,
+                SidePanelSection.terminal => running,
+                _ => 0,
+              },
+              onTap: () => panel.showSection(session, section),
+            ),
+        ],
+        trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            AppIcon(section.icon, size: iconSize, color: foreground),
-            if (!compact) ...[
-              const SizedBox(width: gap),
-              Text(
-                label,
-                maxLines: 1,
-                style: labelStyle.copyWith(color: foreground),
+            // Where it, the sidebar and the conversations are.
+            Builder(
+              builder: (context) => IdeActionButton(
+                key: const ValueKey('side-panel-layout'),
+                icon: Codicons.layout,
+                tooltip: l10n.chatLayout,
+                onPressed: () {
+                  final box = context.findRenderObject()! as RenderBox;
+                  unawaited(
+                    showChatLayoutPicker(
+                      context,
+                      anchor: box.localToGlobal(Offset.zero) & box.size,
+                      panel: panel,
+                    ),
+                  );
+                },
               ),
-            ],
-            if (count > 0) ...[
-              const SizedBox(width: gap),
-              IdeTitleBadge(count),
-            ],
+            ),
+            const SizedBox(width: 2),
+            IdeActionButton(
+              icon: Codicons.close,
+              tooltip: KeybindingService.instance.titleWithKeybinding(
+                l10n.sidePanelHide,
+                ChatCommandIds.toggleSidePanel,
+              ),
+              onPressed: () => panel.hideFor(session),
+            ),
+            const SizedBox(width: 2),
           ],
         ),
-      ),
-    );
-    return IdeHover(
-      message: switch (section.command) {
-        final command? => KeybindingService.instance.titleWithKeybinding(
-          label,
-          command,
-        ),
-        null => label,
-      },
-      child: Semantics(
-        button: true,
-        selected: selected,
-        label: label,
-        child: tab,
       ),
     );
   }

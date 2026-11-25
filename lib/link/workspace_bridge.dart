@@ -19,12 +19,14 @@ import '../chat/composer/paste_store.dart';
 import '../chat/composer/remote_drops.dart';
 import '../chat/panels/context_usage_panel.dart' show ContextUsagePanel;
 import '../chat/rewind_files_setting.dart';
+import '../chat/widgets/agent_step.dart' show AgentStep;
 import '../customize/customization_store.dart';
 import '../customize/customizations.dart';
 import '../ide/file_service.dart';
 import '../ide/git/git_service.dart';
 import '../kernel/agent_kernel.dart' show KernelChoiceKind;
 import '../kernel/kernel_types.dart';
+import '../l10n/l10n.dart' show AppLocalizations;
 import '../platform/native_path.dart';
 import '../remote/project_host.dart';
 import '../remote/ssh_host.dart';
@@ -33,6 +35,8 @@ import '../workspace/workspace.dart';
 import 'chat_codec.dart';
 import 'interaction_codec.dart';
 import 'link_quota.dart';
+import 'project_git_read_stub.dart'
+    if (dart.library.io) 'project_git_read_io.dart';
 
 /// A project's files, on its host, and how it spells their paths.
 typedef ProjectFiles = ({IdeFileService files, p.Context paths});
@@ -83,6 +87,7 @@ class WorkspaceBridge {
     required this.device,
     this.branchOf,
     this.onBranchChanged,
+    this.permitsProjectGit,
     this.filesOf = hostFilesOf,
     this.reachHost = reachProjectHost,
     this.uploadsOf = phoneUploadsOf,
@@ -105,6 +110,49 @@ class WorkspaceBridge {
   /// Enables branch switching for paired desktops and refreshes the host's
   /// branch cache and connected clients after Git has run.
   final void Function(Project project)? onBranchChanged;
+
+  /// Rechecks signed desktop group membership while a Git read is in flight.
+  final bool Function()? permitsProjectGit;
+  int _projectGitReads = 0;
+
+  Future<Object?> _projectGit(
+    String method,
+    Map<String, Object?> params,
+  ) async {
+    void authorize() {
+      if (_disposed || peer.isClosed) throw const LinkClosedException('gone');
+      if (permitsProjectGit?.call() != true) {
+        throw const LinkRemoteException(
+          LinkErrors.unsupported,
+          'Project Git is available to connected group computers',
+        );
+      }
+    }
+
+    authorize();
+    final project = _project(params['project']);
+    if (project.host != null || workspace.multiRootAt(project.path) != null) {
+      throw const LinkRemoteException(
+        LinkErrors.unsupported,
+        'Project Git requires a single local repository on the host',
+      );
+    }
+    if (_projectGitReads >= 4) {
+      throw const LinkRemoteException(LinkErrors.busy, 'Too many Git reads');
+    }
+    _projectGitReads++;
+    try {
+      final result = await readProjectGit(project.root, method, params);
+      authorize();
+      if (!identical(_project(project.path), project) ||
+          workspace.multiRootAt(project.path) != null) {
+        throw const LinkRemoteException(LinkErrors.notFound, 'Project changed');
+      }
+      return result;
+    } finally {
+      _projectGitReads--;
+    }
+  }
 
   /// A project's files: none but the projects listed are given out.
   final ProjectFiles Function(Project project) filesOf;
@@ -681,6 +729,12 @@ class WorkspaceBridge {
           params,
           switchBranch: method == LinkMethods.switchProjectBranch,
         );
+      case LinkMethods.projectGitStatus:
+      case LinkMethods.projectGitHistory:
+      case LinkMethods.projectGitCommitFiles:
+      case LinkMethods.projectGitWorkingDiff:
+      case LinkMethods.projectGitCommitDiff:
+        return _projectGit(method, params);
       case LinkMethods.open:
         final thread = _thread(params['session']);
         final id = idOf(thread);
@@ -696,6 +750,7 @@ class WorkspaceBridge {
           window: params['window'] as int?,
           pathOf: (full) => _phonePath(thread.project, full),
           sessionOf: _phoneSession,
+          l10n: workspace.l10n,
           quota: quota,
         );
         return follow.start(
@@ -1802,6 +1857,7 @@ class _Follow {
     required this.throttle,
     required this.pathOf,
     required this.sessionOf,
+    required this.l10n,
     this.window,
     this.quota,
   });
@@ -1819,6 +1875,7 @@ class _Follow {
     throttle: throttle,
     pathOf: pathOf,
     sessionOf: sessionOf,
+    l10n: l10n,
     window: window,
     quota: quota,
   );
@@ -1833,6 +1890,8 @@ class _Follow {
 
   /// A conversation's id as the phone knows it, for one an item names.
   final String Function(String id) sessionOf;
+
+  final AppLocalizations Function() l10n;
 
   /// Its quota, told as it changes.
   final LinkQuota? quota;
@@ -2121,10 +2180,21 @@ class _Follow {
           command: task.kind == KernelTaskKind.command
               ? session.commandOf(task.toolUseId)
               : null,
-          summary: task.summary,
+          summary: _taskSummary(task),
           output: task.outputFile != null,
         ),
     ];
+  }
+
+  String? _taskSummary(KernelTask task) {
+    if (task.kind == KernelTaskKind.agent &&
+        task.status == CommandStatus.running) {
+      final agent = session.agentOf(task)?.agent;
+      if (agent != null) {
+        return AgentStep.latest(agent, l10n: l10n()) ?? task.summary;
+      }
+    }
+    return task.summary;
   }
 
   Map<String, Object?> _change(FileChange change) {

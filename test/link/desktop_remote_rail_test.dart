@@ -500,7 +500,7 @@ Future<void> _mount(
         files: chat.kind == 'project'
             ? DesktopRemoteRail(peer: peer, chat: chat)
             : null,
-        builder: (context, button) =>
+        builder: (context, button, _) =>
             Column(children: [?button, const Spacer(), const TextField()]),
       ),
     ),

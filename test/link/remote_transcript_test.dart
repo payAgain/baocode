@@ -9,6 +9,7 @@ import 'package:baocode/chat/widgets/markdown_view.dart';
 import 'package:baocode/chat/widgets/mermaid_code_block.dart';
 import 'package:baocode/chat/widgets/turn_footer.dart';
 import 'package:baocode/chat/widgets/user_message_bubble.dart';
+import 'package:baocode/ide/ide_hover.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_host_connection.dart';
 import 'package:baocode/link/desktop_host_page.dart';
@@ -201,6 +202,7 @@ void main() {
             't': 'text',
             'text': '''
 [Local document](lib/client.dart) [File URI](file:///client/fixture/local.png)
+[Mac source](/Users/fixture/Project/src/main.dart#L10-L12) [Windows source](C:/work/src/main.dart#L20)
 
 [Website](https://example.invalid) [Email](mailto:peer@example.invalid) <https://example.invalid/auto>
 
@@ -234,7 +236,21 @@ graph TD; a-->b;
             contains('Check @lib/client.dart and [Session id: client-session]'),
           );
           expect(rendered, contains('[Attachment]'));
-          expect(rendered, contains('Local document (lib/client.dart)'));
+          for (final (label, target) in [
+            ('Local document', 'lib/client.dart'),
+            ('File URI', 'file:///client/fixture/local.png'),
+            ('Mac source', '/Users/fixture/Project/src/main.dart#L10-L12'),
+            ('Windows source', 'C:/work/src/main.dart#L20'),
+          ]) {
+            expect(rendered, contains(label));
+            expect(rendered, isNot(contains('$label ($target)')));
+            expect(
+              find.byWidgetPredicate(
+                (widget) => widget is IdeHover && widget.message == target,
+              ),
+              findsOneWidget,
+            );
+          }
           expect(
             rendered,
             isNot(contains('Website (https://example.invalid)')),

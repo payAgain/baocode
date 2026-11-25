@@ -1130,11 +1130,34 @@ InlineSpan _inline(md.Node node, MarkdownOptions options) {
   List<InlineSpan> inner() => [
     for (final child in children) _inline(child, options),
   ];
-  if (node.tag == 'a' && !options.textOnly) {
+  if (node.tag == 'a') {
     final href = node.attributes['href'];
-    if (options.fileTag?.call(href, _unescape(node.textContent))
-        case final tag?) {
-      return tag;
+    if (!options.textOnly) {
+      if (options.fileTag?.call(href, _unescape(node.textContent))
+          case final tag?) {
+        return tag;
+      }
+    } else if (href != null && !href.trimLeft().startsWith('//')) {
+      if (FileLink.parseHref(href) case final file?
+          when file.range != null ||
+              FileLink.parseText(file.path, blanks: true) != null) {
+        final icon = _isFolder(file.path, null)
+            ? FolderIcon(file.path, size: _fileIconSize)
+            : FileIcon(file.path, size: _fileIconSize);
+        return TextSpan(
+          style: TextStyle(color: AppColors.accent),
+          children: [
+            WidgetSpan(
+              alignment: PlaceholderAlignment.middle,
+              child: Padding(
+                padding: const EdgeInsets.only(right: 3),
+                child: IdeHover(message: _unescape(href), child: icon),
+              ),
+            ),
+            ...inner(),
+          ],
+        );
+      }
     }
   }
   return switch (node.tag) {

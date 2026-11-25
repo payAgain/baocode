@@ -3,13 +3,13 @@ import 'dart:async';
 import 'package:bao_editor/monaco/vs/workbench/services/themes/common/color_theme_data.dart';
 import 'package:bao_link/bao_link.dart';
 import 'package:baocode/ide/ide_code_diff.dart';
-import 'package:baocode/ide/ide_list.dart';
 import 'package:baocode/l10n/app_localizations.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_remote_activity.dart';
 import 'package:baocode/theme/app_theme.dart';
 import 'package:baocode/theme/workbench_theme.dart' as workbench;
 import 'package:baocode/theme/workbench_theme_initial_colors.dart';
+import 'package:baocode/workspace/islands.dart' show IslandTab;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -42,30 +42,32 @@ void main() {
     expect(surface?.color, AppColors.background);
     expect(tester.widget<Text>(title).style?.color, AppColors.textPrimary);
 
-    TextButton tab(String label) =>
-        tester.widget<TextButton>(find.widgetWithText(TextButton, label));
-    expect(
-      tab('Tasks').style?.backgroundColor?.resolve({}),
-      IdeListColors.inactiveSelection,
-    );
-    expect(
-      tab('Changes').style?.foregroundColor?.resolve({}),
-      AppColors.textMuted,
-    );
+    void expectTab(String section, {required bool active}) {
+      final tab = _tab(section);
+      final widget = tester.widget<IslandTab>(tab);
+      expect(widget.active, active);
+      expect(widget.color, AppColors.background);
+      final icon = tester.widget<Icon>(
+        find.descendant(of: tab, matching: find.byType(Icon)),
+      );
+      expect(
+        icon.color,
+        light.colors[active
+            ? 'tab.activeForeground'
+            : 'tab.inactiveForeground'],
+      );
+    }
+
+    expectTab('tasks', active: true);
+    expectTab('changes', active: false);
     expect(
       tester.widget<Text>(find.text('No tasks in this session.')).style?.color,
       AppColors.textMuted,
     );
 
-    await _tap(tester, find.text('Changes'));
-    expect(
-      tab('Tasks').style?.foregroundColor?.resolve({}),
-      AppColors.textMuted,
-    );
-    expect(
-      tab('Changes').style?.backgroundColor?.resolve({}),
-      IdeListColors.inactiveSelection,
-    );
+    await _tap(tester, _tab('changes'));
+    expectTab('tasks', active: false);
+    expectTab('changes', active: true);
     expect(find.text('No pending changes in this session.'), findsOneWidget);
     await _tap(tester, find.byTooltip('Close host activity'));
     expect(title, findsNothing);
@@ -290,7 +292,7 @@ void main() {
       host.push('session-a', changes: [first, second]);
       await tester.pumpAndSettle();
       await _tap(tester, find.byTooltip('Host activity'));
-      await _tap(tester, find.text('Changes'));
+      await _tap(tester, _tab('changes'));
       expect(find.text('src/First.dart'), findsOneWidget);
       expect(find.text('Modified'), findsOneWidget);
       expect(find.text('+4 −2'), findsOneWidget);
@@ -332,7 +334,7 @@ void main() {
     host.push('session-a', changes: [change]);
     await tester.pumpAndSettle();
     await _tap(tester, find.byTooltip('Host activity'));
-    await _tap(tester, find.text('Changes'));
+    await _tap(tester, _tab('changes'));
     expect(find.text('Preview diff'), findsNothing);
     await _tap(tester, find.text('Undo'));
     await _tap(tester, _confirmButton('Undo'));
@@ -366,7 +368,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     await _tap(tester, find.byTooltip('Host activity'));
-    await _tap(tester, find.text('Changes'));
+    await _tap(tester, _tab('changes'));
     await _tap(tester, find.text('Undo'));
     await _tap(tester, _confirmButton('Undo'));
     expect(
@@ -394,7 +396,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     await _tap(tester, find.byTooltip('Host activity'));
-    await _tap(tester, find.text('Changes'));
+    await _tap(tester, _tab('changes'));
     final row = find.byKey(const ValueKey(('remote-change', path)));
     final editor = find.byKey(const ValueKey('desktop-remote-diff-editor'));
     final chat = tester.state(find.byType(EditableText));
@@ -465,7 +467,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     await _tap(tester, find.byTooltip('Host activity'));
-    await _tap(tester, find.text('Changes'));
+    await _tap(tester, _tab('changes'));
     await _tap(
       tester,
       find.byKey(const ValueKey(('remote-change', 'first.txt'))),
@@ -508,7 +510,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     await _tap(tester, find.byTooltip('Host activity'));
-    await _tap(tester, find.text('Changes'));
+    await _tap(tester, _tab('changes'));
     await _tap(tester, find.text('binary.bin'));
     expect(
       find.text('Binary files cannot be shown as a text diff.'),
@@ -536,7 +538,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     await _tap(tester, find.byTooltip('Host activity'));
-    await _tap(tester, find.text('Changes'));
+    await _tap(tester, _tab('changes'));
     await _tap(tester, find.text('Undo'));
     host.push(
       'session-a',
@@ -573,7 +575,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       await _tap(tester, find.byTooltip('主机活动'));
-      await _tap(tester, find.text('更改'));
+      await _tap(tester, _tab('changes'));
       expect(find.text('所选项目之外'), findsNWidgets(3));
       expect(find.text('保留'), findsNothing);
       expect(find.text('撤销'), findsNothing);
@@ -581,6 +583,160 @@ void main() {
       await host.close(tester);
     },
   );
+
+  testWidgets('project Git previews staged and working tree changes', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, showFiles: true);
+    const stagedPatch = '+staged line\n';
+    const unstagedPatch = '+working tree line\n';
+    host.reply = (method, args) => switch (method) {
+      LinkMethods.projectGitStatus => _gitStatus(),
+      LinkMethods.projectGitHistory => _gitHistory,
+      LinkMethods.projectGitWorkingDiff => _gitDiff(
+        args['staged'] == true ? stagedPatch : unstagedPatch,
+      ),
+      _ => throw StateError(method),
+    };
+
+    await _tap(tester, find.byTooltip('Project sidebar'));
+    expect(host.methods, [LinkMethods.open]);
+    await _tap(tester, _tab('changes'));
+    expect(find.text('main'), findsOneWidget);
+    expect(find.text('Staged'), findsOneWidget);
+    expect(find.text('Working tree'), findsOneWidget);
+    expect(find.text('Untracked'), findsOneWidget);
+
+    await _tap(tester, find.text('staged.txt'));
+    expect(_gitPatch(stagedPatch), findsOneWidget);
+    host.expectLast(LinkMethods.projectGitWorkingDiff, {
+      'project': 'project-a',
+      'path': 'staged.txt',
+      'staged': true,
+    });
+    await _tap(tester, find.byTooltip('Back'));
+    await _tap(tester, find.text('working.txt'));
+    expect(_gitPatch(unstagedPatch), findsOneWidget);
+    host.expectLast(LinkMethods.projectGitWorkingDiff, {
+      'project': 'project-a',
+      'path': 'working.txt',
+      'staged': false,
+    });
+    expect(host.methods, [
+      LinkMethods.open,
+      LinkMethods.projectGitStatus,
+      LinkMethods.projectGitHistory,
+      LinkMethods.projectGitWorkingDiff,
+      LinkMethods.projectGitWorkingDiff,
+    ]);
+    await host.close(tester);
+  });
+
+  testWidgets('project Git history opens commit files and a read-only patch', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, showFiles: true);
+    const patch = '-prior line\n+committed line\n';
+    host.reply = (method, _) => switch (method) {
+      LinkMethods.projectGitStatus => _gitStatus(),
+      LinkMethods.projectGitHistory => _gitHistory,
+      LinkMethods.projectGitCommitFiles => {
+        'files': [_gitFile('committed.txt', 'commit')],
+        'truncated': false,
+      },
+      LinkMethods.projectGitCommitDiff => _gitDiff(patch),
+      _ => throw StateError(method),
+    };
+
+    await _tap(tester, find.byTooltip('Project sidebar'));
+    await _tap(tester, _tab('changes'));
+    await _tap(tester, find.text('History'));
+    expect(find.textContaining('Fixture Author'), findsOneWidget);
+    await _tap(tester, find.text('Fixture commit'));
+    host.expectLast(LinkMethods.projectGitCommitFiles, {
+      'project': 'project-a',
+      'revision': _gitRevision,
+    });
+    await _tap(tester, find.text('committed.txt'));
+    host.expectLast(LinkMethods.projectGitCommitDiff, {
+      'project': 'project-a',
+      'revision': _gitRevision,
+      'path': 'committed.txt',
+    });
+    expect(_gitPatch(patch), findsOneWidget);
+    await _tap(tester, find.byTooltip('Back'));
+    expect(find.text('committed.txt'), findsOneWidget);
+    await _tap(tester, find.byTooltip('Back'));
+    expect(find.text('Fixture commit'), findsOneWidget);
+    await host.close(tester);
+  });
+
+  testWidgets('an old host keeps its session change review available', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, showFiles: true);
+    host.reply = (_, _) =>
+        throw const LinkRemoteException(LinkErrors.unknown, 'Unknown method');
+    host.push(
+      'session-a',
+      changes: const [
+        {'path': 'pending.txt'},
+      ],
+    );
+    await tester.pumpAndSettle();
+
+    await _tap(tester, find.byTooltip('Project sidebar'));
+    await _tap(tester, _tab('changes'));
+    expect(find.text('pending.txt'), findsOneWidget);
+    expect(find.text('History'), findsNothing);
+    host.expectLast(LinkMethods.projectGitStatus, {'project': 'project-a'});
+    expect(host.methods, [LinkMethods.open, LinkMethods.projectGitStatus]);
+    await host.close(tester);
+  });
+
+  testWidgets('a late Git patch cannot replace the new project patch', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, showFiles: true);
+    final pending = Completer<Object?>();
+    const currentPatch = '+project B line\n';
+    const stalePatch = '+project A line\n';
+    host.reply = (method, args) => switch (method) {
+      LinkMethods.projectGitStatus => _gitStatus(),
+      LinkMethods.projectGitHistory => _gitHistory,
+      LinkMethods.projectGitWorkingDiff when args['project'] == 'project-a' =>
+        pending.future,
+      LinkMethods.projectGitWorkingDiff => _gitDiff(currentPatch),
+      _ => throw StateError(method),
+    };
+
+    await _tap(tester, find.byTooltip('Project sidebar'));
+    await _tap(tester, _tab('changes'));
+    await tester.tap(find.text('working.txt').hitTestable());
+    await tester.pump();
+    host.expectLast(LinkMethods.projectGitWorkingDiff, {
+      'project': 'project-a',
+      'path': 'working.txt',
+      'staged': false,
+    });
+
+    await host.select('session-b', 'project-b');
+    await tester.pumpAndSettle();
+    await _tap(tester, _tab('changes'));
+    await _tap(tester, find.text('working.txt'));
+    host.expectLast(LinkMethods.projectGitWorkingDiff, {
+      'project': 'project-b',
+      'path': 'working.txt',
+      'staged': false,
+    });
+    expect(_gitPatch(currentPatch), findsOneWidget);
+    pending.complete(_gitDiff(stalePatch));
+    await tester.pumpAndSettle();
+    expect(_gitPatch(currentPatch), findsOneWidget);
+    expect(_gitPatch(stalePatch), findsNothing);
+    expect(tester.takeException(), isNull);
+    await host.close(tester);
+  });
 
   testWidgets(
     'extension inventory shows host details only for the selected project',
@@ -624,7 +780,7 @@ void main() {
           : null;
       await _tap(tester, find.byTooltip('Host activity'));
       expect(host.methods, [LinkMethods.open]);
-      await _tap(tester, find.text('Extensions'));
+      await _tap(tester, _tab('extensions'));
       host.expectLast(LinkMethods.extensions, {});
       expect(find.text('MCP server · User · Disabled'), findsOneWidget);
       expect(find.text('Skill · Project'), findsOneWidget);
@@ -648,13 +804,13 @@ void main() {
       host.reply = (method, _) =>
           method == LinkMethods.extensions ? pending.future : null;
       await _tap(tester, find.byTooltip('Host activity'));
-      await _tap(tester, find.text('Extensions'));
+      await _tap(tester, _tab('extensions'));
       await host.select('session-b', 'project-b');
       await tester.pumpAndSettle();
       host.reply = (method, _) =>
           throw const LinkRemoteException(LinkErrors.unknown, 'old host');
       await _tap(tester, find.byTooltip('Host activity'));
-      await _tap(tester, find.text('Extensions'));
+      await _tap(tester, _tab('extensions'));
       pending.complete({
         'items': [
           const LinkExtension(
@@ -680,7 +836,7 @@ void main() {
     final host = await _Host.show(tester);
     host.reply = (_, _) => {'items': []};
     await _tap(tester, find.byTooltip('Host activity'));
-    await _tap(tester, find.text('Extensions'));
+    await _tap(tester, _tab('extensions'));
     expect(
       find.text('No host extensions reported for this project.'),
       findsOneWidget,
@@ -705,6 +861,48 @@ void main() {
     await host.close(tester);
   });
 }
+
+Finder _tab(String section) =>
+    find.byKey(ValueKey('desktop-remote-tab-$section'));
+
+Finder _gitPatch(String patch) => find.widgetWithText(SelectableText, patch);
+
+const _gitRevision = '0123456789abcdef0123456789abcdef01234567';
+const _gitHistory = {
+  'commits': [
+    {
+      'hash': _gitRevision,
+      'shortHash': '0123456',
+      'subject': 'Fixture commit',
+      'authorName': 'Fixture Author',
+      'parentIds': <String>[],
+      'refs': ['HEAD -> main'],
+    },
+  ],
+  'truncated': false,
+};
+
+Map<String, Object?> _gitStatus() => {
+  'branch': 'main',
+  'head': _gitRevision,
+  'files': [
+    _gitFile('staged.txt', 'index'),
+    _gitFile('working.txt', 'workingTree'),
+    _gitFile('new.txt', 'untracked', status: '?'),
+  ],
+  'truncated': false,
+};
+
+Map<String, Object?> _gitFile(
+  String path,
+  String group, {
+  String status = 'M',
+}) => {'path': path, 'status': status, 'group': group};
+
+Map<String, Object?> _gitDiff(String text) => {
+  'text': text,
+  'truncated': false,
+};
 
 Finder _confirmButton(String label) => find.descendant(
   of: find.byType(AlertDialog),
@@ -746,6 +944,7 @@ class _Host {
     WidgetTester tester, {
     Locale locale = const Locale('en'),
     ThemeData? theme,
+    bool showFiles = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 760));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -788,7 +987,8 @@ class _Host {
                 fixture.chats.selected,
               ),
               hostName: 'Fixture host',
-              builder: (context, activityButton) => Column(
+              files: showFiles ? const Text('Shared files') : null,
+              builder: (context, activityButton, _) => Column(
                 children: [
                   if (activityButton != null)
                     Row(

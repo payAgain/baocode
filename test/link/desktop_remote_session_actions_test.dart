@@ -281,6 +281,8 @@ void main() {
       );
       host.reply = (_, params) => {'session': params['session']};
       await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Message delivery'));
+      await tester.pumpAndSettle();
       await _tap(tester, 'Queue message');
       await tester.enterText(find.byType(TextField), 'Queue fixture');
       await tester.pump();
@@ -290,6 +292,8 @@ void main() {
       expect(host.actions.single.$2, containsPair('session', 'first'));
       expect(host.actions.single.$2, containsPair('text', 'Queue fixture'));
       expect(find.text('Host accepted the queued message.'), findsOneWidget);
+      await tester.tap(find.byTooltip('Message delivery'));
+      await tester.pumpAndSettle();
       await _tap(tester, 'Send now');
       await tester.enterText(find.byType(TextField), 'Immediate fixture');
       await tester.pump();
@@ -454,6 +458,7 @@ class _Host {
                     peer: fixture.peer,
                     chat: chat,
                     chats: fixture.chats,
+                    composer: (menu) => menu ?? const SizedBox.shrink(),
                   ),
                 ],
               );

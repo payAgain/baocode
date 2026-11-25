@@ -610,13 +610,14 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                         selected,
                       ),
                       hostName: _connection.hostName ?? text.host,
-                      builder: (_, button) => _conversation(
+                      builder: (_, button, activityStrip) => _conversation(
                         text,
                         host,
                         selected,
                         error,
                         wide: wide,
                         activityButton: button,
+                        activityStrip: activityStrip,
                       ),
                     )
                   : _conversation(text, host, selected, error, wide: wide);
@@ -1071,6 +1072,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     String? connectionError, {
     required bool wide,
     Widget? activityButton,
+    Widget? activityStrip,
   }) {
     final history = chat.kind == 'project' ? _chats.projectHistory : null;
     // The native history lays out its own text column and paints the minimap
@@ -1108,6 +1110,31 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
             ),
       );
     }
+
+    Widget composer(Widget? deliveryMenu) => _HostComposer(
+      key: ObjectKey(connection),
+      initialDraft: drafts[chatKey] ?? '',
+      busy: _busy || _chatBusy,
+      controls: _chats.sessionControls,
+      peer: peer,
+      chat: chat,
+      chats: _chats,
+      isMediaCurrent: isCurrent,
+      activityStrip: activityStrip,
+      deliveryMenu: deliveryMenu,
+      project: chat.kind == 'project'
+          ? _chats.projects.where((p) => p.id == chat.projectId).firstOrNull
+          : null,
+      onChanged: (draft) {
+        if (draft.isEmpty) {
+          drafts.remove(chatKey);
+        } else {
+          drafts[chatKey] = draft;
+        }
+      },
+      onSend: send,
+      onSendWithAttachments: send,
+    );
 
     return Column(
       key: ValueKey(chatKey),
@@ -1269,39 +1296,17 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                       icon: const Icon(Icons.close, size: 16),
                     ),
                   ),
-                if (chat.kind == 'project')
-                  DesktopRemoteSessionActions(
-                    key: _remoteActionsKey,
-                    peer: connection.peer,
-                    chat: chat,
-                    chats: _chats,
-                    enabled: !_busy && !_chatBusy,
-                  ),
                 composerColumn(
-                  _HostComposer(
-                    key: ObjectKey(connection),
-                    initialDraft: drafts[chatKey] ?? '',
-                    busy: _busy || _chatBusy,
-                    controls: _chats.sessionControls,
-                    peer: peer,
-                    chat: chat,
-                    chats: _chats,
-                    isMediaCurrent: isCurrent,
-                    project: chat.kind == 'project'
-                        ? _chats.projects
-                              .where((p) => p.id == chat.projectId)
-                              .firstOrNull
-                        : null,
-                    onChanged: (draft) {
-                      if (draft.isEmpty) {
-                        drafts.remove(chatKey);
-                      } else {
-                        drafts[chatKey] = draft;
-                      }
-                    },
-                    onSend: send,
-                    onSendWithAttachments: send,
-                  ),
+                  chat.kind == 'project'
+                      ? DesktopRemoteSessionActions(
+                          key: _remoteActionsKey,
+                          peer: peer,
+                          chat: chat,
+                          chats: _chats,
+                          enabled: !_busy && !_chatBusy,
+                          composer: composer,
+                        )
+                      : composer(null),
                 ),
               ],
             ),
@@ -1324,6 +1329,8 @@ class _HostComposer extends StatelessWidget {
     required this.chat,
     required this.isMediaCurrent,
     required this.chats,
+    this.activityStrip,
+    this.deliveryMenu,
     this.controls,
     this.project,
   });
@@ -1338,6 +1345,8 @@ class _HostComposer extends StatelessWidget {
   final DesktopHostChat chat;
   final bool Function() isMediaCurrent;
   final DesktopHostChats chats;
+  final Widget? activityStrip;
+  final Widget? deliveryMenu;
   final DesktopHostSessionControls? controls;
   final ProjectInfo? project;
 
@@ -1349,6 +1358,7 @@ class _HostComposer extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        ?activityStrip,
         DesktopHostComposer(
           initialDraft: initialDraft,
           busy: busy,
@@ -1360,6 +1370,7 @@ class _HostComposer extends StatelessWidget {
           peer: peer,
           chat: chat,
           isMediaCurrent: isMediaCurrent,
+          deliveryMenu: deliveryMenu,
           controls: controls,
         ),
         DesktopHostSessionFooter(

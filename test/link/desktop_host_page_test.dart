@@ -4,6 +4,7 @@ import 'package:bao_link/bao_link.dart';
 import 'package:baocode/l10n/l10n.dart';
 import 'package:bao_markdown/bao_markdown.dart';
 import 'package:baocode/chat/composer/composer_presentation.dart';
+import 'package:baocode/chat/panels/activity_strip.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_host_composer.dart';
 import 'package:baocode/link/desktop_host_connection.dart';
@@ -66,6 +67,121 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await peer.close();
     await host.close();
+  });
+
+  testWidgets('active project delivery choices open from the composer', (
+    tester,
+  ) async {
+    final fixture = await _InspectionHost.show(tester);
+    await tester.tap(find.text('Fixture first chat'));
+    await tester.pumpAndSettle();
+    final menu = find.byTooltip('Message delivery');
+    expect(menu, findsNothing);
+
+    fixture.push({
+      'live': true,
+      'actions': {'queue': true, 'turn': 123},
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('Queue message'), findsNothing);
+    expect(find.text('Send now'), findsNothing);
+    expect(
+      find.descendant(of: find.byType(ComposerSurface), matching: menu),
+      findsOneWidget,
+    );
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    expect(find.text('Queue message'), findsOneWidget);
+    expect(find.text('Send now'), findsOneWidget);
+
+    fixture.push({
+      'live': true,
+      'actions': {'queue': true, 'turn': 124},
+    });
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Send now'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    await fixture.close(tester);
+  });
+
+  testWidgets('project activity above the composer follows host updates', (
+    tester,
+  ) async {
+    final fixture = await _InspectionHost.show(tester);
+    await tester.tap(find.text('Fixture first chat'));
+    await tester.pumpAndSettle();
+    await _enterDraft(tester, 'Unsent draft');
+    final strip = find.byType(ActivityStrip);
+    expect(strip, findsNothing);
+
+    final startedAt = DateTime.now().millisecondsSinceEpoch;
+    final agent = LinkTask(
+      id: 'agent',
+      kind: 'agent',
+      description: 'Fixture subagent',
+      status: 'running',
+      startedAt: DateTime.fromMillisecondsSinceEpoch(startedAt),
+      summary: 'Reading fixture',
+    ).toJson();
+    final command = LinkTask(
+      id: 'command',
+      kind: 'command',
+      description: 'Fixture background command',
+      status: 'running',
+      startedAt: DateTime.fromMillisecondsSinceEpoch(startedAt),
+    ).toJson();
+    fixture.push({
+      'tasks': [agent, command],
+      'changes': [
+        {'path': 'src/fixture.dart', 'added': 4, 'removed': 2},
+      ],
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('Fixture subagent'), findsOneWidget);
+    expect(find.text('· Reading fixture'), findsOneWidget);
+    expect(find.text('Fixture background command'), findsOneWidget);
+    expect(find.textContaining('Running ·'), findsNWidgets(2));
+    expect(find.text('1 file changed'), findsOneWidget);
+    expect(find.text('+4'), findsOneWidget);
+    expect(find.text('-2'), findsOneWidget);
+    expect(
+      tester.getBottomLeft(strip).dy,
+      lessThan(tester.getTopLeft(find.byType(ComposerSurface)).dy),
+    );
+    expect(_editor(tester).controller.text, 'Unsent draft');
+
+    await tester.tap(find.text('1 file changed'));
+    await tester.pumpAndSettle();
+    expect(find.text('fixture.dart'), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.stop_rounded).first);
+    await tester.pumpAndSettle();
+    final confirm = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.widgetWithText(TextButton, 'Stop task'),
+    );
+    expect(fixture.calls, isNot(contains(LinkMethods.stopTask)));
+    await tester.tap(confirm);
+    await tester.pumpAndSettle();
+    expect(fixture.calls.last, LinkMethods.stopTask);
+
+    fixture.push({
+      'tasks': [
+        {...agent, 'summary': 'Checking results'},
+        {...command, 'status': 'succeeded'},
+      ],
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('· Checking results'), findsOneWidget);
+    expect(find.text('Fixture background command'), findsNothing);
+    expect(find.text('1 file changed'), findsOneWidget);
+
+    fixture.push({'tasks': [], 'changes': []});
+    await tester.pumpAndSettle();
+    expect(strip, findsNothing);
+    expect(_editor(tester).controller.text, 'Unsent draft');
+    await fixture.close(tester);
   });
 
   testWidgets('project goal details follow the selected host snapshot', (
@@ -245,6 +361,7 @@ void main() {
                 'kind': 'command',
                 'description': 'Fixture task',
                 'status': 'running',
+                'startedAt': DateTime.now().millisecondsSinceEpoch,
               },
             ],
           };
@@ -272,9 +389,15 @@ void main() {
       );
       await tester.tap(find.byTooltip('Project sidebar'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Tasks'));
+      await tester.tap(find.byKey(const ValueKey('desktop-remote-tab-tasks')));
       await tester.pumpAndSettle();
-      expect(find.text('Fixture task'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('desktop-remote-project-sidebar')),
+          matching: find.text('Fixture task'),
+        ),
+        findsOneWidget,
+      );
       expect(calls.where((m) => m == LinkMethods.open), hasLength(1));
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();

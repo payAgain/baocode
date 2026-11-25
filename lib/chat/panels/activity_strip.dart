@@ -30,7 +30,8 @@ class ActivityStrip extends StatefulWidget {
     super.key,
     required this.tasks,
     required this.changes,
-    required this.onKeep,
+    this.onKeep,
+    this.showLineCounts = true,
     this.root = '.',
     this.paths,
     this.onUndo,
@@ -72,7 +73,8 @@ class ActivityStrip extends StatefulWidget {
   /// What a task did last, e.g. a subagent's last step: after its
   /// description, flipping up to the next as it goes on.
   final String? Function(KernelTask task)? detailOf;
-  final VoidCallback onKeep;
+  final VoidCallback? onKeep;
+  final bool showLineCounts;
 
   /// Null when the changes cannot be put back: no Undo then.
   final VoidCallback? onUndo;
@@ -312,6 +314,7 @@ class _ActivityStripState extends State<ActivityStrip> {
                       setState(() => _filesExpanded = !_filesExpanded),
                   onUndo: widget.onUndo,
                   onKeep: widget.onKeep,
+                  showLineCounts: widget.showLineCounts,
                 ),
                 if (_filesExpanded)
                   Padding(
@@ -663,13 +666,15 @@ class _FilesHeader extends StatelessWidget {
     required this.onToggle,
     required this.onUndo,
     required this.onKeep,
+    required this.showLineCounts,
   });
 
   final List<FileChange> changes;
   final bool expanded;
   final VoidCallback onToggle;
   final VoidCallback? onUndo;
-  final VoidCallback onKeep;
+  final VoidCallback? onKeep;
+  final bool showLineCounts;
 
   @override
   Widget build(BuildContext context) {
@@ -701,26 +706,28 @@ class _FilesHeader extends StatelessWidget {
                   style: TextStyle(color: AppColors.text, fontSize: 12),
                 ),
               ),
-              const SizedBox(width: 8),
-              Text(
-                '+$added',
-                style: TextStyle(
-                  color: themeColors['chat.linesAddedForeground'],
-                  fontFamily: AppFonts.mono,
-                  fontFamilyFallback: AppFonts.monoFallbacks,
-                  fontSize: 11.5,
+              if (showLineCounts) ...[
+                const SizedBox(width: 8),
+                Text(
+                  '+$added',
+                  style: TextStyle(
+                    color: themeColors['chat.linesAddedForeground'],
+                    fontFamily: AppFonts.mono,
+                    fontFamilyFallback: AppFonts.monoFallbacks,
+                    fontSize: 11.5,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 4),
-              Text(
-                '-$removed',
-                style: TextStyle(
-                  color: themeColors['chat.linesRemovedForeground'],
-                  fontFamily: AppFonts.mono,
-                  fontFamilyFallback: AppFonts.monoFallbacks,
-                  fontSize: 11.5,
+                const SizedBox(width: 4),
+                Text(
+                  '-$removed',
+                  style: TextStyle(
+                    color: themeColors['chat.linesRemovedForeground'],
+                    fontFamily: AppFonts.mono,
+                    fontFamilyFallback: AppFonts.monoFallbacks,
+                    fontSize: 11.5,
+                  ),
                 ),
-              ),
+              ],
             ],
           ),
         ),
@@ -737,16 +744,17 @@ class _FilesHeader extends StatelessWidget {
           ),
           const SizedBox(width: 4),
         ],
-        SizedBox(
-          height: 20,
-          child: FittedBox(
-            child: PanelButton(
-              label: context.l10n.stripKeepAll,
-              primary: true,
-              onTap: onKeep,
+        if (onKeep case final onKeep?)
+          SizedBox(
+            height: 20,
+            child: FittedBox(
+              child: PanelButton(
+                label: context.l10n.stripKeepAll,
+                primary: true,
+                onTap: onKeep,
+              ),
             ),
           ),
-        ),
       ],
     );
   }

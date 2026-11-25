@@ -30,12 +30,14 @@ List<String> _gitArguments(List<String> arguments) => [
 /// With [limit], the output is NUL-terminated records (`-z`) of which only
 /// the first [limit] are read: Git is stopped at the one after, and the
 /// output is [IdeGitOutput.truncated] (VS Code's `git.statusLimit`).
-/// [stdin] is written to it, and [environment] added to its. It is started
-/// from the isolate of [onProcessIsolate], not this one.
+/// [maxBytes] instead bounds the raw output of a command, including commands
+/// that produce patches or unusually long records. [stdin] is written to it,
+/// and [environment] added to its. Runs in the [onProcessIsolate] isolate.
 Future<IdeGitOutput> runGit(
   List<String> arguments, {
   required String workingDirectory,
   int? limit,
+  int? maxBytes,
   String? stdin,
   Map<String, String>? environment,
 }) => onProcessIsolate(
@@ -43,6 +45,7 @@ Future<IdeGitOutput> runGit(
     arguments,
     workingDirectory: workingDirectory,
     limit: limit,
+    maxBytes: maxBytes,
     stdin: stdin,
     environment: environment,
   ),
@@ -52,10 +55,20 @@ Future<IdeGitOutput> _runGit(
   List<String> arguments, {
   required String workingDirectory,
   int? limit,
+  int? maxBytes,
   String? stdin,
   Map<String, String>? environment,
 }) async {
   try {
+    if (maxBytes != null) {
+      assert(limit == null && stdin == null && maxBytes > 0);
+      return await _runByteLimited(
+        arguments,
+        workingDirectory,
+        maxBytes,
+        environment,
+      );
+    }
     if (stdin != null || environment != null) {
       return await _runWith(
         arguments,
@@ -92,6 +105,65 @@ Future<IdeGitOutput> _runGit(
     throw const IdeGitException('Git did not respond within 60 seconds.');
   } on FormatException {
     throw const IdeGitException('Git returned text that is not UTF-8.');
+  }
+}
+
+Future<IdeGitOutput> _runByteLimited(
+  List<String> arguments,
+  String workingDirectory,
+  int maxBytes,
+  Map<String, String>? environment,
+) async {
+  final process = await Process.start(
+    'git',
+    _gitArguments(arguments),
+    workingDirectory: workingDirectory,
+    environment: {..._gitEnvironment, ...?environment},
+  );
+  unawaited(process.stdin.close());
+  final stdout = BytesBuilder(copy: false);
+  final stderr = BytesBuilder(copy: false);
+  var truncated = false;
+  final output = process.stdout.listen((chunk) {
+    final remaining = maxBytes - stdout.length;
+    if (chunk.length <= remaining) {
+      stdout.add(chunk);
+    } else if (!truncated) {
+      stdout.add(chunk.sublist(0, remaining));
+      truncated = true;
+      process.kill();
+    }
+  });
+  final errors = process.stderr.listen((chunk) {
+    final remaining = 4096 - stderr.length;
+    if (remaining > 0) {
+      stderr.add(
+        chunk.length <= remaining ? chunk : chunk.sublist(0, remaining),
+      );
+    }
+  });
+  final exit = process.exitCode;
+  try {
+    final done = Future.wait<void>([
+      output.asFuture(),
+      errors.asFuture(),
+      exit,
+    ]);
+    await done.timeout(const Duration(seconds: 60));
+    final text = utf8.decode(stdout.takeBytes(), allowMalformed: true);
+    return truncated
+        ? IdeGitOutput.truncated(text)
+        : IdeGitOutput(
+            await exit,
+            text,
+            utf8.decode(stderr.takeBytes(), allowMalformed: true),
+          );
+  } on TimeoutException {
+    process.kill();
+    rethrow;
+  } finally {
+    unawaited(output.cancel());
+    unawaited(errors.cancel());
   }
 }
 

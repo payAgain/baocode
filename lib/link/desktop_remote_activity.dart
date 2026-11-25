@@ -3,17 +3,26 @@ import 'dart:math' as math;
 
 import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 
+import '../chat/chat_models.dart'
+    show CommandStatus, FileChange, FileChangeKind;
+import '../chat/panels/activity_strip.dart';
+import '../chat/side_panel/side_panel_section_bar.dart';
 import '../ide/ide_code_diff.dart';
 import '../ide/ide_list.dart' show IdeListColors, IdeListRow;
+import '../kernel/kernel_types.dart' show KernelTask, KernelTaskKind;
 import '../l10n/l10n.dart';
 import '../settings/pages/settings_widgets.dart' show SettingsText;
 import '../theme/app_theme.dart' show AppColors;
 import '../theme/codicons.dart';
 import '../theme/material_file_icons.dart' show FileIcon;
 import '../theme/workbench_theme.dart' show themeColors;
+import '../workspace/islands.dart' show IslandTab;
 import '../workspace/window_controls.dart';
 import 'desktop_host_chats.dart';
+import 'desktop_remote_git_client.dart';
+import 'desktop_remote_git_view.dart';
 import 'desktop_remote_media.dart';
 
 part 'desktop_remote_activity_output.dart';
@@ -117,7 +126,12 @@ class DesktopRemoteActivity extends StatefulWidget {
   final Widget? files;
   final DesktopRemoteActivitySession? session;
   final String hostName;
-  final Widget Function(BuildContext context, Widget? activityButton) builder;
+  final Widget Function(
+    BuildContext context,
+    Widget? activityButton,
+    Widget? activityStrip,
+  )
+  builder;
 
   @override
   State<DesktopRemoteActivity> createState() => _DesktopRemoteActivityState();
@@ -197,11 +211,11 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     }
   });
 
+  bool _current(DesktopRemoteActivitySession session) =>
+      mounted && identical(widget.session, session) && session._available;
+
   bool _active(DesktopRemoteActivitySession session) =>
-      mounted &&
-      _open &&
-      identical(widget.session, session) &&
-      session._available;
+      _open && _current(session);
 
   void _showOutput(DesktopRemoteActivitySession session, LinkTask task) {
     if (!_active(session) || session._tasks[task.id]?.output != true) return;
@@ -217,7 +231,7 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     required String description,
     required String target,
   }) async {
-    if (!_active(session) || _confirmation != null) return false;
+    if (!_current(session) || _confirmation != null) return false;
     final token = _confirmation = Object();
     final text = _ActivityText(context);
     try {
@@ -249,7 +263,7 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
       );
       return confirmed == true &&
           identical(_confirmation, token) &&
-          _active(session);
+          _current(session);
     } finally {
       if (identical(_confirmation, token)) _confirmation = null;
     }
@@ -261,7 +275,7 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
   ) async {
     final id = task.id;
     bool canStop() {
-      if (!_active(session)) return false;
+      if (!_current(session)) return false;
       final latest = session._tasks[id];
       return !_stopping.contains(id) &&
           latest?.status == 'running' &&
@@ -302,11 +316,61 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     }
   }
 
+  Widget? _activityStrip(DesktopRemoteActivitySession session) {
+    final tasks = session._tasks;
+    final running = [
+      for (final task in tasks.values)
+        if (task.status == 'running')
+          KernelTask(
+            id: task.id,
+            description: task.description.isEmpty ? task.id : task.description,
+            kind: switch (task.kind) {
+              'agent' => KernelTaskKind.agent,
+              'command' => KernelTaskKind.command,
+              _ => KernelTaskKind.other,
+            },
+            status: CommandStatus.running,
+            startedAt: task.startedAt,
+            summary: task.summary,
+          ),
+    ];
+    final changes = [
+      for (final change in session._changes.values)
+        FileChange(
+          path: change.path,
+          added: change.added ?? 0,
+          removed: change.removed ?? 0,
+          kind: switch (change.kind) {
+            'added' => FileChangeKind.added,
+            'deleted' => FileChangeKind.deleted,
+            _ => FileChangeKind.modified,
+          },
+          binary: change.binary,
+          tracked: !change.untracked,
+          conflict: change.conflict,
+        ),
+    ];
+    if (!ActivityStrip.hasContent(running, changes)) return null;
+    return ActivityStrip(
+      key: ObjectKey(session),
+      tasks: running,
+      changes: changes,
+      paths: p.posix,
+      showLineCounts: session._changes.values.every(
+        (change) =>
+            change.binary || change.added != null && change.removed != null,
+      ),
+      detailOf: (task) => task.summary,
+      onStopTask: (task) => unawaited(_stop(session, tasks[task.id]!)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final text = _ActivityText(context);
     final session = widget.session;
     final sessionAvailable = session?._available == true;
+    final activityStrip = sessionAvailable ? _activityStrip(session!) : null;
     final hasFiles = widget.files != null;
     final available = hasFiles || sessionAvailable;
     final label = hasFiles ? text.projectSidebar : text.activity;
@@ -335,8 +399,14 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
             ? _reviewPreview
             : null;
         final hideChat = compact || preview != null;
+        final wideGit =
+            hasFiles &&
+            _section == _Section.changes &&
+            constraints.maxWidth >= 1200;
         final panelWidth = docked
-            ? math.min(400.0, constraints.maxWidth * .37)
+            ? wideGit
+                  ? math.min(760.0, constraints.maxWidth * .52)
+                  : math.min(400.0, constraints.maxWidth * .37)
             : 0.0;
         return Stack(
           fit: StackFit.expand,
@@ -352,7 +422,11 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
                   excluding: hideChat,
                   child: TickerMode(
                     enabled: !hideChat,
-                    child: widget.builder(context, activityButton),
+                    child: widget.builder(
+                      context,
+                      activityButton,
+                      activityStrip,
+                    ),
                   ),
                 ),
               ),
@@ -398,7 +472,6 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
                                   ),
                                 ),
                                 _sections(text, sessionAvailable),
-                                _activityRule(),
                                 Expanded(
                                   child: Stack(
                                     fit: StackFit.expand,
@@ -421,6 +494,15 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
                                             text,
                                             session!,
                                           ),
+                                          _Section.changes when hasFiles =>
+                                            DesktopRemoteGitView(
+                                              key: ObjectKey(session),
+                                              client: DesktopRemoteGitClient(
+                                                session!.peer,
+                                              ),
+                                              project: session.projectId,
+                                              review: _changes(text, session),
+                                            ),
                                           _Section.changes => _changes(
                                             text,
                                             session!,
@@ -456,41 +538,38 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     );
   }
 
-  Widget _sections(_ActivityText text, bool sessionAvailable) => Padding(
-    padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
-    child: Wrap(
-      spacing: 2,
+  Widget _sections(_ActivityText text, bool sessionAvailable) => SizedBox(
+    height: IslandTab.height,
+    child: Stack(
+      fit: StackFit.expand,
       children: [
-        if (widget.files != null) _tab(_Section.files, text.files),
-        if (sessionAvailable) ...[
-          _tab(_Section.tasks, text.tasks),
-          _tab(_Section.changes, text.changes),
-          _tab(_Section.extensions, text.extensions),
-        ],
+        Align(alignment: Alignment.bottomCenter, child: _activityRule()),
+        SidePanelSectionBar(
+          color: AppColors.background,
+          sections: [
+            if (widget.files != null)
+              _tab(_Section.files, Codicons.files, text.files),
+            if (sessionAvailable) ...[
+              _tab(_Section.tasks, Codicons.tasklist, text.tasks),
+              _tab(_Section.changes, Codicons.sourceControl, text.changes),
+              _tab(_Section.extensions, Codicons.extensions, text.extensions),
+            ],
+          ],
+        ),
       ],
     ),
   );
 
-  Widget _tab(_Section section, String label) {
-    final selected = _section == section;
-    return MergeSemantics(
-      child: Semantics(
-        selected: selected,
-        child: TextButton(
-          style: _activityButtonStyle(
-            context,
-            foreground: selected ? AppColors.accent : AppColors.textMuted,
-            background: selected ? IdeListColors.inactiveSelection : null,
-            selected: selected,
-          ),
-          onPressed: () {
-            if (!selected) _selectSection(section);
-          },
-          child: Text(label),
-        ),
-      ),
-    );
-  }
+  SidePanelSectionEntry _tab(_Section section, IconData icon, String label) =>
+      SidePanelSectionEntry(
+        key: ValueKey('desktop-remote-tab-${section.name}'),
+        icon: icon,
+        label: label,
+        selected: _section == section,
+        onTap: () {
+          if (_section != section) _selectSection(section);
+        },
+      );
 
   void _changeState(VoidCallback change) => setState(change);
 

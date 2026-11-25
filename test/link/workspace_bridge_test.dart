@@ -15,6 +15,7 @@ import 'package:baocode/kernel/claude_code/claude_code_kernel.dart';
 import 'package:baocode/models/codex/codex_service.dart';
 import 'package:baocode/models/model_providers.dart';
 import 'package:baocode/link/chat_codec.dart';
+import 'package:baocode/link/desktop_remote_git_client.dart';
 import 'package:baocode/link/link_quota.dart';
 import 'package:baocode/link/link_platform_io.dart';
 import 'package:baocode/link/workspace_bridge.dart';
@@ -157,6 +158,7 @@ void main() {
     late WorkspaceBridge gitBridge;
     late LinkPeer client;
     late IoLinkPlatform platform;
+    late bool permitsGit;
 
     String git(List<String> args) {
       final result = Process.runSync('git', args, workingDirectory: root);
@@ -189,6 +191,7 @@ void main() {
       git(['config', 'user.name', 'Branch test']);
       git(['config', 'user.email', 'branch-test@example.invalid']);
       git(['config', 'commit.gpgsign', 'false']);
+      git(['config', 'core.autocrlf', 'false']);
       File('$root/file').writeAsStringSync('main\n');
       git(['add', 'file']);
       git(['commit', '-qm', 'main']);
@@ -200,6 +203,7 @@ void main() {
       git(['tag', 'tag-only']);
       git(['update-ref', 'refs/remotes/origin/remote-only', 'HEAD']);
       platform = IoLinkPlatform();
+      permitsGit = true;
       gitWorkspace = Workspace(
         projects: [Project('repo', root)],
         kernels: workspace.kernels,
@@ -215,11 +219,176 @@ void main() {
         device: () =>
             const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
         branchOf: (project) => platform.branchOf(project.root),
+        permitsProjectGit: () => permitsGit,
         onBranchChanged: (project) =>
             platform.branchOf(project.root, refresh: true),
       )..start();
       host.onRequest = gitBridge.handle;
       addTearDown(gitBridge.dispose);
+    });
+
+    test('reads project Git status, bounded history and patches', () async {
+      final api = DesktopRemoteGitClient(client);
+      final initial = git(['rev-parse', 'HEAD']);
+      File('$root/file').writeAsStringSync('committed\n');
+      git(['commit', '-qam', 'second']);
+      final head = git(['rev-parse', 'HEAD']);
+      File('$root/file').writeAsStringSync('staged\n');
+      git(['add', 'file']);
+      File('$root/file').writeAsStringSync('working\n');
+      File('$root/untracked [x]').writeAsStringSync('new file\n');
+      final indexBefore = File('$root/.git/index').readAsBytesSync();
+
+      final status = (await api.status(root))!;
+      expect(status.branch, 'main');
+      expect(status.head, head);
+      expect(status.truncated, isFalse);
+      expect(
+        [for (final file in status.files) (file.path, file.status, file.group)],
+        [
+          ('file', 'M', 'index'),
+          ('file', 'M', 'workingTree'),
+          ('untracked [x]', 'U', 'untracked'),
+        ],
+      );
+      final history = (await api.history(root, limit: 1))!;
+      expect(history.truncated, isTrue);
+      expect(history.commits.single.hash, head);
+      expect(history.commits.single.parentIds, [initial]);
+      expect(history.commits.single.subject, 'second');
+      expect(history.commits.single.refs, contains('HEAD -> refs/heads/main'));
+      expect((await api.history(root))!.commits.length, 2);
+
+      final files = (await api.commitFiles(root, head))!;
+      expect(files.files.single.path, 'file');
+      expect(files.files.single.status, 'M');
+      expect(
+        (await api.commitDiff(root, head, 'file'))!.text,
+        contains('+committed'),
+      );
+      expect(
+        (await api.commitDiff(root, initial, 'file'))!.text,
+        contains('+main'),
+      );
+      expect(
+        (await api.workingDiff(root, 'file', staged: true))!.text,
+        contains('+staged'),
+      );
+      expect((await api.workingDiff(root, 'file'))!.text, contains('+working'));
+      expect(
+        (await api.workingDiff(root, 'untracked [x]'))!.text,
+        contains('+new file'),
+      );
+      expect(File('$root/.git/index').readAsBytesSync(), indexBefore);
+      expect(File('$root/file').readAsStringSync(), 'working\n');
+    });
+
+    test(
+      'scopes project Git requests and rejects path and revision syntax',
+      () async {
+        final api = DesktopRemoteGitClient(client);
+        final head = git(['rev-parse', 'HEAD']);
+        final otherBranch = git(['rev-parse', 'refs/heads/feature/topic']);
+        await expectLater(
+          api.status(folder.path),
+          rejected(LinkErrors.notFound),
+        );
+        await expectLater(
+          api.commitFiles(root, otherBranch),
+          rejected(LinkErrors.notFound),
+        );
+        for (final revision in [
+          'HEAD',
+          '--all',
+          '$head^',
+          head.substring(0, 7),
+        ]) {
+          await expectLater(api.commitFiles(root, revision), rejected('bad'));
+        }
+        for (final path in [
+          '../file',
+          '/file',
+          'C:/file',
+          r'dir\file',
+          ':(glob)*',
+          '.git/config',
+          'dir//file',
+          'file\n',
+        ]) {
+          await expectLater(api.commitDiff(root, head, path), rejected('bad'));
+        }
+        await expectLater(
+          api.commitDiff(root, head, 'f*'),
+          rejected(LinkErrors.notFound),
+        );
+        final inFlight = api.status(root);
+        await Future<void>.delayed(Duration.zero);
+        permitsGit = false;
+        expect(await inFlight, isNull);
+        expect(await api.status(root), isNull);
+      },
+    );
+
+    test('caps large patches and retains a truncated marker', () async {
+      final api = DesktopRemoteGitClient(client);
+      File('$root/file').writeAsStringSync('long line of patch text\n' * 32000);
+      final patch = (await api.workingDiff(root, 'file'))!;
+      expect(patch.truncated, isTrue);
+      expect(utf8.encode(patch.text).length, lessThanOrEqualTo(256 * 1024));
+      expect(patch.text, contains('+long line of patch text'));
+    });
+
+    test('preserves rename paths in staged and committed diffs', () async {
+      final api = DesktopRemoteGitClient(client);
+      git(['mv', '--', 'file', '-file']);
+      final staged = (await api.status(root))!.files.single;
+      expect(
+        (staged.path, staged.originalPath, staged.status),
+        ('-file', 'file', 'R'),
+      );
+      expect(
+        (await api.workingDiff(root, '-file', staged: true))!.text,
+        contains('rename to -file'),
+      );
+      git(['commit', '-qm', 'rename']);
+      final head = git(['rev-parse', 'HEAD']);
+      final committed = (await api.commitFiles(root, head))!.files.single;
+      expect(
+        (committed.path, committed.originalPath, committed.status),
+        ('-file', 'file', 'R'),
+      );
+      expect(
+        (await api.commitDiff(root, head, '-file'))!.text,
+        contains('rename to -file'),
+      );
+    });
+
+    test(
+      'suppresses configured worktree filters and external diff drivers',
+      () async {
+        final api = DesktopRemoteGitClient(client);
+        File('$root/.gitattributes')
+            .writeAsStringSync('file filter=probe diff=probe\n');
+        git(['config', 'filter.probe.clean', 'echo filtered']);
+        git(['config', 'filter.probe.process', 'echo filtered']);
+        git(['config', 'filter.probe.required', 'true']);
+        git(['config', 'diff.probe.command', 'echo external-diff']);
+        git(['config', 'diff.probe.textconv', 'echo external-textconv']);
+        File('$root/file').writeAsStringSync('actual working content\n');
+        final patch = (await api.workingDiff(root, 'file'))!.text;
+        expect(patch, contains('+actual working content'));
+        expect(patch, isNot(contains('filtered')));
+        expect(patch, isNot(contains('external-')));
+      },
+    );
+
+    test('treats an unknown older-host Git method as unavailable', () async {
+      final (oldClient, oldHost) = await peers();
+      addTearDown(oldHost.close);
+      addTearDown(oldClient.close);
+      oldHost.onRequest = (_, _) async =>
+          throw const LinkRemoteException(LinkErrors.unknown, 'Unknown method');
+      expect(await DesktopRemoteGitClient(oldClient).status(root), isNull);
     });
 
     test(
@@ -673,6 +842,83 @@ void main() {
       jsonEncode(fresh.items.sublist(fresh.count - items.length)),
     );
     expect(jsonEncode(fresh.items), contains('Once upon a time'));
+  });
+
+  test('nested agent progress updates tasks outside the item window', () async {
+    Map<String, Object?> call(
+      String id,
+      String name,
+      Map<String, Object?> input, {
+      String? parent,
+    }) => {
+      'type': 'assistant',
+      'uuid': 'm-$id',
+      'parent_tool_use_id': parent,
+      'message': {
+        'id': 'msg-$id',
+        'role': 'assistant',
+        'content': [
+          {'type': 'tool_use', 'id': id, 'name': name, 'input': input},
+        ],
+      },
+    };
+
+    await bridge.handle(LinkMethods.send, {'session': id, 'text': 'go'});
+    await pumpEventQueue();
+    cli
+      ..push(call('outer', 'Agent', {'description': 'Outer agent'}))
+      ..push(
+        call('inner', 'Agent', {'description': 'Inner agent'}, parent: 'outer'),
+      )
+      ..push({
+        'type': 'system',
+        'subtype': 'task_started',
+        'task_id': 'nested-task',
+        'task_type': 'local_agent',
+        'tool_use_id': 'inner',
+        'description': 'Inner agent',
+        'is_backgrounded': true,
+      })
+      ..push({
+        'type': 'system',
+        'subtype': 'task_progress',
+        'task_id': 'nested-task',
+        'summary': 'Kernel progress',
+      })
+      ..push(call('unrelated', 'Read', {'file_path': '/p/other.dart'}));
+    await pumpEventQueue();
+
+    final wire = await bridge.handle(LinkMethods.open, {
+      'session': id,
+      'window': 1,
+    }) as Map<String, Object?>;
+    final mirror = LinkSessionMirror();
+    final opened = LinkSessionUpdate.fromJson(mirror.opened(wire)!);
+    expect(opened.earlier, isTrue);
+    expect(jsonEncode(opened.items), isNot(contains('Outer agent')));
+    final task = opened.tasks.single;
+    expect(task.id, 'nested-task');
+    expect(task.summary, 'Kernel progress');
+
+    final changed = phone.events
+        .where(
+          (e) =>
+              e.name == LinkEvents.session && (e.data! as Map)['tasks'] != null,
+        )
+        .timeout(const Duration(seconds: 2))
+        .first;
+    cli.push(
+      call('read', 'Read', {'file_path': '/p/details.dart'}, parent: 'inner'),
+    );
+    final delta = (await changed).data! as Map<String, Object?>;
+    expect(delta['partial'], isTrue);
+    expect(delta['items'], isEmpty);
+    expect(delta['start'], opened.count);
+    final updated = LinkSessionUpdate.fromJson(mirror.apply(delta)!);
+    expect(updated.tasks.single.toJson(), {
+      ...task.toJson(),
+      'summary': 'Reading details.dart',
+    });
   });
 
   test('a task\'s output is watched: what was added, then all again', () async {

@@ -29,12 +29,14 @@ class DesktopRemoteSessionActions extends StatefulWidget {
     required this.peer,
     required this.chat,
     required this.chats,
+    required this.composer,
     this.enabled = true,
   });
 
   final LinkPeer? peer;
   final DesktopHostChat chat;
   final DesktopHostChats chats;
+  final Widget Function(Widget? deliveryMenu) composer;
   final bool enabled;
 
   @override
@@ -421,6 +423,12 @@ class DesktopRemoteSessionActionsState
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: widget.chats,
     builder: (context, _) {
+      Widget layout({Widget? actions, Widget? deliveryMenu}) => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [?actions, widget.composer(deliveryMenu)],
+      );
+
       final snapshot = _snapshot;
       if (!identical(_follow, snapshot?.follow)) {
         _follow = snapshot?.follow;
@@ -432,7 +440,7 @@ class DesktopRemoteSessionActionsState
         _queueAccepted = false;
         _unsupported.clear();
       }
-      if (snapshot == null) return const SizedBox.shrink();
+      if (snapshot == null) return layout();
       final raw = snapshot.state['interaction'];
       final request = decodeRemoteInteraction(raw);
       final revision = _interactionKey(snapshot);
@@ -492,21 +500,6 @@ class DesktopRemoteSessionActionsState
             ),
         ],
       ];
-      if (delivery) {
-        children.addAll([
-          TextButton.icon(
-            onPressed: ready ? () => _deliver(snapshot, now: false) : null,
-            icon: const Icon(Icons.schedule, size: 16),
-            label: Text(_text(context, 'Queue message', '消息排队')),
-          ),
-          if (_action(snapshot, 'turn') is int)
-            TextButton.icon(
-              onPressed: ready ? () => _deliver(snapshot, now: true) : null,
-              icon: const Icon(Icons.send_outlined, size: 16),
-              label: Text(_text(context, 'Send now', '立即发送')),
-            ),
-        ]);
-      }
       if (_queueAccepted) {
         children.add(
           Semantics(
@@ -538,11 +531,37 @@ class DesktopRemoteSessionActionsState
           }),
         );
       }
-      if (children.isEmpty) return const SizedBox.shrink();
-      return Wrap(
-        spacing: 6,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: children,
+      return layout(
+        actions: children.isEmpty
+            ? null
+            : Wrap(
+                spacing: 6,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: children,
+              ),
+        deliveryMenu: delivery
+            ? SizedBox(
+                width: 28,
+                height: 32,
+                child: PopupMenuButton<void>(
+                  tooltip: _text(context, 'Message delivery', '消息发送方式'),
+                  icon: const Icon(Icons.schedule, size: 17),
+                  padding: EdgeInsets.zero,
+                  enabled: ready,
+                  itemBuilder: (context) => [
+                    PopupMenuItem(
+                      onTap: () => _deliver(snapshot, now: false),
+                      child: Text(_text(context, 'Queue message', '消息排队')),
+                    ),
+                    if (_action(snapshot, 'turn') is int)
+                      PopupMenuItem(
+                        onTap: () => _deliver(snapshot, now: true),
+                        child: Text(_text(context, 'Send now', '立即发送')),
+                      ),
+                  ],
+                ),
+              )
+            : null,
       );
     },
   );

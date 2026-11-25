@@ -1288,6 +1288,8 @@ class LinkHost extends ChangeNotifier {
               }
             }
           : null,
+      permitsProjectGit: () =>
+          connection.groupWorkspace && _group.permits(connection.id),
       filesOf: filesOf,
       reachHost: reachHost,
       customizations: customizations,

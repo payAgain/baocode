@@ -122,6 +122,21 @@ abstract final class LinkMethods {
   /// [LinkEvents.state] reports the resulting project branch.
   static const switchProjectBranch = 'switchProjectBranch';
 
+  /// `{"project"}`: branch, HEAD and changed files in an authorized repository.
+  static const projectGitStatus = 'projectGitStatus';
+
+  /// `{"project", "limit"?}`: a bounded history from the project's HEAD.
+  static const projectGitHistory = 'projectGitHistory';
+
+  /// `{"project", "revision"}`: changed paths against the first parent.
+  static const projectGitCommitFiles = 'projectGitCommitFiles';
+
+  /// `{"project", "path", "staged"?}`: a unified diff for a working change.
+  static const projectGitWorkingDiff = 'projectGitWorkingDiff';
+
+  /// `{"project", "revision", "path"}`: the path's unified commit diff.
+  static const projectGitCommitDiff = 'projectGitCommitDiff';
+
   /// `{"session"}`: off the list (archived on the desktop).
   static const archive = 'archive';
 

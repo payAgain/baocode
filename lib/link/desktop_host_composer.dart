@@ -31,6 +31,7 @@ class DesktopHostComposer extends StatefulWidget {
     this.chat,
     this.isMediaCurrent,
     this.onSendWithAttachments,
+    this.deliveryMenu,
   });
 
   final String initialDraft;
@@ -38,6 +39,7 @@ class DesktopHostComposer extends StatefulWidget {
   final String placeholder;
   final String sendLabel;
   final ValueChanged<String> onChanged;
+  final Widget? deliveryMenu;
   final DesktopHostSessionControls? controls;
   final LinkPeer? peer;
   final DesktopHostChat? chat;
@@ -488,6 +490,7 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
                       zh ? '引用主机项目文件' : 'Mention a host project file',
                       canChange ? () => _listMentions(target) : null,
                     ),
+                  ?widget.deliveryMenu,
                   ListenableBuilder(
                     listenable: _draft,
                     builder: (context, _) {
