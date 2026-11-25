@@ -82,6 +82,60 @@ abstract final class BotLife {
       if (!line.startsWith('Now:')) line,
   ].join('\n').trim();
 
+  /// The current state is intentionally separate from long-lived self facts.
+  static String nowOf(String text) => [
+    for (final line in text.trim().split('\n'))
+      if (line.startsWith('Now:')) line,
+  ].join('\n');
+
+  static List<String> selfFacts(String text) =>
+      _noteFragments(withoutNow(text));
+
+  /// Parse headings in order, keeping repeated names as separate sections.
+  /// An unlabelled preface and empty sections survive the migration as well.
+  static List<({String? person, List<String> fragments})> peopleFacts(
+    String text,
+  ) {
+    final sections = <({String? person, List<String> fragments})>[];
+    final lines = <String>[];
+    String? person;
+    void finish() {
+      final fragments = _noteFragments(lines.join('\n'));
+      if (person != null || fragments.isNotEmpty) {
+        sections.add((person: person, fragments: fragments));
+      }
+      lines.clear();
+    }
+
+    for (final line in text.trim().split('\n')) {
+      if (line.startsWith('## ') && line.substring(3).trim().isNotEmpty) {
+        finish();
+        person = line.substring(3).trim();
+      } else {
+        lines.add(line);
+      }
+    }
+    finish();
+    return sections;
+  }
+
+  static List<String> _noteFragments(String text) {
+    final notes = <String>[];
+    final lines = <String>[];
+    void finish() {
+      final note = lines.join('\n').trim();
+      if (note.isNotEmpty) notes.add(note);
+      lines.clear();
+    }
+
+    for (final line in text.split('\n')) {
+      if (line.trim().isEmpty || line.startsWith('- ')) finish();
+      if (line.trim().isNotEmpty) lines.add(line);
+    }
+    finish();
+    return notes;
+  }
+
   /// A bot's reply [text] as its timeline has it: its messages, not its
   /// narration nor how they sound.
   static String saysOf(String text) => ChatCodec.botSays(text).join(' / ');

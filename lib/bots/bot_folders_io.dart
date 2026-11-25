@@ -53,10 +53,13 @@ class DataBotFolders implements BotFolders {
   }
 
   @override
-  Uint8List? readFile(String path) {
+  Uint8List? readFile(String path, {bool strict = false}) {
     try {
       return File(path).readAsBytesSync();
+    } on PathNotFoundException {
+      return null;
     } on FileSystemException {
+      if (strict) rethrow;
       return null;
     }
   }
@@ -69,6 +72,25 @@ class DataBotFolders implements BotFolders {
       file.writeAsBytesSync(bytes, flush: true);
     } on FileSystemException {
       // Left as it was.
+    }
+  }
+
+  static int _writes = 0;
+
+  @override
+  void writeFileAtomically(String path, Uint8List bytes) {
+    final file = File(path);
+    file.parent.createSync(recursive: true);
+    final temp = File('$path.$pid.${_writes++}.tmp');
+    try {
+      temp.writeAsBytesSync(bytes, flush: true);
+      temp.renameSync(path);
+    } finally {
+      try {
+        if (temp.existsSync()) temp.deleteSync();
+      } on FileSystemException {
+        // Keep the original write error if cleanup failed too.
+      }
     }
   }
 

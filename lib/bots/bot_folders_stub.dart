@@ -20,10 +20,14 @@ class DataBotFolders implements BotFolders {
   List<String> filesIn(String folder) => const [];
 
   @override
-  Uint8List? readFile(String path) => null;
+  Uint8List? readFile(String path, {bool strict = false}) => null;
 
   @override
   void writeFile(String path, Uint8List bytes) {}
+
+  @override
+  void writeFileAtomically(String path, Uint8List bytes) =>
+      throw UnsupportedError('Bot files are unavailable on the web');
 
   @override
   void deleteFile(String path) {}
