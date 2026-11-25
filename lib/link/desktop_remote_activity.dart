@@ -5,12 +5,16 @@ import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
 
 import '../ide/ide_code_diff.dart';
-import '../ide/ide_list.dart' show IdeListColors;
+import '../ide/ide_list.dart' show IdeListColors, IdeListRow;
+import '../l10n/l10n.dart';
 import '../settings/pages/settings_widgets.dart' show SettingsText;
 import '../theme/app_theme.dart' show AppColors;
 import '../theme/codicons.dart';
+import '../theme/material_file_icons.dart' show FileIcon;
 import '../theme/workbench_theme.dart' show themeColors;
+import '../workspace/window_controls.dart';
 import 'desktop_host_chats.dart';
+import 'desktop_remote_media.dart';
 
 part 'desktop_remote_activity_output.dart';
 part 'desktop_remote_activity_review.dart';
@@ -326,6 +330,11 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
         final visible = _open && available;
         final docked = visible && constraints.maxWidth >= 600;
         final compact = visible && !docked;
+        final preview =
+            visible && sessionAvailable && _section == _Section.changes
+            ? _reviewPreview
+            : null;
+        final hideChat = compact || preview != null;
         final panelWidth = docked
             ? math.min(400.0, constraints.maxWidth * .37)
             : 0.0;
@@ -338,11 +347,11 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
               top: 0,
               bottom: 0,
               child: Offstage(
-                offstage: compact,
+                offstage: hideChat,
                 child: ExcludeFocus(
-                  excluding: compact,
+                  excluding: hideChat,
                   child: TickerMode(
-                    enabled: !compact,
+                    enabled: !hideChat,
                     child: widget.builder(context, activityButton),
                   ),
                 ),
@@ -355,68 +364,91 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
                 top: 0,
                 bottom: 0,
                 width: docked ? panelWidth + 1 : null,
-                child: Row(
-                  children: [
-                    if (docked)
-                      VerticalDivider(width: 1, color: AppColors.partBorder),
-                    Expanded(
-                      child: Material(
-                        key: const ValueKey('desktop-remote-project-sidebar'),
-                        color: AppColors.background,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            _ActivityBar(
-                              label: label,
-                              heading: true,
-                              trailing: _ActivityIconButton(
-                                tooltip: hasFiles
-                                    ? text.closeProjectSidebar
-                                    : text.close,
-                                icon: compact
-                                    ? Codicons.arrowLeft
-                                    : Codicons.close,
-                                onPressed: _toggle,
-                              ),
+                child: Offstage(
+                  offstage: compact && preview != null,
+                  child: ExcludeFocus(
+                    excluding: compact && preview != null,
+                    child: Row(
+                      children: [
+                        if (docked)
+                          VerticalDivider(
+                            width: 1,
+                            color: AppColors.partBorder,
+                          ),
+                        Expanded(
+                          child: Material(
+                            key: const ValueKey(
+                              'desktop-remote-project-sidebar',
                             ),
-                            _sections(text, sessionAvailable),
-                            _activityRule(),
-                            Expanded(
-                              child: Stack(
-                                fit: StackFit.expand,
-                                children: [
-                                  if (hasFiles)
-                                    Offstage(
-                                      offstage: _section != _Section.files,
-                                      child: ExcludeFocus(
-                                        excluding: _section != _Section.files,
-                                        child: widget.files!,
-                                      ),
-                                    ),
-                                  if (sessionAvailable &&
-                                      _section != _Section.files)
-                                    switch (_section) {
-                                      _Section.tasks when _output != null =>
-                                        _outputPane(text, _output!),
-                                      _Section.tasks => _tasks(text, session!),
-                                      _Section.changes => _changes(
-                                        text,
-                                        session!,
-                                      ),
-                                      _Section.extensions => _extensionsPane(
-                                        text,
-                                      ),
-                                      _Section.files => const SizedBox.shrink(),
-                                    },
-                                ],
-                              ),
+                            color: AppColors.background,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                _ActivityBar(
+                                  label: label,
+                                  heading: true,
+                                  trailing: _ActivityIconButton(
+                                    tooltip: hasFiles
+                                        ? text.closeProjectSidebar
+                                        : text.close,
+                                    icon: compact
+                                        ? Codicons.arrowLeft
+                                        : Codicons.close,
+                                    onPressed: _toggle,
+                                  ),
+                                ),
+                                _sections(text, sessionAvailable),
+                                _activityRule(),
+                                Expanded(
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      if (hasFiles)
+                                        Offstage(
+                                          offstage: _section != _Section.files,
+                                          child: ExcludeFocus(
+                                            excluding:
+                                                _section != _Section.files,
+                                            child: widget.files!,
+                                          ),
+                                        ),
+                                      if (sessionAvailable &&
+                                          _section != _Section.files)
+                                        switch (_section) {
+                                          _Section.tasks when _output != null =>
+                                            _outputPane(text, _output!),
+                                          _Section.tasks => _tasks(
+                                            text,
+                                            session!,
+                                          ),
+                                          _Section.changes => _changes(
+                                            text,
+                                            session!,
+                                          ),
+                                          _Section.extensions =>
+                                            _extensionsPane(text),
+                                          _Section.files =>
+                                            const SizedBox.shrink(),
+                                        },
+                                    ],
+                                  ),
+                                ),
+                              ],
                             ),
-                          ],
+                          ),
                         ),
-                      ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
+              ),
+            if (preview != null)
+              PositionedDirectional(
+                start: 0,
+                end: docked ? panelWidth + 1 : 0,
+                top: 0,
+                bottom: 0,
+                child: _reviewPane(text, session!, preview, compact: compact),
               ),
           ],
         );
@@ -712,14 +744,12 @@ class _ActivityRow extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.metadata,
-    this.selectableTitle = false,
     this.children = const [],
   });
 
   final IconData icon;
   final String title;
   final String metadata;
-  final bool selectableTitle;
   final List<Widget> children;
 
   @override
@@ -738,9 +768,7 @@ class _ActivityRow extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             spacing: 3,
             children: [
-              selectableTitle
-                  ? SelectableText(title, style: _activityTitle)
-                  : Text(title, style: _activityTitle),
+              Text(title, style: _activityTitle),
               Text(metadata, style: _activityDetail),
               ...children,
             ],

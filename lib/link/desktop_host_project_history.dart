@@ -1,3 +1,4 @@
+import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
 
 import '../chat/chat_history_view.dart';
@@ -7,7 +8,9 @@ import '../chat/widgets/chat_minimap.dart';
 import '../chat/host_transcript_scope.dart';
 import '../chat/panels/reply_suggestion_bar.dart';
 import '../theme/app_theme.dart';
+import 'desktop_host_chats.dart';
 import 'desktop_host_project_history_feed.dart';
+import 'desktop_remote_media_preview.dart';
 
 /// The ordinary chat transcript with a read-only feed from a desktop host.
 class DesktopHostProjectHistory extends StatelessWidget {
@@ -18,7 +21,11 @@ class DesktopHostProjectHistory extends StatelessWidget {
     this.emptyLabel,
     this.onPickReply,
     this.openMessageEditor,
+    this.media,
   });
+
+  final ({LinkPeer? peer, DesktopHostChat chat, bool Function() isCurrent})?
+  media;
 
   final DesktopHostProjectHistoryFeed feed;
   final bool earlierEnabled;
@@ -50,6 +57,20 @@ class DesktopHostProjectHistory extends StatelessWidget {
           earlierEnabled: earlierEnabled,
           hostTranscript: true,
           openMessageEditor: openMessageEditor,
+          wrapItem: (index, item, child) {
+            final images = feed.imagesAt(index);
+            final target = media;
+            if (target == null || images.isEmpty) return child;
+            return DesktopRemoteMessageImages(
+              key: ObjectKey(feed.itemAt(index)),
+              peer: target.peer,
+              chat: target.chat,
+              images: images,
+              isCurrent: target.isCurrent,
+              trailing: item is UserMessageItem,
+              child: child,
+            );
+          },
         ),
       ),
     );

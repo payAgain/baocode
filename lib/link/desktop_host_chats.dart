@@ -170,20 +170,6 @@ class DesktopHostChats extends ChangeNotifier {
     return _view;
   }
 
-  List<DesktopRemoteImage> projectImages(LinkPeer? peer, DesktopHostChat chat) {
-    if (chat.kind != 'project' || !isCurrentConversation(peer, chat)) {
-      return const [];
-    }
-    final recent = _view!.sessionItems.reversed.take(100).toList();
-    return DesktopRemoteImage.projectItems([
-      for (final item in recent.reversed)
-        if (item case {'t': 'text', 'text': final String text})
-          {'t': 'text', 'text': _visibleText(text)}
-        else
-          item,
-    ]);
-  }
-
   bool get hasEarlier => _view?.hasEarlier ?? false;
   bool get busy =>
       _loadingState ||
@@ -853,7 +839,7 @@ class DesktopHostChats extends ChangeNotifier {
     );
   }
 
-  static ChatItem? _projectItem(Object? raw) {
+  static DesktopHostHistoryRow? _projectItem(Object? raw) {
     if (raw is! Map<String, Object?>) return null;
     final data = {...raw};
     if (data['text'] case final String text) {
@@ -870,7 +856,20 @@ class DesktopHostChats extends ChangeNotifier {
         data['text'] = shown;
       }
     }
-    return ChatCodec.decode(data, hostTranscript: true);
+    final item = ChatCodec.decode(data, hostTranscript: true);
+    if (item == null) return null;
+    final images = switch (data) {
+      {'t': 'user'} => DesktopRemoteImage.message(images: data['images']),
+      {'t': 'tool', 'status': 'succeeded'} => DesktopRemoteImage.message(
+        images: data['images'],
+        toolImage: data['url'] is String ? data['url'] as String : null,
+      ),
+      {'t': 'text', 'text': final String text} => DesktopRemoteImage.message(
+        markdown: _visibleText(text),
+      ),
+      _ => const <DesktopRemoteImage>[],
+    };
+    return (item: item, images: images);
   }
 
   Iterable<DesktopHostMessage> _groupMessages(_HostView view) sync* {

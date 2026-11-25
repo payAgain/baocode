@@ -2,12 +2,14 @@ import 'dart:async';
 
 import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../chat/chat_session.dart' show ModelSettingChoice;
 import '../chat/composer/composer_picker.dart';
 import '../chat/composer/pickers_row.dart';
 import '../chat/floating/floating_layer.dart';
 import '../chat/floating/floating_placement.dart';
+import '../chat/floating/floating_registry.dart';
 import '../chat/panels/context_usage_panel.dart';
 import '../chat/widgets/context_meter.dart';
 import '../ide/ide_hover.dart';
@@ -214,24 +216,21 @@ class DesktopHostSessionFooter extends StatelessWidget {
   }
 }
 
-Widget _projectLabel(IconData icon, String text, {bool dropdown = false}) =>
-    Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, size: 13, color: AppColors.textFaint),
-        const SizedBox(width: 4),
-        Flexible(
-          child: Text(
-            text,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(color: AppColors.textFaint, fontSize: 12),
-          ),
-        ),
-        if (dropdown)
-          Icon(Codicons.chevronDown, size: 12, color: AppColors.textFaint),
-      ],
-    );
+Widget _projectLabel(IconData icon, String text) => Row(
+  mainAxisSize: MainAxisSize.min,
+  children: [
+    Icon(icon, size: 13, color: AppColors.textFaint),
+    const SizedBox(width: 4),
+    Flexible(
+      child: Text(
+        text,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(color: AppColors.textFaint, fontSize: 12),
+      ),
+    ),
+  ],
+);
 
 class _HostProject extends StatelessWidget {
   const _HostProject(this.project, this.branchAccess);
@@ -270,6 +269,9 @@ class _HostProject extends StatelessWidget {
   }
 }
 
+KernelOption _branchOption(String name) =>
+    KernelOption(name, name, Codicons.gitBranch, '');
+
 class _HostBranch extends StatefulWidget {
   const _HostBranch({super.key, required this.project, required this.access});
 
@@ -281,7 +283,8 @@ class _HostBranch extends StatefulWidget {
 }
 
 class _HostBranchState extends State<_HostBranch> {
-  final _menu = MenuController();
+  final _picker = GlobalKey<ComposerPickerState>();
+  final _focus = FocusNode(debugLabel: 'Host branch picker');
   Object? _listing;
   List<String> _branches = const [];
   ({String oid, String? branch})? _head;
@@ -291,9 +294,42 @@ class _HostBranchState extends State<_HostBranch> {
 
   bool get _current => mounted && widget.access.isCurrent();
 
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _handleKey(FocusNode node, KeyEvent event) {
+    if (!node.hasPrimaryFocus) return KeyEventResult.ignored;
+    if (FloatingRegistry.handleKey(event) case final result?) return result;
+    if (_picker.currentState?.isOpen == true &&
+        (event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+            event.logicalKey == LogicalKeyboardKey.arrowRight)) {
+      // Without a submenu, leave focus on the picker (also while loading).
+      return KeyEventResult.handled;
+    }
+    if (event is KeyDownEvent &&
+        (event.logicalKey == LogicalKeyboardKey.enter ||
+            event.logicalKey == LogicalKeyboardKey.space) &&
+        _current &&
+        !_switching) {
+      _picker.currentState?.toggle();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
   Future<void> _list() async {
-    if (!_current) return;
+    if (!_current || _switching) {
+      _picker.currentState?.close();
+      return;
+    }
     final request = Object();
+    bool current() =>
+        _current &&
+        identical(_listing, request) &&
+        _picker.currentState?.isOpen == true;
     setState(() {
       _listing = request;
       _error = null;
@@ -305,7 +341,7 @@ class _HostBranchState extends State<_HostBranch> {
         LinkMethods.projectBranches,
         {'project': widget.project.id},
       );
-      if (!_current || !identical(_listing, request) || !_menu.isOpen) return;
+      if (!current()) return;
       if (response
           case final Map<String, Object?> result &&
               {'branches': final List branches, 'head': final String oid}
@@ -324,8 +360,8 @@ class _HostBranchState extends State<_HostBranch> {
         throw const FormatException('Missing host branches');
       }
     } on Object catch (error) {
-      if (!_current || !identical(_listing, request) || !_menu.isOpen) return;
-      _menu.close();
+      if (!current()) return;
+      _picker.currentState?.close();
       _report(error, listing: true);
     }
   }
@@ -387,6 +423,8 @@ class _HostBranchState extends State<_HostBranch> {
   @override
   Widget build(BuildContext context) {
     final branch = widget.project.branch!;
+    final current = _head?.branch;
+    final l10n = context.l10n;
     final zh = _zh(context);
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -395,48 +433,28 @@ class _HostBranchState extends State<_HostBranch> {
         if (_unsupported)
           _projectLabel(Codicons.gitBranch, branch)
         else
-          MenuAnchor(
-            controller: _menu,
-            onOpen: () => unawaited(_list()),
-            menuChildren: [
-              if (_listing != null || _branches.isEmpty)
-                MenuItemButton(
-                  child: Text(
-                    _listing != null
-                        ? (zh ? '正在读取分支…' : 'Loading branches…')
-                        : (zh ? '没有本地分支' : 'No local branches'),
-                  ),
-                )
-              else
-                for (final name in _branches)
-                  MenuItemButton(
-                    leadingIcon: name == _head?.branch
-                        ? const Icon(Codicons.check, size: 14)
-                        : null,
-                    onPressed: name == _head?.branch
-                        ? null
-                        : () => unawaited(_switch(name)),
-                    child: Text(name),
-                  ),
-            ],
-            builder: (context, menu, child) => TextButton(
-              key: const ValueKey('host-branch-picker'),
-              style: TextButton.styleFrom(
-                minimumSize: const Size(0, 24),
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                visualDensity: VisualDensity.compact,
-              ),
-              onPressed: _switching
-                  ? null
-                  : () {
-                      if (menu.isOpen) {
-                        menu.close();
-                      } else if (_current) {
-                        menu.open();
-                      }
-                    },
-              child: _projectLabel(Codicons.gitBranch, branch, dropdown: true),
+          Focus(
+            key: const ValueKey('host-branch-picker'),
+            focusNode: _focus,
+            onKeyEvent: _handleKey,
+            child: ComposerPicker(
+              key: _picker,
+              options: [for (final name in _branches) _branchOption(name)],
+              selected: _branchOption(current ?? ''),
+              // The menu checks the RPC snapshot, while the pill follows the
+              // catalog, including after a successful switch.
+              label: branch,
+              foreground: AppColors.textFaint,
+              descriptionAside: true,
+              title: l10n.branchBarSwitch,
+              searchPlaceholder: l10n.branchBarSearch,
+              focusNode: _focus,
+              enabled: !_switching,
+              emptyMessage: _listing != null
+                  ? (zh ? '正在读取分支…' : 'Loading branches…')
+                  : (zh ? '没有本地分支' : 'No local branches'),
+              onOpen: () => unawaited(_list()),
+              onSelected: (option) => unawaited(_switch(option.id)),
             ),
           ),
         if (_error case final error?)

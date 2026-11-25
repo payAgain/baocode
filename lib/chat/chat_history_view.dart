@@ -78,6 +78,7 @@ class ChatHistoryView extends StatefulWidget {
     this.earlierEnabled = true,
     this.hostTranscript = false,
     this.openMessageEditor,
+    this.wrapItem,
   });
 
   /// The conversation shown: a session's, or a subagent's.
@@ -130,6 +131,8 @@ class ChatHistoryView extends StatefulWidget {
   /// Supplies an inline editor for this row, or null to open the viewer.
   final ChatHistoryMessageEditor? Function(int index, UserMessageItem item)?
   openMessageEditor;
+
+  final Widget Function(int index, ChatItem item, Widget child)? wrapItem;
 
   @override
   State<ChatHistoryView> createState() => _ChatHistoryViewState();
@@ -3110,7 +3113,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
           appear: _appearing.contains(index),
           onShown: () => _appearing.remove(index),
           ghost: index == _handoffIndex ? _statusGhost(index) : null,
-          child: view,
+          child: widget.wrapItem?.call(index, item, view) ?? view,
         ),
       };
     }

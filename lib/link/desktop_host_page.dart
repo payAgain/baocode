@@ -1174,33 +1174,27 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 if (error != null) _Notice(error, isError: true),
                 Expanded(
                   child: history != null
-                      ? DesktopRemoteMessageImages(
-                          peer: peer,
-                          chat: chat,
-                          images: _chats.projectImages(peer, chat),
-                          expandChild: true,
-                          isCurrent: isCurrent,
-                          child: DesktopHostProjectHistory(
-                            feed: history,
-                            openMessageEditor: (index, item) =>
-                                _remoteActionsKey.currentState
-                                    ?.openMessageEditor(history, index, item),
-                            earlierEnabled: !_busy && !_chatBusy,
-                            emptyLabel: !_chatBusy && error == null
-                                ? text.emptyChat
-                                : null,
-                            onPickReply: _busy || _chatBusy
-                                ? null
-                                : (reply) {
-                                    if (_busy ||
-                                        _chatBusy ||
-                                        (drafts[chatKey]?.trim().isNotEmpty ??
-                                            false)) {
-                                      return;
-                                    }
-                                    setState(() => drafts[chatKey] = reply);
-                                  },
-                          ),
+                      ? DesktopHostProjectHistory(
+                          feed: history,
+                          media: (peer: peer, chat: chat, isCurrent: isCurrent),
+                          openMessageEditor: (index, item) => _remoteActionsKey
+                              .currentState
+                              ?.openMessageEditor(history, index, item),
+                          earlierEnabled: !_busy && !_chatBusy,
+                          emptyLabel: !_chatBusy && error == null
+                              ? text.emptyChat
+                              : null,
+                          onPickReply: _busy || _chatBusy
+                              ? null
+                              : (reply) {
+                                  if (_busy ||
+                                      _chatBusy ||
+                                      (drafts[chatKey]?.trim().isNotEmpty ??
+                                          false)) {
+                                    return;
+                                  }
+                                  setState(() => drafts[chatKey] = reply);
+                                },
                         )
                       : messages.isEmpty && !hasEarlier
                       ? Center(

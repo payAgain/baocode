@@ -11,6 +11,7 @@ import 'package:baocode/theme/app_theme.dart';
 import 'package:baocode/theme/workbench_theme.dart' as workbench;
 import 'package:baocode/theme/workbench_theme_initial_colors.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -291,7 +292,8 @@ void main() {
       await _tap(tester, find.byTooltip('Host activity'));
       await _tap(tester, find.text('Changes'));
       expect(find.text('src/First.dart'), findsOneWidget);
-      expect(find.text('Modified · +4 −2'), findsOneWidget);
+      expect(find.text('Modified'), findsOneWidget);
+      expect(find.text('+4 −2'), findsOneWidget);
       expect(find.text('Added · Binary · Untracked'), findsOneWidget);
       await _tap(tester, find.text('Keep').first);
       expect(host.methods, [LinkMethods.open]);
@@ -376,7 +378,7 @@ void main() {
     await host.close(tester);
   });
 
-  testWidgets('a confirmed diff reads only the advertised review revision', (
+  testWidgets('a changed file opens the read-only workbench diff directly', (
     tester,
   ) async {
     final host = await _Host.show(tester);
@@ -393,13 +395,16 @@ void main() {
     await tester.pumpAndSettle();
     await _tap(tester, find.byTooltip('Host activity'));
     await _tap(tester, find.text('Changes'));
-    await _tap(tester, find.text('Preview diff'));
-    expect(find.textContaining('Fixture host'), findsOneWidget);
-    expect(host.methods, [LinkMethods.open]);
-    await _tap(tester, find.text('Cancel'));
-    expect(host.methods, [LinkMethods.open]);
-    await _tap(tester, find.text('Preview diff'));
-    await _tap(tester, _confirmButton('Preview diff'));
+    final row = find.byKey(const ValueKey(('remote-change', path)));
+    final editor = find.byKey(const ValueKey('desktop-remote-diff-editor'));
+    final chat = tester.state(find.byType(EditableText));
+    await tester.enterText(find.byType(TextField), 'unsent draft');
+    await _tap(tester, row);
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(host.methods, [LinkMethods.open, LinkMethods.read]);
+    expect(find.text('Loading…'), findsOneWidget);
+    expect(tester.getRect(editor).right, lessThan(tester.getRect(row).left));
+    expect(find.byType(TextField).hitTestable(), findsNothing);
     host.expectLast(LinkMethods.read, {
       'session': 'session-a',
       'path': path,
@@ -411,6 +416,23 @@ void main() {
     expect(diff.original, 'before\n');
     expect(diff.modified, 'after\n');
     expect(diff.onEdit, isNull);
+    expect(diff.embedded, isFalse);
+    expect(find.text('Read-only'), findsOneWidget);
+    await tester.binding.setSurfaceSize(const Size(520, 720));
+    await tester.pumpAndSettle();
+    expect(row.hitTestable(), findsNothing);
+    expect(tester.getSize(editor).width, 520);
+    expect(
+      tester.widget<IdeCodeDiff>(find.byType(IdeCodeDiff)).sideBySide,
+      isFalse,
+    );
+    await _tap(tester, find.byTooltip('Back to changes'));
+    expect(editor, findsNothing);
+    expect(row.hitTestable(), findsOneWidget);
+    await _tap(tester, row);
+    expect(find.byType(IdeCodeDiff), findsOneWidget);
+    await tester.binding.setSurfaceSize(const Size(1000, 760));
+    await tester.pumpAndSettle();
     host.push(
       'session-a',
       changes: const [
@@ -419,8 +441,88 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.byType(IdeCodeDiff), findsNothing);
+    expect(tester.state(find.byType(EditableText)), same(chat));
+    expect(find.text('unsent draft'), findsOneWidget);
     await host.close(tester);
   });
+
+  testWidgets('switching change rows ignores a late diff reply', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester);
+    final first = Completer<Object?>();
+    host.reply = (method, args) => switch (args['path']) {
+      'first.txt' => first.future,
+      'second.txt' => {'original': '', 'text': 'second\n'},
+      _ => throw StateError(method),
+    };
+    host.push(
+      'session-a',
+      changes: const [
+        {'path': 'first.txt', 'revision': 'a', 'preview': true},
+        {'path': 'second.txt', 'revision': 'b', 'preview': true},
+      ],
+    );
+    await tester.pumpAndSettle();
+    await _tap(tester, find.byTooltip('Host activity'));
+    await _tap(tester, find.text('Changes'));
+    await _tap(
+      tester,
+      find.byKey(const ValueKey(('remote-change', 'first.txt'))),
+    );
+    await _tap(
+      tester,
+      find.byKey(const ValueKey(('remote-change', 'second.txt'))),
+    );
+    first.complete({'original': '', 'text': 'late\n'});
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<IdeCodeDiff>(find.byType(IdeCodeDiff)).modified,
+      'second\n',
+    );
+    await host.close(tester);
+  });
+
+  testWidgets('unsupported text preview offers an explicit file download', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester);
+    const channel = MethodChannel('baocode/window');
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final dialogs = <MethodCall>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      dialogs.add(call);
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    host.push(
+      'session-a',
+      changes: const [
+        {
+          'path': 'binary.bin',
+          'revision': 'a',
+          'preview': true,
+          'binary': true,
+        },
+      ],
+    );
+    await tester.pumpAndSettle();
+    await _tap(tester, find.byTooltip('Host activity'));
+    await _tap(tester, find.text('Changes'));
+    await _tap(tester, find.text('binary.bin'));
+    expect(
+      find.text('Binary files cannot be shown as a text diff.'),
+      findsOneWidget,
+    );
+    expect(find.byType(IdeCodeDiff), findsNothing);
+    expect(host.methods, [LinkMethods.open]);
+    expect(dialogs, isEmpty);
+    await _tap(tester, find.byTooltip('Download current file…'));
+    expect(dialogs.single.method, 'pickSaveFile');
+    expect(dialogs.single.arguments, {'name': 'binary.bin'});
+    expect(host.methods, [LinkMethods.open]);
+    await host.close(tester);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
   testWidgets('an old confirmation cannot undo a changed record or session', (
     tester,

@@ -223,10 +223,16 @@ void main() {
         tester,
         (method, _) => switch (method) {
           LinkMethods.open => _history('project-session', [
-            _user('Synthetic project prompt'),
+            {
+              ..._user('Synthetic project prompt'),
+              'images': [
+                {'type': 'image/png', 'data': _png, 'name': 'prompt.png'},
+              ],
+            },
             _reply(
               '![figure](assets/project.png)\n![web](https://example.invalid/web.png)\n![absolute](/fixture/local.png)',
             ),
+            _user('Later project prompt'),
           ]),
           LinkMethods.image => imageReply.future,
           _ => null,
@@ -234,12 +240,24 @@ void main() {
       );
       try {
         await fixture.select(tester, 'Fixture session');
-        expect(
-          find.text('Synthetic project prompt').hitTestable(),
-          findsOneWidget,
-        );
         expect(fixture.requests(LinkMethods.image), isEmpty);
-        expect(find.text('Image: project.png'), findsOneWidget);
+        final prompt = find
+            .textContaining('Synthetic project prompt')
+            .hitTestable();
+        final attachment = find.text('Image: prompt.png');
+        final figure = find.text('Image: project.png');
+        final nextPrompt = find.text('Later project prompt').hitTestable();
+        expect(attachment, findsOneWidget);
+        expect(figure, findsOneWidget);
+        expect(find.text('Conversation images'), findsNothing);
+        expect(
+          tester.getTopLeft(attachment).dy,
+          greaterThan(tester.getTopLeft(prompt).dy),
+        );
+        expect(
+          tester.getTopLeft(figure).dy,
+          lessThan(tester.getTopLeft(nextPrompt).dy),
+        );
         expect(find.text('Image: web.png'), findsNothing);
         expect(find.text('Image: local.png'), findsNothing);
         await tester.tap(find.text('Image: project.png'));

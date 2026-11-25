@@ -72,8 +72,8 @@ void main() {
             )
             ..replaceTail(0, [
               for (var i = 0; i < 40; i++) ...[
-                UserMessageItem(text: 'Question $i'),
-                AssistantTextItem('Reply $i'),
+                (item: UserMessageItem(text: 'Question $i'), images: []),
+                (item: AssistantTextItem('Reply $i'), images: []),
               ],
             ])
             ..publish(live: false, earlier: false, interaction: false);

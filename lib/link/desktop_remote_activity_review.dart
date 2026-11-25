@@ -23,7 +23,10 @@ class _ReviewPreview {
   _ReviewPreview(this.change);
 
   final _Change change;
-  Widget Function()? content;
+  (String, String)? diff;
+  String? error;
+  bool downloading = false;
+  String? downloadStatus;
 }
 
 Map<String, _Change> _parseChanges(Object? value) {
@@ -178,94 +181,161 @@ extension _ChangeReview on _DesktopRemoteActivityState {
   ) async {
     final path = change.path;
     final revision = change.revision;
-    bool current() =>
-        _active(session) &&
-        _section == _Section.changes &&
-        session._changes[path] == change;
-    if (revision == null ||
-        !change.preview ||
+    if (!_active(session) ||
+        _section != _Section.changes ||
+        session._changes[path] != change ||
         !_projectRelative(path) ||
-        !current()) {
+        _reviewPreview?.change == change) {
       return;
     }
     final text = _ActivityText(context);
-    if (!await _confirm(
-          session,
-          action: text.previewDiff,
-          description: text.previewDescription(widget.hostName),
-          target: path,
-        ) ||
-        !current()) {
-      return;
-    }
-
     final preview = _ReviewPreview(change);
+    if (revision == null || !change.preview) {
+      preview.error = change.binary
+          ? text.binaryPreview
+          : text.previewUnavailable;
+    }
     _changeState(() => _reviewPreview = preview);
-    Widget Function() content;
+    if (revision == null || !change.preview) return;
+
+    (String, String)? diff;
+    String? error;
     try {
       final response = await session.peer.call(LinkMethods.read, {
         'session': session.session,
         'path': path,
         'expectedChange': revision,
       });
-      content = switch (response) {
-        {'original': final String before, 'text': final String after}
-            when before.length <= LinkLimits.file &&
-                after.length <= LinkLimits.file =>
-          () => IdeCodeDiff(
-            path: path,
-            original: before,
-            modified: after,
-            sideBySide: false,
-            embedded: true,
-            bars: false,
-          ),
-        _ => () => _ActivityNotice(
-          icon: Codicons.diff,
-          label: text.previewUnavailable,
-        ),
+      if (response
+          case {'original': final String before, 'text': final String after}
+          when before.length <= LinkLimits.file &&
+              after.length <= LinkLimits.file) {
+        diff = (before, after);
+      } else {
+        error = switch (response) {
+          {'binary': true} => text.binaryPreview,
+          {'tooLarge': true} ||
+          {'original': String(), 'text': String()} => text.largePreview,
+          _ => text.previewUnavailable,
+        };
+      }
+    } on LinkRemoteException catch (failure) {
+      error = switch (failure.code) {
+        'stale' || LinkErrors.notFound => text.reviewError(_ReviewError.stale),
+        LinkErrors.unsupported || LinkErrors.unknown => text.previewUnavailable,
+        _ => text.actionFailed,
       };
-    } on LinkRemoteException catch (error) {
-      content = () => _ActivityNotice(
-        icon: Codicons.warning,
-        label: switch (error.code) {
-          'stale' ||
-          LinkErrors.notFound => text.reviewError(_ReviewError.stale),
-          LinkErrors.unsupported ||
-          LinkErrors.unknown => text.previewUnavailable,
-          _ => text.actionFailed,
-        },
-      );
     } on Object {
-      content = () =>
-          _ActivityNotice(icon: Codicons.warning, label: text.actionFailed);
+      error = text.actionFailed;
     }
-    if (!identical(_reviewPreview, preview) || !current()) return;
-    _changeState(() => preview.content = content);
+    if (!_currentReview(session, preview)) return;
+    _changeState(() {
+      preview.diff = diff;
+      preview.error = error;
+    });
   }
 
-  Widget _changes(_ActivityText text, DesktopRemoteActivitySession session) {
-    if (_reviewPreview case final preview?) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _ActivityBar(
-            leading: _ActivityIconButton(
-              tooltip: text.backToChanges,
-              icon: Codicons.arrowLeft,
-              onPressed: () => _changeState(() => _reviewPreview = null),
-            ),
-            label: preview.change.path,
-          ),
-          _activityRule(),
-          Expanded(
-            child:
-                preview.content?.call() ??
-                _ActivityNotice(icon: Codicons.diff, label: text.loading),
-          ),
-        ],
+  bool _currentReview(
+    DesktopRemoteActivitySession session,
+    _ReviewPreview preview,
+  ) =>
+      identical(_reviewPreview, preview) &&
+      _active(session) &&
+      _section == _Section.changes &&
+      session._changes[preview.change.path] == preview.change;
+
+  Future<void> _downloadChangeFile(
+    DesktopRemoteActivitySession session,
+    _ReviewPreview preview,
+  ) async {
+    bool current() => _currentReview(session, preview);
+    if (preview.downloading || !current()) return;
+    final l10n = context.l10n;
+    final text = _ActivityText(context);
+    _changeState(() {
+      preview.downloading = true;
+      preview.downloadStatus = null;
+    });
+    try {
+      final saved = await downloadRemoteFile(
+        peer: session.peer,
+        project: session.projectId,
+        path: preview.change.path,
+        isCurrent: current,
       );
+      if (saved && current()) preview.downloadStatus = text.fileSaved;
+    } on Object catch (error) {
+      if (current()) preview.downloadStatus = remoteMediaError(l10n, error);
+    } finally {
+      if (current()) _changeState(() => preview.downloading = false);
     }
+  }
+
+  Widget _reviewPane(
+    _ActivityText text,
+    DesktopRemoteActivitySession session,
+    _ReviewPreview preview, {
+    required bool compact,
+  }) => Material(
+    key: const ValueKey('desktop-remote-diff-editor'),
+    color: AppColors.code,
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _ActivityBar(
+          leading: _ActivityIconButton(
+            tooltip: text.backToChanges,
+            icon: compact ? Codicons.arrowLeft : Codicons.close,
+            onPressed: () => _changeState(() => _reviewPreview = null),
+          ),
+          label: preview.change.path,
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Tooltip(
+                message: text.readOnlyDiff,
+                child: Text(context.l10n.shownReadOnly, style: _activityDetail),
+              ),
+              if (WindowControls.canPickFiles &&
+                  preview.change.kind != 'deleted' &&
+                  remoteRelativePath(preview.change.path))
+                _ActivityIconButton(
+                  icon: Codicons.cloudDownload,
+                  tooltip: text.downloadCurrentFile,
+                  onPressed: preview.downloading
+                      ? null
+                      : () => _downloadChangeFile(session, preview),
+                ),
+            ],
+          ),
+        ),
+        _activityRule(),
+        if (preview.downloadStatus case final status?)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Text(status, style: _activityDetail),
+          ),
+        Expanded(
+          child: switch (preview) {
+            _ReviewPreview(diff: (final before, final after)) => IdeCodeDiff(
+              key: ObjectKey(preview),
+              path: preview.change.path,
+              original: before,
+              modified: after,
+              sideBySide: compact ? false : null,
+            ),
+            _ReviewPreview(error: final error?) => _ActivityNotice(
+              icon: Codicons.warning,
+              label: error,
+            ),
+            _ => _ActivityNotice(icon: Codicons.diff, label: text.loading),
+          },
+        ),
+      ],
+    ),
+  );
+
+  Widget _changes(_ActivityText text, DesktopRemoteActivitySession session) {
     final changes = session._changes.values.toList();
     if (changes.isEmpty) {
       return _ActivityNotice(icon: Codicons.diff, label: text.noChanges);
@@ -280,47 +350,97 @@ extension _ChangeReview on _DesktopRemoteActivityState {
           if (change.added case final added?) '+$added',
           if (change.removed case final removed?) '−$removed',
         ].join(' ');
-        return _ActivityRow(
-          icon: Codicons.diff,
-          title: change.path,
-          selectableTitle: true,
-          metadata: [
-            text.changeKind(change.kind),
-            if (counts.isNotEmpty) counts,
-            if (change.binary) text.binary,
-            if (change.untracked) text.untracked,
-            if (change.conflict) text.conflict,
-          ].join(' · '),
-          children: [
-            if (pending)
-              Text(text.awaitingHost, style: _activityDetail)
-            else if (_projectRelative(change.path))
-              Wrap(
-                spacing: 4,
-                children: [
-                  _ActivityAction(
-                    label: text.keep,
-                    onPressed: () => _review(session, change, keep: true),
+        final inProject = _projectRelative(change.path);
+        final selected = _reviewPreview?.change == change;
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              IdeListRow(
+                key: ValueKey(('remote-change', change.path)),
+                tooltip: change.path,
+                selected: selected,
+                height: math.max(
+                  IdeListColors.rowHeight,
+                  MediaQuery.textScalerOf(context).scale(13) * 1.45,
+                ),
+                onTap: inProject ? () => _previewChange(session, change) : null,
+                builder: (context, hovered) => Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Row(
+                    spacing: 6,
+                    children: [
+                      FileIcon(change.path.split('/').last),
+                      Expanded(
+                        child: Text(
+                          change.path,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: _activityTitle.copyWith(
+                            color: selected
+                                ? IdeListColors.inactiveSelectionForeground
+                                : hovered
+                                ? IdeListColors.hoverForeground
+                                : IdeListColors.foreground,
+                          ),
+                        ),
+                      ),
+                      if (counts.isNotEmpty)
+                        Text(counts, style: _activityDetail),
+                    ],
                   ),
-                  _ActivityAction(
-                    label: text.undo,
-                    onPressed: change.undoable
-                        ? () => _review(session, change, keep: false)
-                        : null,
-                    secondary: true,
-                  ),
-                  if (change.preview && change.revision != null)
-                    _ActivityAction(
-                      label: text.previewDiff,
-                      onPressed: () => _previewChange(session, change),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsetsDirectional.only(start: 30, end: 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      [
+                        text.changeKind(change.kind),
+                        if (change.binary) text.binary,
+                        if (change.untracked) text.untracked,
+                        if (change.conflict) text.conflict,
+                      ].join(' · '),
+                      style: _activityDetail,
                     ),
-                ],
-              )
-            else
-              Text(text.outsideProject, style: _activityDetail),
-            if (_reviewErrors[change.path] case final error?)
-              _ActivityError(text.reviewError(error)),
-          ],
+                    if (pending)
+                      Text(text.awaitingHost, style: _activityDetail)
+                    else if (inProject)
+                      Wrap(
+                        spacing: 4,
+                        children: [
+                          if (change.preview && change.revision != null)
+                            _ActivityAction(
+                              label: text.previewDiff,
+                              onPressed: () => _previewChange(session, change),
+                            ),
+                          _ActivityAction(
+                            label: text.keep,
+                            onPressed: () =>
+                                _review(session, change, keep: true),
+                            secondary: true,
+                          ),
+                          _ActivityAction(
+                            label: text.undo,
+                            onPressed: change.undoable
+                                ? () => _review(session, change, keep: false)
+                                : null,
+                            secondary: true,
+                          ),
+                        ],
+                      )
+                    else
+                      Text(text.outsideProject, style: _activityDetail),
+                    if (_reviewErrors[change.path] case final error?)
+                      _ActivityError(text.reviewError(error)),
+                  ],
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
@@ -344,11 +464,18 @@ extension _ReviewText on _ActivityText {
   String get outsideProject => _zh ? '所选项目之外' : 'Outside the selected project';
   String get previewDiff => _zh ? '预览差异' : 'Preview diff';
   String get backToChanges => _zh ? '返回更改' : 'Back to changes';
-  String previewDescription(String host) => _zh
-      ? '从 $host 读取此会话中这个文件的差异？'
-      : 'Read the diff for this session’s file on $host?';
-  String get previewUnavailable =>
-      _zh ? '此更改没有可预览的文本差异。' : 'A text diff is unavailable for this change.';
+  String get previewUnavailable => _zh
+      ? '主机未提供此更改的文本差异。'
+      : 'The host did not provide a text diff for this change.';
+  String get binaryPreview =>
+      _zh ? '二进制文件无法显示文本差异。' : 'Binary files cannot be shown as a text diff.';
+  String get largePreview =>
+      _zh ? '此差异超过预览大小限制。' : 'This diff exceeds the preview size limit.';
+  String get readOnlyDiff => _zh
+      ? '差异来自主机，文件需要在主机上编辑。'
+      : 'This diff is from the host. The file can be edited on the host.';
+  String get downloadCurrentFile => _zh ? '下载当前文件…' : 'Download current file…';
+  String get fileSaved => _zh ? '已保存文件。' : 'File saved.';
 
   String reviewError(_ReviewError error) => switch (error) {
     _ReviewError.unconfirmed =>

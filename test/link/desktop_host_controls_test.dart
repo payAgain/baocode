@@ -210,6 +210,9 @@ void main() {
         'expectedBranch': _project.branch,
       });
       expect(find.text(_project.branch!), findsOneWidget);
+      await _tap(tester, _project.branch!);
+      expect(find.text('Switch Branch'), findsNothing);
+      expect(host.actions, hasLength(2));
       switchReply.complete(null);
       await tester.pumpAndSettle();
       expect(find.text(_project.branch!), findsOneWidget);
@@ -219,6 +222,133 @@ void main() {
       expect(find.text('feature/topic'), findsOneWidget);
     },
   );
+
+  testWidgets('long host branch menu is anchored, scrollable and searchable', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, git: true);
+    final reply = Completer<Object?>();
+    host.reply = (method, _) =>
+        method == LinkMethods.projectBranches ? reply.future : null;
+    await _tap(tester, 'First session');
+    final pill = find.byKey(const ValueKey('host-branch-picker'));
+    expect(
+      find.descendant(of: pill, matching: find.byType(ComposerPicker)),
+      findsOneWidget,
+    );
+    await tester.tap(pill);
+    await tester.pumpAndSettle();
+    expect(find.text('Loading branches…'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+
+    const selected = 'feature/branch-15';
+    const target = 'feature/branch-39';
+    reply.complete({
+      ..._gitBranches,
+      'branch': selected,
+      'branches': [for (var i = 0; i < 40; i++) 'feature/branch-$i'],
+    });
+    await tester.pumpAndSettle();
+    final title = find.text('Switch Branch');
+    expect(tester.getTopLeft(title).dy, greaterThanOrEqualTo(0));
+    expect(
+      tester.getBottomLeft(title).dy,
+      lessThan(tester.getTopLeft(pill).dy),
+    );
+    final search = find.text('Search branches');
+    final searchPosition = tester.getTopLeft(search);
+    expect(find.text(_project.branch!), findsOneWidget);
+    expect(find.text(selected).hitTestable(), findsOneWidget);
+    expect(find.byIcon(Icons.check_rounded).hitTestable(), findsOneWidget);
+    expect(find.text(target).hitTestable(), findsNothing);
+    final list = find.ancestor(
+      of: find.text(selected),
+      matching: find.byType(Scrollbar),
+    );
+    expect(tester.getSize(list).height, lessThanOrEqualTo(380));
+    await tester.drag(list, const Offset(0, -900));
+    await tester.pumpAndSettle();
+    expect(find.text(target).hitTestable(), findsOneWidget);
+    expect(tester.getTopLeft(search), searchPosition);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+    tester.testTextInput.enterText('BRANCH-39');
+    await tester.pumpAndSettle();
+    expect(find.text(selected), findsNothing);
+    expect(find.text(target).hitTestable(), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(host.actions.last.$1, LinkMethods.switchProjectBranch);
+    expect(host.actions.last.$2, {
+      'project': _project.id,
+      'branch': target,
+      'expectedHead': _gitBranches['head'],
+      'expectedBranch': selected,
+    });
+    expect(host.actions, hasLength(2));
+    expect(title, findsNothing);
+    expect(find.text(_project.branch!), findsOneWidget);
+  });
+
+  testWidgets('a reopened branch picker ignores the previous list response', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, git: true);
+    final previous = Completer<Object?>();
+    final latest = Completer<Object?>();
+    host.reply = (_, _) =>
+        host.actions.length == 1 ? previous.future : latest.future;
+    await _tap(tester, 'First session');
+    await _tap(tester, _project.branch!);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(find.text('Switch Branch'), findsNothing);
+    await _tap(tester, _project.branch!);
+    previous.completeError(
+      const LinkRemoteException(LinkErrors.unsupported, 'Old response'),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Loading branches…'), findsOneWidget);
+    latest.complete(_gitBranches);
+    await tester.pumpAndSettle();
+    expect(find.text('feature/topic').hitTestable(), findsOneWidget);
+    expect(host.actions.map((action) => action.$1), [
+      LinkMethods.projectBranches,
+      LinkMethods.projectBranches,
+    ]);
+  });
+
+  testWidgets('a stale HEAD rejection requires a fresh branch snapshot', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, git: true);
+    var snapshot = _gitBranches;
+    host.reply = (method, _) {
+      if (method == LinkMethods.projectBranches) return snapshot;
+      throw const LinkRemoteException('stale', 'Host HEAD changed');
+    };
+    await _tap(tester, 'First session');
+    await _tap(tester, _project.branch!);
+    await _tap(tester, 'feature/topic');
+    expect(
+      find.text('The host HEAD changed. Reopen the branch menu.'),
+      findsOneWidget,
+    );
+    expect(find.text(_project.branch!), findsOneWidget);
+
+    const updatedHead = 'fedcba9876543210fedcba9876543210fedcba98';
+    snapshot = {..._gitBranches, 'head': updatedHead};
+    host.reply = (method, _) =>
+        method == LinkMethods.projectBranches ? snapshot : null;
+    await _tap(tester, _project.branch!);
+    expect(
+      find.text('The host HEAD changed. Reopen the branch menu.'),
+      findsNothing,
+    );
+    await _tap(tester, 'feature/topic');
+    expect(host.actions.last.$2['expectedHead'], updatedHead);
+  });
 
   testWidgets('Git rejection stays on its session and preserves the branch', (
     tester,

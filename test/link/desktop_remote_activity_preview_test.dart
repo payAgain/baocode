@@ -8,6 +8,7 @@ import 'package:bao_editor/textmate/textmate_manifest.dart';
 import 'package:bao_link/bao_link.dart';
 import 'package:baocode/chat/chat_models.dart';
 import 'package:baocode/chat/widgets/conversation_card_header.dart';
+import 'package:baocode/ide/ide_code_diff.dart';
 import 'package:baocode/l10n/app_localizations.dart';
 import 'package:baocode/link/chat_codec.dart';
 import 'package:baocode/link/desktop_host_composer.dart';
@@ -180,6 +181,22 @@ void main() {
           findsOneWidget,
         );
         await _capture(tester, surface, 'wide-changes.png');
+        await tap(tester, 'docs/release-checklist.md');
+        expect(find.byType(AlertDialog), findsNothing);
+        final diff = tester.widget<IdeCodeDiff>(find.byType(IdeCodeDiff));
+        expect(diff.modified, '核对发布版本\n更新文档索引\n');
+        expect(diff.onEdit, isNull);
+        expect(
+          tester.state(find.byType(DesktopHostComposer, skipOffstage: false)),
+          same(composerState),
+        );
+        expect(
+          methods.where((method) => method == LinkMethods.download),
+          isEmpty,
+        );
+        await tester.tap(find.byTooltip('返回更改').hitTestable());
+        await tester.pumpAndSettle();
+        expect(tester.state(composer), same(composerState));
         await tap(tester, '任务');
         expect(find.text('执行发布前检查').hitTestable(), findsOneWidget);
         await _capture(tester, surface, 'wide-tasks.png');
@@ -248,6 +265,11 @@ class _Fixture {
       'folders': [],
     },
     LinkMethods.read when args['path'] == 'checklist.txt' => {'text': '只读文件预览'},
+    LinkMethods.read
+        when args['session'] == _session &&
+            args['path'] == 'docs/release-checklist.md' &&
+            args['expectedChange'] == 'fixture-1' =>
+      {'original': '核对发布版本\n', 'text': '核对发布版本\n更新文档索引\n'},
     LinkMethods.extensions => {
       'items': [
         if (populated) ...[

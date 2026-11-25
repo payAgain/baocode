@@ -4,6 +4,12 @@ import '../chat/chat_feed.dart';
 import '../chat/chat_models.dart';
 import '../chat/chat_session.dart' show ComposerMessage, UserPlace;
 import '../chat/composer/composer_draft.dart';
+import 'desktop_remote_media_preview.dart';
+
+typedef DesktopHostHistoryRow = ({
+  ChatItem item,
+  List<DesktopRemoteImage> images,
+});
 
 /// Read-only history from an open project on the authenticated host.
 class DesktopHostProjectHistoryFeed extends ChangeNotifier
@@ -18,18 +24,18 @@ class DesktopHostProjectHistoryFeed extends ChangeNotifier
 
   // Keep unrecognized wire positions here too: subsequent suffix and prepend
   // indexes count them even when this version cannot show them.
-  List<ChatItem?> _wire = const [];
-  List<ChatItem> _items = const [];
+  List<DesktopHostHistoryRow?> _wire = const [];
+  List<DesktopHostHistoryRow> _items = const [];
   bool _dirty = false;
 
-  void replaceTail(int start, Iterable<ChatItem?> tail) {
+  void replaceTail(int start, Iterable<DesktopHostHistoryRow?> tail) {
     _wire = [..._wire.take(start), ...tail];
     _dirty = true;
   }
 
-  void prepend(List<ChatItem?> page) {
+  void prepend(List<DesktopHostHistoryRow?> page) {
     _wire = [...page, ..._wire];
-    prependedCount += page.whereType<ChatItem>().length;
+    prependedCount += page.nonNulls.length;
     _dirty = true;
   }
 
@@ -45,7 +51,7 @@ class DesktopHostProjectHistoryFeed extends ChangeNotifier
       return;
     }
     _dirty = false;
-    _items = _wire.whereType<ChatItem>().toList(growable: false);
+    _items = _wire.nonNulls.toList(growable: false);
     isStreaming = live;
     hasEarlierHistory = earlier;
     _interaction = interaction;
@@ -56,7 +62,7 @@ class DesktopHostProjectHistoryFeed extends ChangeNotifier
 
   List<String> get suggestions {
     if (isStreaming || _interaction) return const [];
-    for (final item in _items.reversed) {
+    for (final (item: item, images: _) in _items.reversed) {
       if (item is UserMessageItem) break;
       if (item is AssistantTextItem) return item.suggestions;
     }
@@ -67,12 +73,12 @@ class DesktopHostProjectHistoryFeed extends ChangeNotifier
   int? wireIndexAt(int index, UserMessageItem item) {
     if (index < 0 ||
         index >= _items.length ||
-        !identical(_items[index], item)) {
+        !identical(_items[index].item, item)) {
       return null;
     }
     for (final (wireIndex, entry) in _wire.indexed) {
       if (entry == null) continue;
-      if (index-- == 0) return identical(entry, item) ? wireIndex : null;
+      if (index-- == 0) return identical(entry.item, item) ? wireIndex : null;
     }
     return null;
   }
@@ -80,7 +86,9 @@ class DesktopHostProjectHistoryFeed extends ChangeNotifier
   @override
   int get itemCount => _items.length;
   @override
-  ChatItem itemAt(int index) => _items[index];
+  ChatItem itemAt(int index) => _items[index].item;
+
+  List<DesktopRemoteImage> imagesAt(int index) => _items[index].images;
   @override
   bool isStreaming = false;
   // Follow an active turn only if already at the bottom. A host update can

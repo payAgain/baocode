@@ -50,6 +50,9 @@ class ComposerPicker extends StatefulWidget {
     this.tapRegionGroupId,
     this.focusNode,
     this.searchPlaceholder,
+    this.emptyMessage,
+    this.enabled = true,
+    this.onOpen,
     this.footers = const [],
   }) : assert(settingsOf == null || submenuOf == null);
 
@@ -109,6 +112,15 @@ class ComposerPicker extends StatefulWidget {
   /// never when null.
   final String? searchPlaceholder;
 
+  /// Shown while there are no options, e.g. while they load on open.
+  /// A search with no results still shows the standard no-match text.
+  final String? emptyMessage;
+
+  final bool enabled;
+
+  /// Called after the menu opens, e.g. to fetch its options.
+  final VoidCallback? onOpen;
+
   /// Actions under the options (Create Branch…, New Worktree…).
   final List<ComposerPickerFooter> footers;
 
@@ -130,6 +142,8 @@ class ComposerPickerState extends State<ComposerPicker> {
   /// Opens its menu, or closes it, as a press on it does (the mode and
   /// model pickers' keybindings).
   void toggle() => _setOpen(!_open);
+  bool get isOpen => _open;
+  void close() => _setOpen(false);
 
   final Object _tapRegion = Object();
   late List<GlobalKey> _rowKeys = _keysFor(widget.options);
@@ -393,6 +407,10 @@ class ComposerPickerState extends State<ComposerPicker> {
     if (widget.options.length != oldWidget.options.length) {
       _rowKeys = _keysFor(widget.options);
     }
+    if (_open && oldWidget.options.isEmpty && widget.options.isNotEmpty) {
+      _highlighted = math.max(0, _selectedIndex);
+      _revealSelected();
+    }
   }
 
   @override
@@ -410,14 +428,14 @@ class ComposerPickerState extends State<ComposerPicker> {
   }
 
   void _setOpen(bool open) {
-    if (open == _open) return;
+    if (open == _open || (open && !widget.enabled)) return;
     // Back to the input, from the search line.
     if (!open && _searchFocus.hasFocus) widget.focusNode?.requestFocus();
     _query = '';
     _searchText.clear();
     _settings.clear();
     if (open) {
-      _highlighted = _selectedIndex.clamp(0, widget.options.length - 1);
+      _highlighted = math.max(0, _selectedIndex);
       _settingsOf = null;
       _setting = null;
       _pointer = null;
@@ -430,6 +448,7 @@ class ComposerPickerState extends State<ComposerPicker> {
         if (mounted) _setOpen(false);
       }, onKey: _handleKey);
       _revealSelected();
+      widget.onOpen?.call();
     } else {
       FloatingRegistry.closePopover(this);
     }
@@ -643,6 +662,7 @@ class ComposerPickerState extends State<ComposerPicker> {
   /// Into the highlighted option's settings, at what is in effect or the
   /// first; false when it has none.
   bool _openSettings() {
+    if (_highlighted >= widget.options.length) return false;
     final settings = _settingsFor(_highlighted);
     if (settings.isEmpty) return false;
     final at = _flatten(settings)
@@ -729,6 +749,12 @@ class ComposerPickerState extends State<ComposerPicker> {
   }
 
   int? _rowAt(Offset globalPosition) {
+    final viewport = _listKey.currentContext?.findRenderObject();
+    if (viewport is! RenderBox ||
+        !viewport.hasSize ||
+        !viewport.size.contains(viewport.globalToLocal(globalPosition))) {
+      return null;
+    }
     for (var i = 0; i < _rowKeys.length; i++) {
       final box = _rowKeys[i].currentContext?.findRenderObject() as RenderBox?;
       if (box == null || !box.hasSize) continue;
@@ -765,8 +791,9 @@ class ComposerPickerState extends State<ComposerPicker> {
   @override
   Widget build(BuildContext context) {
     Widget pill = HoverBuilder(
-      cursor: SystemMouseCursors.click,
-      builder: (context, hovered) => _buildPill(hovered, _open),
+      cursor: widget.enabled ? SystemMouseCursors.click : MouseCursor.defer,
+      builder: (context, hovered) =>
+          _buildPill(widget.enabled && hovered, _open),
     );
     // The workbench hover, as upstream's pickers in the chat input have. In
     // a node of its own: the menu's layer and the hover's each graft their
@@ -1147,7 +1174,8 @@ class ComposerPickerState extends State<ComposerPicker> {
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
               child: Text(
-                context.l10n.modelsNoMatch,
+                (options.isEmpty ? widget.emptyMessage : null) ??
+                    context.l10n.modelsNoMatch,
                 style: TextStyle(color: AppColors.textFaint, fontSize: 12),
               ),
             )

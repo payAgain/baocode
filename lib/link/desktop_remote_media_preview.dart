@@ -93,30 +93,6 @@ class DesktopRemoteImage {
     }
     return result;
   }
-
-  /// For the project transcript whose normal renderer deliberately strips
-  /// media. Only pass a validated, current project snapshot.
-  static List<DesktopRemoteImage> projectItems(List<Object?> items) {
-    final images = <DesktopRemoteImage>[];
-    for (final raw in items.reversed.take(100)) {
-      if (raw is! Map) continue;
-      switch (raw['t']) {
-        case 'user':
-          images.addAll(message(images: raw['images']));
-        case 'tool' when raw['status'] == 'succeeded':
-          images.addAll(
-            message(
-              images: raw['images'],
-              toolImage: raw['url'] is String ? raw['url'] as String : null,
-            ),
-          );
-        case 'text' when raw['text'] is String:
-          images.addAll(message(markdown: raw['text'] as String));
-      }
-      if (images.length >= 32) break;
-    }
-    return images.take(32).toList();
-  }
 }
 
 enum _Source { inline, relative, group }
@@ -167,7 +143,7 @@ class _PreviewClosed implements Exception {
   const _PreviewClosed();
 }
 
-/// Wrap a message bubble (or a bounded project history with [expandChild]).
+/// Wrap a message bubble with the images belonging to that message.
 /// Selection and preview are inline so changing chats cannot leave a modal
 /// open on the wrong host. Rendering this widget never fetches or decodes.
 class DesktopRemoteMessageImages extends StatefulWidget {
@@ -177,7 +153,7 @@ class DesktopRemoteMessageImages extends StatefulWidget {
     required this.chat,
     required this.images,
     required this.child,
-    this.expandChild = false,
+    this.trailing = false,
     this.isCurrent,
   });
 
@@ -185,7 +161,7 @@ class DesktopRemoteMessageImages extends StatefulWidget {
   final DesktopHostChat chat;
   final List<DesktopRemoteImage> images;
   final Widget child;
-  final bool expandChild;
+  final bool trailing;
   final bool Function()? isCurrent;
 
   @override
@@ -196,7 +172,6 @@ class DesktopRemoteMessageImages extends StatefulWidget {
 class _DesktopRemoteMessageImagesState
     extends State<DesktopRemoteMessageImages> {
   (DesktopRemoteImage, Future<Uint8List>)? _preview;
-  bool _showChoices = false;
 
   (LinkPeer?, String, String, String?) _target(DesktopRemoteMessageImages w) =>
       (w.peer, w.chat.kind, w.chat.id, w.chat.projectId);
@@ -208,7 +183,6 @@ class _DesktopRemoteMessageImagesState
     super.didUpdateWidget(oldWidget);
     if (_target(oldWidget) != _target(widget) || !_current) {
       _preview = null;
-      _showChoices = false;
     } else if (_preview case (final selected, _)
         when !widget.images.any(
           (image) =>
@@ -272,51 +246,32 @@ class _DesktopRemoteMessageImagesState
     final images = _current
         ? widget.images.where(_canShow).toList()
         : const <DesktopRemoteImage>[];
-    if (!widget.expandChild && images.isEmpty) return widget.child;
+    if (images.isEmpty) return widget.child;
     final l10n = context.l10n;
-    final zh = l10n.localeName.startsWith('zh');
-    final preview = images.isEmpty ? null : _preview;
-    final child = widget.expandChild
-        ? Expanded(child: widget.child)
-        : widget.child;
+    final preview = _preview;
     return Column(
-      mainAxisSize: widget.expandChild ? MainAxisSize.max : MainAxisSize.min,
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        child,
-        if (images.isNotEmpty &&
-            (!widget.expandChild || _showChoices || images.length == 1))
-          SizedBox(
-            height: 36,
-            child: ListView.separated(
-              primary: false,
-              scrollDirection: Axis.horizontal,
-              itemCount: images.length,
-              separatorBuilder: (_, _) => const SizedBox(width: 4),
-              itemBuilder: (context, index) {
-                final image = images[index];
-                return TextButton(
-                  onPressed: () => _show(image),
-                  child: Text(
-                    switch (image.label) {
-                      final name? => l10n.agentImageTitle(name),
-                      _ => l10n.imageChip(index + 1),
-                    },
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                );
-              },
-            ),
-          )
-        else if (images.isNotEmpty)
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton(
-              onPressed: () => setState(() => _showChoices = true),
-              child: Text(zh ? '会话图片' : 'Conversation images'),
-            ),
-          ),
+        widget.child,
+        Wrap(
+          alignment: widget.trailing ? WrapAlignment.end : WrapAlignment.start,
+          spacing: 4,
+          children: [
+            for (final (index, image) in images.indexed)
+              TextButton(
+                onPressed: () => _show(image),
+                child: Text(
+                  switch (image.label) {
+                    final name? => l10n.agentImageTitle(name),
+                    _ => l10n.imageChip(index + 1),
+                  },
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+          ],
+        ),
         if (preview != null)
           Row(
             children: [
