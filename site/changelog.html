@@ -23,6 +23,7 @@
   <a href="/download">Download</a>
   <a href="/changelog" aria-current="page">Changelog</a>
   <a href="https://github.com/baocode-dev/baocode"><svg class="ic" aria-hidden="true"><use href="#ic-github"/></svg>GitHub</a>
+  <button class="theme" type="button" data-theme-toggle aria-label="Appearance: system" data-tip="Appearance: system"></button>
   <a class="lang" href="/zh/changelog" hreflang="zh" lang="zh-CN">中文</a>
 </header>
 
@@ -32,15 +33,35 @@
 
   <section class="release" id="v2.0.7">
     <h2 class="plain"><a href="#v2.0.7">2.0.7</a></h2>
+    <p>This release lets you copy, quote or ask by the way about text selected in the conversation, frees the chat grid from its 2×2, runs a stopped or failed last turn again in one click, and fixes several issues on Linux and Windows.</p>
+    <p>New</p>
+    <ul>
+    <li>Text selected in the conversation gets a bar over it: Copy, Quote (into the message being written, as a tag) and By the Way.</li>
+    <li>The chat grid is no longer a fixed 2×2: split panes along rows or columns, as many as the window has room for.</li>
+    <li>A stopped or failed last turn has a Run this turn again button; the model can be changed first, and as with an edit you're asked whether the files it changed go back.</li>
+    <li>The agent suggests two to four replies; hold ⌘ or Ctrl while clicking to pick several and send them together.</li>
+    <li>Images sent are kept as files and the agent is told where, so it can upload or attach the very one you sent.</li>
+    <li>The conversation's files page has Open in Terminal.</li>
+    <li>A model that failed its test: click Failed to copy the error, or use Copy Error in the row's menu.</li>
+    </ul>
     <p>Improved</p>
     <ul>
     <li>Paired desktops now use workbench-style sidebars and can browse Git history and working-tree changes on the host.</li>
+    <li>A skill run from a slash command (such as /code-review) shows its work as it goes instead of staying empty until done.</li>
+    <li>Messages queued behind a running turn go back into the composer when the app quits, kept for the next run.</li>
+    <li>A conversation with scheduled jobs or a loop waiting keeps its process when you switch away, so they come on time.</li>
     </ul>
     <p>Fixed</p>
     <ul>
     <li>Recover a pairing if the host approved it but the confirmation response was lost.</li>
     <li>Load Files once the remote conversation is ready and keep working-tree changes visible if Git history fails to load.</li>
     <li>Fix an editor crash when releasing a syntax scanner after the native library was reloaded.</li>
+    <li>The selection bar showing on only every other selection.</li>
+    <li>A message's editor opening off its message when Interface Size isn't 100%, or going out of view in a short window.</li>
+    <li>Windows: closing the window with no tray icon up minimizes it instead of leaving the app running out of reach; PowerShell Store execution aliases are recognized.</li>
+    <li>Windows: Ctrl+Y redoes in the markdown editor and the composer.</li>
+    <li>Linux: the package declares its GL libraries, fixing a crash at start on minimal desktops; a certificate bundle with stray bytes no longer drops every certificate; code fonts stay monospaced under CJK locales.</li>
+    <li>Suggested replies with inline code in them no longer all show as plain text.</li>
     </ul>
   </section>
 

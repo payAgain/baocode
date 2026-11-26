@@ -8,6 +8,7 @@ import 'package:baocode/link/desktop_host_project_history.dart';
 import 'package:baocode/link/desktop_remote_session_actions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:super_sliver_list/super_sliver_list.dart';
 
 void main() {
   testWidgets('permission approval is specific and waits for the host push', (
@@ -240,6 +241,46 @@ void main() {
     await tester.pumpAndSettle();
     expect(host.actions.single.$1, LinkMethods.rewindPlan);
     expect(find.byType(TextField), findsNothing);
+    await host.close(tester);
+  });
+
+  testWidgets('a host turn resumes following after closing the inline edit', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester);
+    await host.select(tester, 'first');
+    const original = {'t': 'user', 'text': 'Original prompt'};
+    host.update('first', items: [original], sessionActions: {'edit': true});
+    await tester.pumpAndSettle();
+    await _tapBubble(tester, 'Original prompt');
+    expect(find.byType(TextField), findsOneWidget);
+
+    host.update(
+      'first',
+      live: true,
+      items: [
+        original,
+        {'t': 'user', 'text': 'Sent on the host'},
+        {
+          't': 'text',
+          'text': List.filled(50, 'A line of the reply').join('\n\n'),
+        },
+      ],
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(TextField), findsNothing);
+    final scroll = tester
+        .state<ScrollableState>(
+          find
+              .descendant(
+                of: find.byType(SuperListView),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        )
+        .position;
+    expect(scroll.maxScrollExtent, greaterThan(0));
+    expect(scroll.pixels, closeTo(scroll.maxScrollExtent, 1));
     await host.close(tester);
   });
 

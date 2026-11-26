@@ -9,6 +9,7 @@ void main() {
         suggestions: const ['one', 'two', 'three'],
         playKey: key,
         onPick: (_) {},
+        onToggle: (_) {},
         onSend: (_) {},
       ),
     ),
@@ -39,5 +40,25 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await tester.pumpWidget(bar('a'));
     expect(opacityOf(tester, 'three'), 1);
+  });
+
+  testWidgets('a draft-only suggestion can be clicked twice without sending', (
+    tester,
+  ) async {
+    final picked = <String>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ReplySuggestionBar(
+            suggestions: const ['Draft a reply'],
+            onPick: picked.add,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Draft a reply'));
+    await tester.tap(find.text('Draft a reply'));
+    expect(picked, ['Draft a reply', 'Draft a reply']);
   });
 }

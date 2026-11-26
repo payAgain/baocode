@@ -2640,6 +2640,17 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
+  String quoteChip(int number) {
+    return 'Quote #$number';
+  }
+
+  @override
+  String get chatQuote => 'Quote';
+
+  @override
+  String get chatQuoteAside => 'By the Way';
+
+  @override
   String pastedTextGone(String path) {
     return 'This paste is no longer at $path.';
   }
@@ -2748,6 +2759,9 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get turnFork => 'Fork from here';
+
+  @override
+  String get turnRetry => 'Run this turn again';
 
   @override
   String get turnCopied => 'Copied';
@@ -3371,8 +3385,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get queuedRemove => 'Remove from the queue';
 
   @override
-  String get replySuggestionHint =>
-      'Click to put it in the input, double-click to send it';
+  String replySuggestionHint(String key) {
+    return 'Click to put it in the input, double-click to send it, $key-click to pick more than one';
+  }
 
   @override
   String get stopConfirmMessage => 'Stop the agent?';
@@ -3821,7 +3836,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get generalSettingsPromptSuggestionsDescription =>
-      'After each turn, two or three things you might send next, over the composer: click one to put it in the input and edit it, double-click to send it as it is; Tab in an empty input takes the first. The agent writes them at the end of its reply, with no extra request. Applies from the next message.';
+      'After each turn, two to four things you might send next, over the composer: click one to put it in the input and edit it, double-click to send it as it is; click with ⌘ or Ctrl held to put in more than one, each on its own line; Tab in an empty input takes the first. The agent writes them at the end of its reply, with no extra request. Applies from the next message.';
 
   @override
   String generalSettingsCommitAttributionLabel(String name) {
@@ -7285,6 +7300,9 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get modelsTestModelFailed => 'Failed';
+
+  @override
+  String get modelsCopyTestError => 'Copy Error';
 
   @override
   String modelsTestFirstText(String seconds) {
