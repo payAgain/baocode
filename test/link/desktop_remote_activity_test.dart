@@ -7,9 +7,11 @@ import 'package:baocode/l10n/app_localizations.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_remote_activity.dart';
 import 'package:baocode/theme/app_theme.dart';
+import 'package:baocode/theme/codicons.dart';
 import 'package:baocode/theme/workbench_theme.dart' as workbench;
 import 'package:baocode/theme/workbench_theme_initial_colors.dart';
 import 'package:baocode/workspace/islands.dart' show IslandTab;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -445,6 +447,178 @@ void main() {
     expect(find.byType(IdeCodeDiff), findsNothing);
     expect(tester.state(find.byType(EditableText)), same(chat));
     expect(find.text('unsent draft'), findsOneWidget);
+    await host.close(tester);
+  });
+
+  testWidgets('composer strip opens and reviews individual host changes', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, showFiles: true, showStrip: true);
+    const first = 'src/First.txt';
+    const second = 'src/Second.txt';
+    const firstChange = {
+      'path': first,
+      'revision': 'first-rev',
+      'preview': true,
+      'undoable': true,
+    };
+    const secondChange = {
+      'path': second,
+      'revision': 'second-rev',
+      'undoable': true,
+    };
+    host.reply = (method, _) => switch (method) {
+      LinkMethods.read => {'original': 'before\n', 'text': 'after\n'},
+      LinkMethods.keep || LinkMethods.undo => null,
+      _ => throw StateError(method),
+    };
+    host.push('session-a', changes: [firstChange, secondChange]);
+    await tester.pumpAndSettle();
+
+    final chat = tester.state(find.byType(EditableText));
+    await tester.enterText(find.byType(TextField), 'unsent draft');
+    await _tap(tester, find.text('2 files changed'));
+    await _tap(tester, find.text('First.txt'));
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(host.methods, [LinkMethods.open, LinkMethods.read]);
+    host.expectLast(LinkMethods.read, {
+      'session': 'session-a',
+      'path': first,
+      'expectedChange': 'first-rev',
+    });
+    final diff = tester.widget<IdeCodeDiff>(find.byType(IdeCodeDiff));
+    expect(diff.modified, 'after\n');
+    expect(diff.onEdit, isNull);
+    await _tap(tester, find.byTooltip('Close diff'));
+    expect(tester.state(find.byType(EditableText)), same(chat));
+    expect(find.text('unsent draft'), findsOneWidget);
+
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    addTearDown(mouse.removePointer);
+    Future<void> fileAction(String path, IconData icon, String action) async {
+      final row = find.byKey(ValueKey(path));
+      await mouse.moveTo(tester.getCenter(row));
+      await tester.pump();
+      await _tap(tester, find.descendant(of: row, matching: find.byIcon(icon)));
+      await _tap(tester, _confirmButton(action));
+    }
+
+    await _openChangeMenu(tester, 'First.txt');
+    await _tap(tester, find.text('Keep'));
+    await _tap(tester, _confirmButton('Keep'));
+    host.expectLast(LinkMethods.keep, {
+      'session': 'session-a',
+      'paths': [first],
+      'expectedChange': 'first-rev',
+    });
+    expect(find.text('First.txt'), findsOneWidget);
+    expect(find.text('Waiting for host'), findsOneWidget);
+    host.push('session-a', changes: [secondChange]);
+    await tester.pumpAndSettle();
+    expect(find.text('First.txt'), findsNothing);
+    await fileAction(second, Codicons.discard, 'Undo');
+    host.expectLast(LinkMethods.undo, {
+      'session': 'session-a',
+      'paths': [second],
+      'expectedChange': 'second-rev',
+    });
+    await host.close(tester);
+  });
+
+  testWidgets('composer strip only offers scoped revision-safe reviews', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, showStrip: true);
+    const guarded = {
+      'path': 'guarded.txt',
+      'revision': 'rev-1',
+      'undoable': true,
+    };
+    const otherChanges = [
+      {'path': '/outside.txt', 'revision': 'out', 'undoable': true},
+      {'path': 'legacy.txt'},
+      {'path': 'untracked.txt', 'revision': 'new', 'tracked': false},
+    ];
+    host.push('session-a', changes: [guarded, ...otherChanges]);
+    await tester.pumpAndSettle();
+    expect(find.text('Keep all'), findsNothing);
+    expect(find.text('Undo all'), findsNothing);
+    await _tap(tester, find.text('4 files changed'));
+    await _tap(tester, find.text('outside.txt'));
+    expect(find.byType(IdeCodeDiff), findsNothing);
+    expect(find.text('Outside the selected project'), findsOneWidget);
+    expect(host.methods, [LinkMethods.open]);
+    await _tap(tester, find.byTooltip('Close diff'));
+
+    for (final file in ['outside.txt', 'legacy.txt', 'untracked.txt']) {
+      await _openChangeMenu(tester, file);
+      expect(find.text('Undo'), findsNothing);
+      expect(
+        find.text('Keep'),
+        file == 'untracked.txt' ? findsOneWidget : findsNothing,
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+    }
+    await _openChangeMenu(tester, 'guarded.txt');
+    await _tap(tester, find.text('Undo'));
+    host.push(
+      'session-a',
+      changes: [
+        {...guarded, 'revision': 'rev-2'},
+        ...otherChanges,
+      ],
+    );
+    await tester.pumpAndSettle();
+    await _tap(tester, _confirmButton('Undo'));
+    expect(host.methods, [LinkMethods.open]);
+    expect(find.textContaining('Review it again.'), findsOneWidget);
+    await host.close(tester);
+  });
+
+  testWidgets('composer header reviews a single file with its revision', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, showStrip: true);
+    const change = {'path': 'a.txt', 'revision': 'a', 'undoable': true};
+    final multiple = [
+      change,
+      const {'path': 'b.txt', 'revision': 'b'},
+    ];
+    host.reply = (method, _) => method == LinkMethods.undo
+        ? throw const LinkRemoteException('conflict', 'Change still pending')
+        : null;
+
+    host.push('session-a', changes: [change]);
+    await tester.pumpAndSettle();
+    await _tap(tester, find.text('Undo all'));
+    expect(host.methods, [LinkMethods.open]);
+    host.push('session-a', changes: multiple);
+    await tester.pumpAndSettle();
+    await _tap(tester, _confirmButton('Undo all'));
+    expect(host.methods, [LinkMethods.open]);
+    expect(find.text('Keep all'), findsNothing);
+    expect(find.text('Undo all'), findsNothing);
+
+    host.push('session-a', changes: [change]);
+    await tester.pumpAndSettle();
+    await _tap(tester, find.text('Undo all'));
+    await _tap(tester, _confirmButton('Undo all'));
+    host.expectLast(LinkMethods.undo, {
+      'session': 'session-a',
+      'paths': ['a.txt'],
+      'expectedChange': 'a',
+    });
+    expect(find.textContaining('a.txt · Undo conflicted'), findsOneWidget);
+    await _tap(tester, find.text('Keep all'));
+    await _tap(tester, _confirmButton('Keep all'));
+    host.expectLast(LinkMethods.keep, {
+      'session': 'session-a',
+      'paths': ['a.txt'],
+      'expectedChange': 'a',
+    });
+    expect(find.text('Waiting for host'), findsOneWidget);
     await host.close(tester);
   });
 
@@ -937,6 +1111,11 @@ LinkTask _task(String id, {String status = 'running'}) => LinkTask(
   output: true,
 );
 
+Future<void> _openChangeMenu(WidgetTester tester, String name) async {
+  await tester.tap(find.text(name).hitTestable(), buttons: kSecondaryButton);
+  await tester.pumpAndSettle();
+}
+
 Future<void> _tap(WidgetTester tester, Finder finder) async {
   await tester.tap(finder.hitTestable());
   await tester.pumpAndSettle();
@@ -963,6 +1142,7 @@ class _Host {
     Locale locale = const Locale('en'),
     ThemeData? theme,
     bool showFiles = false,
+    bool showStrip = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 760));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -1006,7 +1186,7 @@ class _Host {
               ),
               hostName: 'Fixture host',
               files: showFiles ? const Text('Shared files') : null,
-              builder: (context, activityButton, _) => Column(
+              builder: (context, activityButton, activityStrip) => Column(
                 children: [
                   if (activityButton != null)
                     Row(
@@ -1014,6 +1194,7 @@ class _Host {
                       children: [activityButton],
                     ),
                   const Expanded(child: Center(child: Text('Shared chat'))),
+                  if (showStrip) ?activityStrip,
                   const TextField(),
                 ],
               ),

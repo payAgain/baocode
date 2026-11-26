@@ -9,7 +9,7 @@ typedef _Change = ({
   bool untracked,
   bool conflict,
   String? revision,
-  bool undoable,
+  bool? undoable,
   bool preview,
 });
 
@@ -20,9 +20,10 @@ class _ReviewRequest {
 }
 
 class _ReviewPreview {
-  _ReviewPreview(this.change);
+  _ReviewPreview(this.change, {required this.fromStrip});
 
   final _Change change;
+  final bool fromStrip;
   (String, String)? diff;
   String? error;
   bool downloading = false;
@@ -50,7 +51,10 @@ Map<String, _Change> _parseChanges(Object? value) {
               final String revision when revision.isNotEmpty => revision,
               _ => null,
             },
-            undoable: raw['undoable'] != false,
+            undoable: switch (raw['undoable']) {
+              final bool undoable => undoable,
+              _ => null,
+            },
             preview: raw['preview'] == true && raw['binary'] != true,
           ),
   };
@@ -65,6 +69,11 @@ bool _projectRelative(String path) =>
     path
         .split('/')
         .every((part) => part.isNotEmpty && part != '.' && part != '..');
+
+bool _canStripReview(_Change change, {required bool keep}) =>
+    _projectRelative(change.path) &&
+    change.revision != null &&
+    (keep || !change.untracked && change.undoable == true);
 
 extension _ChangeReview on _DesktopRemoteActivityState {
   void _clearReviews() {
@@ -90,25 +99,37 @@ extension _ChangeReview on _DesktopRemoteActivityState {
     }
   }
 
+  bool _reviewSurface(DesktopRemoteActivitySession session, bool fromStrip) =>
+      _current(session) && (fromStrip || _open && _section == _Section.changes);
+
   Future<void> _review(
     DesktopRemoteActivitySession session,
     _Change change, {
     required bool keep,
+    bool fromStrip = false,
+    bool header = false,
   }) async {
     final path = change.path;
     bool canReview() =>
-        _active(session) &&
-        _section == _Section.changes &&
-        _projectRelative(path) &&
+        _reviewSurface(session, fromStrip) &&
         session._changes[path] == change &&
-        (keep || change.undoable) &&
-        !_reviewing.containsKey(path);
+        (!header || session._changes.length == 1) &&
+        !_reviewing.containsKey(path) &&
+        (fromStrip
+            ? _canStripReview(change, keep: keep)
+            : _projectRelative(path) && (keep || change.undoable != false));
     if (!canReview()) return;
     final text = _ActivityText(context);
     final host = widget.hostName;
+    final action = switch ((keep, header)) {
+      (true, true) => context.l10n.stripKeepAll,
+      (false, true) => context.l10n.stripUndoAll,
+      (true, false) => text.keep,
+      (false, false) => text.undo,
+    };
     if (!await _confirm(
       session,
-      action: keep ? text.keep : text.undo,
+      action: action,
       description: keep
           ? text.keepDescription(host)
           : text.undoDescription(host),
@@ -117,10 +138,10 @@ extension _ChangeReview on _DesktopRemoteActivityState {
       return;
     }
     if (!canReview()) {
-      if (_active(session) &&
-          _section == _Section.changes &&
+      if (_reviewSurface(session, fromStrip) &&
           session._changes.containsKey(path) &&
-          session._changes[path] != change) {
+          (session._changes[path] != change ||
+              (header && session._changes.length != 1))) {
         _changeState(() => _reviewErrors[path] = _ReviewError.stale);
       }
       return;
@@ -177,26 +198,28 @@ extension _ChangeReview on _DesktopRemoteActivityState {
 
   Future<void> _previewChange(
     DesktopRemoteActivitySession session,
-    _Change change,
-  ) async {
+    _Change change, {
+    bool fromStrip = false,
+  }) async {
     final path = change.path;
     final revision = change.revision;
-    if (!_active(session) ||
-        _section != _Section.changes ||
+    if (!_reviewSurface(session, fromStrip) ||
         session._changes[path] != change ||
-        !_projectRelative(path) ||
         _reviewPreview?.change == change) {
       return;
     }
     final text = _ActivityText(context);
-    final preview = _ReviewPreview(change);
-    if (revision == null || !change.preview) {
+    final preview = _ReviewPreview(change, fromStrip: fromStrip);
+    if (!_projectRelative(path)) {
+      if (!fromStrip) return;
+      preview.error = text.outsideProject;
+    } else if (revision == null || !change.preview) {
       preview.error = change.binary
           ? text.binaryPreview
           : text.previewUnavailable;
     }
     _changeState(() => _reviewPreview = preview);
-    if (revision == null || !change.preview) return;
+    if (revision == null || preview.error != null) return;
 
     (String, String)? diff;
     String? error;
@@ -240,8 +263,7 @@ extension _ChangeReview on _DesktopRemoteActivityState {
     _ReviewPreview preview,
   ) =>
       identical(_reviewPreview, preview) &&
-      _active(session) &&
-      _section == _Section.changes &&
+      _reviewSurface(session, preview.fromStrip) &&
       session._changes[preview.change.path] == preview.change;
 
   Future<void> _downloadChangeFile(
@@ -284,7 +306,7 @@ extension _ChangeReview on _DesktopRemoteActivityState {
       children: [
         _ActivityBar(
           leading: _ActivityIconButton(
-            tooltip: text.backToChanges,
+            tooltip: preview.fromStrip ? text.closeDiff : text.backToChanges,
             icon: compact ? Codicons.arrowLeft : Codicons.close,
             onPressed: () => _changeState(() => _reviewPreview = null),
           ),
@@ -425,7 +447,7 @@ extension _ChangeReview on _DesktopRemoteActivityState {
                           ),
                           _ActivityAction(
                             label: text.undo,
-                            onPressed: change.undoable
+                            onPressed: change.undoable != false
                                 ? () => _review(session, change, keep: false)
                                 : null,
                             secondary: true,
@@ -458,12 +480,14 @@ extension _ReviewText on _ActivityText {
   String undoDescription(String host) => _zh
       ? '撤销 $host 上此会话对此文件的更改？此操作会修改主机上的文件。'
       : 'Undo this session’s changes to this file on $host? This modifies the file on the host.';
+
   String get binary => _zh ? '二进制' : 'Binary';
   String get untracked => _zh ? '未跟踪' : 'Untracked';
   String get conflict => _zh ? '冲突' : 'Conflict';
   String get outsideProject => _zh ? '所选项目之外' : 'Outside the selected project';
   String get previewDiff => _zh ? '预览差异' : 'Preview diff';
   String get backToChanges => _zh ? '返回更改' : 'Back to changes';
+  String get closeDiff => _zh ? '关闭差异' : 'Close diff';
   String get previewUnavailable => _zh
       ? '主机未提供此更改的文本差异。'
       : 'The host did not provide a text diff for this change.';

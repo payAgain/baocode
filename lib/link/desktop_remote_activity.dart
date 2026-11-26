@@ -11,6 +11,7 @@ import '../chat/panels/activity_strip.dart';
 import '../chat/side_panel/side_panel_section_bar.dart';
 import '../ide/ide_code_diff.dart';
 import '../ide/ide_list.dart' show IdeListColors, IdeListRow;
+import '../ide/ide_menu.dart' show IdeMenuAction;
 import '../kernel/kernel_types.dart' show KernelTask, KernelTaskKind;
 import '../l10n/l10n.dart';
 import '../settings/pages/settings_widgets.dart' show SettingsText;
@@ -318,6 +319,8 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
 
   Widget? _activityStrip(DesktopRemoteActivitySession session) {
     final tasks = session._tasks;
+    final advertised = session._changes;
+    final single = advertised.length == 1 ? advertised.values.single : null;
     final running = [
       for (final task in tasks.values)
         if (task.status == 'running')
@@ -335,7 +338,7 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
           ),
     ];
     final changes = [
-      for (final change in session._changes.values)
+      for (final change in advertised.values)
         FileChange(
           path: change.path,
           added: change.added ?? 0,
@@ -351,17 +354,91 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
         ),
     ];
     if (!ActivityStrip.hasContent(running, changes)) return null;
-    return ActivityStrip(
-      key: ObjectKey(session),
-      tasks: running,
-      changes: changes,
-      paths: p.posix,
-      showLineCounts: session._changes.values.every(
-        (change) =>
-            change.binary || change.added != null && change.removed != null,
-      ),
-      detailOf: (task) => task.summary,
-      onStopTask: (task) => unawaited(_stop(session, tasks[task.id]!)),
+
+    bool actionable(_Change change, {required bool keep}) =>
+        !_reviewing.containsKey(change.path) &&
+        _canStripReview(change, keep: keep);
+    void review(_Change change, {required bool keep, bool header = false}) =>
+        unawaited(
+          _review(session, change, keep: keep, fromStrip: true, header: header),
+        );
+
+    // The host only guards one path at a time, and each operation can
+    // invalidate other rows' revisions. Only offer All for a single file.
+    final keepSingle = single != null && actionable(single, keep: true)
+        ? single
+        : null;
+    final undoSingle = single != null && actionable(single, keep: false)
+        ? single
+        : null;
+    final text = _ActivityText(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ActivityStrip(
+          key: ObjectKey(session),
+          tasks: running,
+          changes: changes,
+          paths: p.posix,
+          showLineCounts: advertised.values.every(
+            (change) =>
+                change.binary || change.added != null && change.removed != null,
+          ),
+          detailOf: (task) => task.summary,
+          onStopTask: (task) => unawaited(_stop(session, tasks[task.id]!)),
+          onOpenFile: (file) {
+            if (advertised[file.path] case final change?) {
+              unawaited(_previewChange(session, change, fromStrip: true));
+            }
+          },
+          onKeep: keepSingle == null
+              ? null
+              : () => review(keepSingle, keep: true, header: true),
+          onUndo: undoSingle == null
+              ? null
+              : () => review(undoSingle, keep: false, header: true),
+          onKeepFiles: keepSingle == null
+              ? null
+              : (_) => review(keepSingle, keep: true),
+          onUndoFiles: undoSingle == null
+              ? null
+              : (_) => review(undoSingle, keep: false),
+          // Keep the tree's hover actions for a single file. With multiple
+          // files they would also offer unsafe folder-level actions.
+          fileActions: single != null
+              ? null
+              : (file) {
+                  final change = advertised[file.path];
+                  if (change == null) return const [];
+                  return [
+                    [
+                      if (actionable(change, keep: false))
+                        IdeMenuAction(
+                          text.undo,
+                          onSelected: () => review(change, keep: false),
+                        ),
+                      if (actionable(change, keep: true))
+                        IdeMenuAction(
+                          text.keep,
+                          onSelected: () => review(change, keep: true),
+                        ),
+                    ],
+                  ];
+                },
+        ),
+        if ((!_open || _section != _Section.changes) &&
+            (_reviewing.isNotEmpty || _reviewErrors.isNotEmpty))
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: switch (_reviewErrors.entries.lastOrNull) {
+              MapEntry(:final key, :final value) => _ActivityError(
+                '$key · ${text.reviewError(value)}',
+              ),
+              null => Text(text.awaitingHost, style: _activityDetail),
+            },
+          ),
+      ],
     );
   }
 
@@ -394,10 +471,14 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
         final visible = _open && available;
         final docked = visible && constraints.maxWidth >= 600;
         final compact = visible && !docked;
-        final preview =
-            visible && sessionAvailable && _section == _Section.changes
-            ? _reviewPreview
-            : null;
+        final preview = switch (_reviewPreview) {
+          final preview?
+              when sessionAvailable &&
+                  (preview.fromStrip ||
+                      visible && _section == _Section.changes) =>
+            preview,
+          _ => null,
+        };
         final hideChat = compact || preview != null;
         final wideGit =
             hasFiles &&
@@ -530,7 +611,12 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
                 end: docked ? panelWidth + 1 : 0,
                 top: 0,
                 bottom: 0,
-                child: _reviewPane(text, session!, preview, compact: compact),
+                child: _reviewPane(
+                  text,
+                  session!,
+                  preview,
+                  compact: constraints.maxWidth < 600,
+                ),
               ),
           ],
         );
