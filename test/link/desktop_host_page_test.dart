@@ -373,7 +373,8 @@ void main() {
       await _pumpPage(tester, _Connection()..peer = peer, chats: chats);
       await tester.tap(find.text('Paired session'));
       await tester.pumpAndSettle();
-      expect(find.text('Review host request').hitTestable(), findsOneWidget);
+      expect(find.text('A fixture question?').hitTestable(), findsOneWidget);
+      expect(find.text('Yes').hitTestable(), findsOneWidget);
       final conversation = find.byKey(const ValueKey('host-content'));
       final cardWidth = tester.getSize(conversation).width;
       final rules = find.descendant(
