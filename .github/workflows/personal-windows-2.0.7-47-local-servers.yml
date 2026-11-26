@@ -1,0 +1,112 @@
+name: Personal BaoCode 2.0.7+47 Windows x64 (local servers)
+
+on:
+  push:
+    branches: [personal/package-windows-2.0.7-47-local-servers]
+
+permissions:
+  contents: read
+
+env:
+  WORKFLOW_PATH: .github/workflows/personal-windows-2.0.7-47-local-servers.yml
+  FLUTTER_VERSION: '3.47.5'
+
+jobs:
+  source:
+    if: github.repository == 'payAgain/baocode'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify release source and version
+        shell: bash
+        run: |
+          read -r ci_sha source_sha extra_parents <<< "$(git rev-list --parents -n 1 HEAD)"
+          if [[ "$ci_sha" != "$GITHUB_SHA" || -z "$source_sha" || -n "$extra_parents" ]]; then
+            echo 'Expected the pushed CI commit to have exactly one source parent' >&2
+            exit 1
+          fi
+          ci_diff=$(git diff --name-status --no-renames "$source_sha" "$ci_sha")
+          if [[ "$ci_diff" != "A"$'\t'"$WORKFLOW_PATH" ]]; then
+            printf 'The CI commit must add only %s. Found: %s\n' "$WORKFLOW_PATH" "$ci_diff" >&2
+            exit 1
+          fi
+          if ! grep -Fxq 'version: 2.0.7+47' pubspec.yaml ||
+             ! grep -Fxq "const appVersionString = '2.0.7+47';" lib/update/version.dart; then
+            echo 'Expected BaoCode 2.0.7+47 in both version files' >&2
+            exit 1
+          fi
+          printf 'Verified BaoCode 2.0.7+47 source SHA: %s\n' "$source_sha"
+
+  windows:
+    needs: source
+    permissions:
+      contents: read
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - name: Verify the Windows runner architecture
+        env:
+          RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        run: |
+          if ($env:RUNNER_ARCHITECTURE -ne 'X64') { throw 'Expected an x64 Windows runner' }
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: false
+      - uses: ./.github/actions/setup-rust
+      - name: Build the personal update channel
+        run: dart run tool/build_windows.dart --build-only --arch x64
+      - name: Verify the built app version
+        shell: pwsh
+        run: |
+          $app = Get-Item 'build/windows/x64/runner/Release/baocode.exe'
+          $info = $app.VersionInfo
+          $version = ($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart) -join '.'
+          if ($version -cne '2.0.7.47') { throw "Unexpected BaoCode executable version: $version" }
+      - name: Install the verified release server manifest
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force 'build/remote' | Out-Null
+          [IO.File]::WriteAllBytes((Join-Path (Get-Location) 'build/remote/VERSION'), [Convert]::FromBase64String('Mi4wLjcuNDctNTg3M2NhZThmZjc4Cg=='))
+          [IO.File]::WriteAllBytes((Join-Path (Get-Location) 'build/remote/servers.json'), [Convert]::FromBase64String('ewogICJ2ZXJzaW9uIjogIjIuMC43LjQ3LTU4NzNjYWU4ZmY3OCIsCiAgImZpbGVzIjogewogICAgImxpbnV4LXg2NCI6IHsKICAgICAgInVybCI6ICJodHRwczovL2dpdGh1Yi5jb20vcGF5QWdhaW4vYmFvY29kZS9yZWxlYXNlcy9kb3dubG9hZC92Mi4wLjclMkI0Ny9iYW9jb2RlLXNlcnZlci1saW51eC14NjQuZ3oiLAogICAgICAic2l6ZSI6IDUzMzg0MTQsCiAgICAgICJzaGEyNTYiOiAiNTUxNTZkOGY3ZDE2OGZkMmNkNjY3YjRmZDhjNzYxOGRmZWE5NWMzZjdjZjJhYzI4ODNiYTk5MDEzNjcwZDFkOSIKICAgIH0sCiAgICAibGludXgtYXJtNjQiOiB7CiAgICAgICJ1cmwiOiAiaHR0cHM6Ly9naXRodWIuY29tL3BheUFnYWluL2Jhb2NvZGUvcmVsZWFzZXMvZG93bmxvYWQvdjIuMC43JTJCNDcvYmFvY29kZS1zZXJ2ZXItbGludXgtYXJtNjQuZ3oiLAogICAgICAic2l6ZSI6IDUyMzYzMDUsCiAgICAgICJzaGEyNTYiOiAiNzhlYjA4MTc1YzUzNmFhYThkMzBjMTBlYTJkYWM5MzA0YzNiZDRiNWE1YmNhYWM2ODk1NjdhMGUxYzY3NGI2NCIKICAgIH0sCiAgICAibGludXgtcmlzY3Y2NCI6IHsKICAgICAgInVybCI6ICJodHRwczovL2dpdGh1Yi5jb20vcGF5QWdhaW4vYmFvY29kZS9yZWxlYXNlcy9kb3dubG9hZC92Mi4wLjclMkI0Ny9iYW9jb2RlLXNlcnZlci1saW51eC1yaXNjdjY0Lmd6IiwKICAgICAgInNpemUiOiA1Nzk5MTA1LAogICAgICAic2hhMjU2IjogIjkzY2UzNjRjZTI2N2JmYzVkZWRmYjg0MDgzMjlhNDAxMjE2NmQ5OWRhZWMwZmE3ODA3OTRlYzhjNzViMGE1ODgiCiAgICB9LAogICAgImRhcndpbi14NjQiOiB7CiAgICAgICJ1cmwiOiAiaHR0cHM6Ly9naXRodWIuY29tL3BheUFnYWluL2Jhb2NvZGUvcmVsZWFzZXMvZG93bmxvYWQvdjIuMC43JTJCNDcvYmFvY29kZS1zZXJ2ZXItZGFyd2luLXg2NC5neiIsCiAgICAgICJzaXplIjogNTQ0NjYxNCwKICAgICAgInNoYTI1NiI6ICJkYjE1Mzc2MTkyMjk2MDcyZDZmOTJiN2UwZTY0ZmY3NTlkYTEyNGIyZmVlMDY3NDNiODdhZmU1ZjIyNjU4OTkyIgogICAgfSwKICAgICJkYXJ3aW4tYXJtNjQiOiB7CiAgICAgICJ1cmwiOiAiaHR0cHM6Ly9naXRodWIuY29tL3BheUFnYWluL2Jhb2NvZGUvcmVsZWFzZXMvZG93bmxvYWQvdjIuMC43JTJCNDcvYmFvY29kZS1zZXJ2ZXItZGFyd2luLWFybTY0Lmd6IiwKICAgICAgInNpemUiOiA1MTkxMDg3LAogICAgICAic2hhMjU2IjogImQ3MjRhYzY2NWQ0ZmJkNjY2OTA5YzlhOTc0Y2U5N2U1YzcxMGNkOTQ2ZGYyZDZmNzhkZmFhY2Q1MDhiNTY5MTkiCiAgICB9LAogICAgIndpbmRvd3MteDY0IjogewogICAgICAidXJsIjogImh0dHBzOi8vZ2l0aHViLmNvbS9wYXlBZ2Fpbi9iYW9jb2RlL3JlbGVhc2VzL2Rvd25sb2FkL3YyLjAuNyUyQjQ3L2Jhb2NvZGUtc2VydmVyLXdpbmRvd3MteDY0Lmd6IiwKICAgICAgInNpemUiOiA1MzQ2ODI2LAogICAgICAic2hhMjU2IjogIjZjZmE4YWM5Y2M0NjVlNWUyYzY3MGM5MTBhOWI5ZTg0ZTkyODBkNWM2YzAxYmRjYjA4Nzk1MDJlMjcwMjUwYWEiCiAgICB9LAogICAgIndpbmRvd3MtYXJtNjQiOiB7CiAgICAgICJ1cmwiOiAiaHR0cHM6Ly9naXRodWIuY29tL3BheUFnYWluL2Jhb2NvZGUvcmVsZWFzZXMvZG93bmxvYWQvdjIuMC43JTJCNDcvYmFvY29kZS1zZXJ2ZXItd2luZG93cy1hcm02NC5neiIsCiAgICAgICJzaXplIjogNTI3OTY0NCwKICAgICAgInNoYTI1NiI6ICI0MjNlN2RiMWQwYWY2ZTk5ZTMxMDgyNzg1M2I5ZmE4Mzc4ZDAzZGY4YmQwZGJiZDJkMTU1MDNhMjdjODNmZDI4IgogICAgfQogIH0KfQo='))
+      - name: Install the pinned Inno Setup compiler
+        shell: pwsh
+        run: |
+          $compilerSetup = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $compilerSetup
+          if ((Get-FileHash $compilerSetup -Algorithm SHA256).Hash -ne '9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732') {
+            throw 'Inno Setup download checksum mismatch'
+          }
+          $setupProcess = Start-Process $compilerSetup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/ALLUSERS' -Wait -PassThru
+          if ($setupProcess.ExitCode -ne 0) { throw "Inno Setup installation exited $($setupProcess.ExitCode)" }
+      - name: Package the x64 installer with the remote servers
+        run: dart run tool/build_windows.dart --skip-build --arch x64 --remote-built
+      - name: Record and verify the installer checksum
+        shell: pwsh
+        run: |
+          $installer = Get-Item 'build/installers/BaoCode-2.0.7-setup.exe'
+          $digest = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "$digest  $($installer.Name) ($($installer.Length) bytes)"
+          $checksumPath = 'build/installers/BaoCode-2.0.7-setup.exe.sha256'
+          "$digest  $($installer.Name)" | Set-Content -LiteralPath $checksumPath -Encoding ascii
+          $recordedHash, $recordedName = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '  ', 2
+          if ($recordedName -cne $installer.Name -or (Get-FileHash $installer -Algorithm SHA256).Hash -ine $recordedHash) {
+            throw 'Installer checksum verification failed'
+          }
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: BaoCode-personal-2.0.7-47-windows-x64
+          path: |
+            build/installers/BaoCode-2.0.7-setup.exe
+            build/installers/BaoCode-2.0.7-setup.exe.sha256
+            build/remote/servers.json
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
