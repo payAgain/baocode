@@ -31,23 +31,6 @@
   <h1>Changelog</h1>
   <p class="subtitle">What changed in each version of BaoCode.</p>
 
-  <section class="release" id="v2.0.8">
-    <h2 class="plain"><a href="#v2.0.8">2.0.8</a></h2>
-    <p>This update brings the paired desktop Changes sidebar, images, plans, and questions closer to the local workbench, and fixes remote Stop.</p>
-    <p>Improvements</p>
-    <ul>
-    <li>The remote Changes sidebar shows Git history and filters above working-tree changes, staging, stashes, and commits. Session changes remain available separately.</li>
-    <li>Keep or undo eligible files directly from the changes above the composer or from a file diff.</li>
-    <li>Message attachments and unsent images show thumbnails that open a larger preview. Answer remote questions above the composer, and use the workbench-style button to confirm and start host plans.</li>
-    <li>Updated hosts can commit and push to supported existing upstreams. SSH upstreams and HTTPS upstreams that require credentials are not supported yet.</li>
-    </ul>
-    <p>Fixes</p>
-    <ul>
-    <li>Pasting an image keeps the remote editor focused, and unsent images survive conversation switches and reconnects.</li>
-    <li>Stop targets the current remote turn. It no longer drops a stop during startup or stays disabled when the next turn begins, and can be retried if the host does not report the result.</li>
-    </ul>
-  </section>
-
   <section class="release" id="v2.0.7">
     <h2 class="plain"><a href="#v2.0.7">2.0.7</a></h2>
     <p>This release lets you copy, quote or ask by the way about text selected in the conversation, frees the chat grid from its 2×2, runs a stopped or failed last turn again in one click, and fixes several issues on Linux and Windows.</p>
@@ -80,6 +63,19 @@
     <li>Windows: Ctrl+Y redoes in the markdown editor and the composer.</li>
     <li>Linux: the package declares its GL libraries, fixing a crash at start on minimal desktops; a certificate bundle with stray bytes no longer drops every certificate; code fonts stay monospaced under CJK locales.</li>
     <li>Suggested replies with inline code in them no longer all show as plain text.</li>
+    </ul>
+    <p>This update brings the paired desktop Changes sidebar, images, plans, and questions closer to the local workbench, and fixes remote Stop.</p>
+    <p>Improvements</p>
+    <ul>
+    <li>The remote Changes sidebar shows Git history and filters above working-tree changes, staging, stashes, and commits. Session changes remain available separately.</li>
+    <li>Keep or undo eligible files directly from the changes above the composer or from a file diff.</li>
+    <li>Message attachments and unsent images show thumbnails that open a larger preview. Answer remote questions above the composer, and use the workbench-style button to confirm and start host plans.</li>
+    <li>Updated hosts can commit and push to supported existing upstreams. SSH upstreams and HTTPS upstreams that require credentials are not supported yet.</li>
+    </ul>
+    <p>Fixes</p>
+    <ul>
+    <li>Pasting an image keeps the remote editor focused, and unsent images survive conversation switches and reconnects.</li>
+    <li>Stop targets the current remote turn. It no longer drops a stop during startup or stays disabled when the next turn begins, and can be retried if the host does not report the result.</li>
     </ul>
   </section>
 
