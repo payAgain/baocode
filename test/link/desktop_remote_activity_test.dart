@@ -632,6 +632,24 @@ void main() {
     await host.close(tester);
   });
 
+  testWidgets('project Git keeps working tree changes when history fails', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, showFiles: true);
+    host.reply = (method, _) => switch (method) {
+      LinkMethods.projectGitStatus => _gitStatus(),
+      LinkMethods.projectGitHistory => throw StateError('history failed'),
+      _ => throw StateError(method),
+    };
+
+    await _tap(tester, find.byTooltip('Project sidebar'));
+    await _tap(tester, _tab('changes'));
+    expect(find.text('working.txt'), findsOneWidget);
+    expect(find.text('Working tree'), findsOneWidget);
+    expect(find.text('Could not load Git'), findsNothing);
+    await host.close(tester);
+  });
+
   testWidgets('project Git history opens commit files and a read-only patch', (
     tester,
   ) async {

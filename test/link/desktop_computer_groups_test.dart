@@ -233,6 +233,83 @@ void main() {
     },
   );
 
+  for (final nearby in [false, true]) {
+    final kind = nearby ? 'nearby' : 'copied-invite';
+    test(
+      'recovers a lost $kind join response without a second approval',
+      () async {
+        final (sponsor, joiner) = await machines();
+        await sponsor.host.createComputerGroup();
+        final invite = sponsor.host.createGroupInvite(nearby: nearby);
+        final preview = nearby
+            ? await joiner.host.prepareNearbyGroupJoin(
+                LinkAdvert(
+                  name: sponsor.name,
+                  key: keyOfDeviceId(sponsor.host.id)!,
+                  port: 47100,
+                  groupInviting: true,
+                  addresses: const ['192.168.1.5'],
+                ),
+                stillVisible: () => true,
+              )
+            : await joiner.host.prepareGroupJoin(invite);
+        final requested = Completer<ComputerGroupApproval>();
+        final approvals = <ComputerGroupApproval>{};
+        var dropped = false;
+        void onChange() {
+          if (sponsor.host.pendingGroupApproval case final pending?) {
+            approvals.add(pending);
+            if (!requested.isCompleted) requested.complete(pending);
+          }
+          if (!dropped &&
+              sponsor.host.computerGroup!.active.containsKey(joiner.host.id)) {
+            dropped = true;
+            // Drop the response after the sponsor saved the admission. The
+            // copied-invite case also loses connectivity for the first redial.
+            if (!nearby) sponsor.network.unreachable.add(sponsor.host.id);
+            joiner.platform.node!.connections.last.close();
+          }
+        }
+
+        sponsor.host.addListener(onChange);
+        try {
+          final joining = joiner.host.confirmGroupJoin(preview);
+          final result = nearby
+              ? joining
+              : expectLater(joining, throwsA(isA<LinkClosedException>()));
+          final pending = await requested.future.timeout(
+            const Duration(seconds: 5),
+          );
+          await sponsor.host.approveGroupJoin(pending);
+          await result;
+          expect(dropped, isTrue);
+          if (!nearby) {
+            expect(joiner.host.computerGroup, isNull);
+            sponsor.network.unreachable.remove(sponsor.host.id);
+            final outsider = Machine(sponsor.network, 'Outsider');
+            addTearDown(outsider.close);
+            await outsider.host.load();
+            await expectLater(
+              outsider.host.prepareGroupJoin(invite),
+              throwsA(isA<LinkRemoteException>()),
+            );
+            final retry = await joiner.host.prepareGroupJoin(invite);
+            await joiner.host.confirmGroupJoin(retry);
+          }
+          expect(sponsor.host.pendingGroupApproval, isNull);
+          expect(approvals, {pending});
+          expect(sponsor.host.computerGroup!.eventIds, hasLength(2));
+          expect(
+            joiner.host.computerGroup!.eventIds,
+            sponsor.host.computerGroup!.eventIds,
+          );
+        } finally {
+          sponsor.host.removeListener(onChange);
+        }
+      },
+    );
+  }
+
   test('retired desktop selection cannot disrupt a group workspace', () async {
     final (a, b) = await machines();
     await a.host.createComputerGroup();

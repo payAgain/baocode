@@ -227,6 +227,23 @@ void main() {
       addTearDown(gitBridge.dispose);
     });
 
+    test('marks Git history truncated only when a commit is omitted', () async {
+      final api = DesktopRemoteGitClient(client);
+      final initial = git(['rev-parse', 'HEAD']);
+      git(['commit', '--allow-empty', '--allow-empty-message', '-qm', '']);
+      final head = git(['rev-parse', 'HEAD']);
+
+      final exact = (await api.history(root, limit: 2))!;
+      expect(exact.truncated, isFalse);
+      expect(exact.commits.map((commit) => commit.hash), [head, initial]);
+      expect(exact.commits.last.parentIds, isEmpty);
+
+      final bounded = (await api.history(root, limit: 1))!;
+      expect(bounded.truncated, isTrue);
+      expect(bounded.commits.single.hash, head);
+      expect(bounded.commits.single.subject, isEmpty);
+    });
+
     test('reads project Git status, bounded history and patches', () async {
       final api = DesktopRemoteGitClient(client);
       final initial = git(['rev-parse', 'HEAD']);

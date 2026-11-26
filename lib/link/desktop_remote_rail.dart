@@ -71,8 +71,10 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
         (old.kind, old.id, old.projectId) !=
             (chat.kind, chat.id, chat.projectId)) {
       _clearFiles();
-      _load('');
     }
+    // Opening the conversation can leave the first root load gated until
+    // the parent rebuilds with a ready conversation.
+    if (!_folders.containsKey('')) _load('');
   }
 
   void _watchPeer() {

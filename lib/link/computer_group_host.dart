@@ -11,6 +11,7 @@ class ComputerGroupJoinPreview {
     this.code,
     this._invite,
     this._epoch,
+    this._nearbyAddrs,
   );
   final ComputerGroup? _history;
   String get groupId => _invite.group;
@@ -18,6 +19,7 @@ class ComputerGroupJoinPreview {
   final String code;
   final _GroupInvite _invite;
   final Object _epoch;
+  final List<String> _nearbyAddrs;
 }
 
 class ComputerGroupApproval {
@@ -387,6 +389,31 @@ class _ComputerGroupHost {
       group?.active.containsKey(host.id) == true &&
       group?.known.containsKey(remote) == false;
 
+  // Recover the original signed member details even if the joiner's name or
+  // routes have changed. Only search admissions in already verified history.
+  static ComputerGroupConsent? _admittedConsent(
+    ComputerGroup history,
+    String sponsor,
+    String member,
+    String token,
+  ) {
+    if (!history.active.containsKey(sponsor) ||
+        !history.active.containsKey(member)) {
+      return null;
+    }
+    for (final event in history.toJson()) {
+      if (event case ['add', _, final String author, _, final Object payload, _]
+          when author == sponsor) {
+        final consent = ComputerGroupConsent.decode(payload);
+        if (consent.member.id == member &&
+            LinkHost._same(utf8.encode(consent.nonce), utf8.encode(token))) {
+          return consent;
+        }
+      }
+    }
+    return null;
+  }
+
   Future<LinkPeer> dial(
     ComputerGroupMember member, {
     Iterable<String> nearby = const [],
@@ -421,7 +448,7 @@ class _ComputerGroupHost {
         'group': invite.group,
         'token': invite.token,
       });
-      return (invite, history);
+      return (invite, ComputerGroup.decode(history));
     });
   }
 
@@ -460,7 +487,7 @@ class _ComputerGroupHost {
 
   Future<ComputerGroupJoinPreview> _prepare(
     ComputerGroupMember sponsor,
-    Future<(_GroupInvite, Object?)> Function(LinkPeer) preview, {
+    Future<(_GroupInvite, ComputerGroup?)> Function(LinkPeer) preview, {
     List<String>? nearby,
   }) async {
     if (!ready ||
@@ -477,8 +504,7 @@ class _ComputerGroupHost {
     LinkPeer? peer;
     try {
       peer = await dial(sponsor, nearby: nearby ?? const []);
-      final (invite, history) = await preview(peer);
-      final proposed = nearby == null ? ComputerGroup.decode(history) : null;
+      final (invite, proposed) = await preview(peer);
       if (!ready ||
           this.epoch != epoch ||
           _preparing != attempt ||
@@ -489,7 +515,14 @@ class _ComputerGroupHost {
           (proposed != null &&
               (proposed.id != invite.group ||
                   !proposed.active.containsKey(peer.remote) ||
-                  proposed.known.containsKey(host.id)))) {
+                  (proposed.known.containsKey(host.id) &&
+                      _admittedConsent(
+                            proposed,
+                            peer.remote,
+                            host.id,
+                            invite.token,
+                          ) ==
+                          null)))) {
         throw ComputerGroupWire.rejected;
       }
       final result = _preview = ComputerGroupJoinPreview._(
@@ -498,6 +531,7 @@ class _ComputerGroupHost {
         invite.sponsor.codeWith(host.id),
         invite,
         epoch,
+        nearby == null ? const [] : List.unmodifiable(nearby),
       );
       if (nearby != null) {
         _previewPeer = peer;
@@ -554,16 +588,48 @@ class _ComputerGroupHost {
         throw ComputerGroupWire.rejected;
       }
       _joinPeer = peer;
-      final consent = ComputerGroupConsent.sign(
-        preview.groupId,
-        preview.sponsor.id,
-        preview._invite.token,
-        _self,
-        host._identity,
-      );
-      final answer = await peer.call(ComputerGroupWire.join, {
-        'consent': consent.toJson(),
-      }, const Duration(minutes: 2));
+      final history = preview._history;
+      final admitted = history == null
+          ? null
+          : _admittedConsent(
+              history,
+              preview.sponsor.id,
+              host.id,
+              preview._invite.token,
+            );
+      final consent =
+          admitted ??
+          ComputerGroupConsent.sign(
+            preview.groupId,
+            preview.sponsor.id,
+            preview._invite.token,
+            _self,
+            host._identity,
+          );
+      final wire = consent.toJson();
+      Object? answer;
+      try {
+        answer = await peer.call(ComputerGroupWire.join, {
+          'consent': wire,
+          if (admitted != null) 'recover': true,
+        }, const Duration(minutes: 2));
+      } on Object catch (error) {
+        if ((error is! LinkClosedException && error is! TimeoutException) ||
+            !current()) {
+          rethrow;
+        }
+        // The original consent may already be committed. In particular, a
+        // nearby invitation cannot be presented on a new connection to join.
+        await peer.close();
+        if (!current()) rethrow;
+        peer = await dial(preview.sponsor, nearby: preview._nearbyAddrs);
+        if (!current()) throw ComputerGroupWire.rejected;
+        _joinPeer = peer;
+        answer = await peer.call(ComputerGroupWire.join, {
+          'consent': wire,
+          'recover': true,
+        });
+      }
       await _serial(() async {
         if (!current() || _joinPeer != peer) throw ComputerGroupWire.rejected;
         final verified =
@@ -839,17 +905,29 @@ class _ComputerGroupHost {
     switch (method) {
       case ComputerGroupWire.prepare:
         final invite = _invite;
-        if (invite == null ||
-            !_validInvite(invite, remote) ||
-            params['group'] != invite.group ||
-            params['token'] is! String ||
-            !LinkHost._same(
+        if (invite != null &&
+            _validInvite(invite, remote) &&
+            params['group'] == invite.group &&
+            params['token'] is String &&
+            LinkHost._same(
               utf8.encode(params['token']! as String),
               utf8.encode(invite.token),
             )) {
-          throw ComputerGroupWire.rejected;
+          return group!.toJson();
         }
-        return group!.toJson();
+        // A previous join may have been committed by this host while its
+        // response was lost. Only an already-active authenticated member may
+        // use the old invite to fetch the history needed to retry confirmation.
+        final history = group;
+        final token = params['token'];
+        if (history != null &&
+            history.id == params['group'] &&
+            token is String &&
+            permits(remote) &&
+            _admittedConsent(history, host.id, remote, token) != null) {
+          return history.toJson();
+        }
+        throw ComputerGroupWire.rejected;
       case ComputerGroupWire.prepareNearby:
         final window = _invite;
         if (window == null ||
@@ -870,6 +948,24 @@ class _ComputerGroupHost {
         connection.nearbyInvite = (window: window, invite: invite);
         return {'invite': invite.encode()};
       case ComputerGroupWire.join:
+        final consent = ComputerGroupConsent.decode(params['consent']);
+        if (consent.member.id != remote ||
+            consent.sponsor != host.id ||
+            !consent.verifies) {
+          throw ComputerGroupWire.rejected;
+        }
+        final recovering = params['recover'] == true;
+        // A retry can arrive while the original approval is still persisting.
+        if (recovering) await _mutating;
+        final current = group;
+        if (current != null &&
+            current.id == consent.group &&
+            permits(remote) &&
+            !connection.peer.isClosed &&
+            current.includesConsent(consent)) {
+          return current.toJson();
+        }
+        if (recovering) throw ComputerGroupWire.rejected;
         final nearby = connection.nearbyInvite;
         final invite = nearby?.invite ?? _invite;
         final window = nearby?.window ?? invite;
@@ -881,18 +977,12 @@ class _ComputerGroupHost {
             !_validInvite(window, remote) ||
             !invite.valid ||
             connection.peer.isClosed ||
-            pending != null) {
-          throw ComputerGroupWire.rejected;
-        }
-        final consent = ComputerGroupConsent.decode(params['consent']);
-        if (consent.member.id != remote ||
+            pending != null ||
             consent.group != invite.group ||
-            consent.sponsor != host.id ||
             !LinkHost._same(
               utf8.encode(consent.nonce),
               utf8.encode(invite.token),
-            ) ||
-            !consent.verifies) {
+            )) {
           throw ComputerGroupWire.rejected;
         }
         final request = pending = ComputerGroupApproval._(

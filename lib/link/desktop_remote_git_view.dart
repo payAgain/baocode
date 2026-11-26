@@ -33,10 +33,15 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
 
   Future<(RemoteGitStatus?, RemoteGitHistory?)> _loadRepository() async {
     final status = await widget.client.status(widget.project);
-    return (
-      status,
-      status == null ? null : await widget.client.history(widget.project),
-    );
+    if (status == null) return (null, null);
+    RemoteGitHistory? history;
+    try {
+      history = await widget.client.history(widget.project);
+    } on Object {
+      // History is optional: keep the working-tree status usable on hosts
+      // where the history request fails independently.
+    }
+    return (status, history);
   }
 
   bool get _zh => Localizations.localeOf(context).languageCode == 'zh';

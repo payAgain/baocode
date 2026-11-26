@@ -153,6 +153,41 @@ void main() {
     }
   });
 
+  testWidgets('open Files loads once the conversation becomes ready', (
+    tester,
+  ) async {
+    var ready = false;
+    final (client, host, calls) = await _pair(
+      (method, _) => switch (method) {
+        LinkMethods.folder => {
+          'folders': [],
+          'files': ['example.md'],
+        },
+        _ => throw StateError(method),
+      },
+    );
+    try {
+      bool isCurrent() => ready;
+      await _mount(tester, client, isCurrent: isCurrent);
+      await _click(tester, find.byTooltip('Project sidebar'));
+      final loading = find.text(englishLocalizations.quickOpenLoadingFiles);
+      expect(loading, findsOneWidget);
+      expect(calls, isEmpty);
+
+      ready = true;
+      await _mount(tester, client, isCurrent: isCurrent);
+      await tester.pumpAndSettle();
+      expect(calls.single.$1, LinkMethods.folder);
+      expect(calls.single.$2, {'project': _project, 'path': ''});
+      expect(find.text('example.md'), findsOneWidget);
+      expect(loading, findsNothing);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await client.close();
+      await host.close();
+    }
+  });
+
   testWidgets('remote explorer docks beside a live chat and previews host text', (
     tester,
   ) async {
@@ -490,6 +525,7 @@ Future<void> _mount(
   WidgetTester tester,
   LinkPeer peer, {
   DesktopHostChat chat = _chat,
+  bool Function()? isCurrent,
 }) => tester.pumpWidget(
   MaterialApp(
     home: Scaffold(
@@ -498,7 +534,7 @@ Future<void> _mount(
         session: null,
         hostName: 'Fixture host',
         files: chat.kind == 'project'
-            ? DesktopRemoteRail(peer: peer, chat: chat)
+            ? DesktopRemoteRail(peer: peer, chat: chat, isCurrent: isCurrent)
             : null,
         builder: (context, button, _) =>
             Column(children: [?button, const Spacer(), const TextField()]),
