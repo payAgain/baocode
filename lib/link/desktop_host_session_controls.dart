@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bao_link/bao_link.dart';
 
 import '../kernel/kernel_types.dart';
@@ -34,20 +36,27 @@ class DesktopHostSessionControls {
   bool _live = false;
   bool get live => _live;
   bool _stopUnsupported = false;
+  int? _turn;
   Object? _stopRequest;
+  Timer? _stopConfirmation;
   bool _stopFailed = false;
   bool get stopFailed => _stopFailed;
-  // A Bot session multiplexes private and group turns. The host stop RPC
-  // targets the session rather than a recipient or a specific turn.
+  // A Bot session multiplexes private and group turns; its active turn may
+  // belong to a different recipient.
   bool get showStop => kind == 'project' && _live && !_stopUnsupported;
   bool get canStop => showStop && _stopRequest == null;
 
   void apply(Map<String, Object?> update) {
     _live = update['live'] == true;
-    if (!_live) {
-      _stopRequest = null;
+    final turn = switch (update['actions']) {
+      {'turn': final int turn} when _live => turn,
+      _ => null,
+    };
+    if (!_live || turn != _turn) {
+      _clearStop();
       _stopFailed = false;
     }
+    _turn = turn;
     final context = update['context'];
     if (!identical(context, _wireContext)) {
       _wireContext = context;
@@ -170,6 +179,14 @@ class DesktopHostSessionControls {
     }
   }
 
+  void _clearStop() {
+    _stopRequest = null;
+    _stopConfirmation?.cancel();
+    _stopConfirmation = null;
+  }
+
+  void dispose() => _clearStop();
+
   Future<void> stop() async {
     if (!isCurrent() || peer.isClosed || !canStop) return;
     final request = _stopRequest = Object();
@@ -178,8 +195,19 @@ class DesktopHostSessionControls {
     bool current() => isCurrent() && identical(_stopRequest, request);
     try {
       if (!current() || peer.isClosed) return;
-      await peer.call(LinkMethods.stop, {'session': session});
-      // The host's live update, not the acknowledgement, ends the turn.
+      await peer.call(LinkMethods.stop, {
+        'session': session,
+        'expectedTurn': ?_turn,
+      });
+      // Wait for the follow to end or advance this turn. A host that never
+      // publishes that update must not leave the Stop button disabled.
+      if (!current()) return;
+      _stopConfirmation = Timer(const Duration(seconds: 5), () {
+        if (!current()) return;
+        _clearStop();
+        _stopFailed = true;
+        onChanged();
+      });
     } on Object catch (error) {
       if (!current()) return;
       _stopUnsupported =
@@ -187,7 +215,7 @@ class DesktopHostSessionControls {
           (error.code == LinkErrors.unknown ||
               error.code == LinkErrors.unsupported);
       _stopFailed = true;
-      _stopRequest = null;
+      _clearStop();
       onChanged();
     }
   }

@@ -39,6 +39,7 @@ class ActivityStrip extends StatefulWidget {
     this.onUndoFiles,
     this.onOpenFile,
     this.fileActions,
+    this.fileRowActions,
     this.onStopTask,
     this.onOpenTask,
     this.canOpenTask,
@@ -89,6 +90,10 @@ class ActivityStrip extends StatefulWidget {
 
   /// See [ChangeTree.fileActions].
   final List<List<IdeMenuEntry>> Function(FileChange file)? fileActions;
+
+  /// See [ChangeTree.fileRowActions].
+  final List<Widget> Function(BuildContext context, FileChange file)?
+  fileRowActions;
 
   static bool hasContent(
     List<KernelTask> tasks,
@@ -327,6 +332,7 @@ class _ActivityStripState extends State<ActivityStrip> {
                       height: _treeHeight,
                       onOpen: widget.onOpenFile,
                       fileActions: widget.fileActions,
+                      fileRowActions: widget.fileRowActions,
                       onKeep: widget.onKeepFiles,
                       onUndo: widget.onUndoFiles,
                     ),
@@ -344,12 +350,18 @@ class _ActivityStripState extends State<ActivityStrip> {
 }
 
 class _StripRow extends StatelessWidget {
-  const _StripRow({required this.children, this.onTap, this.semanticLabel});
+  const _StripRow({
+    required this.children,
+    this.onTap,
+    this.semanticLabel,
+    this.focused = false,
+  });
 
   static const double height = 28;
 
   final List<Widget> children;
   final VoidCallback? onTap;
+  final bool focused;
 
   /// What a tap on it does, read out.
   final String? semanticLabel;
@@ -371,6 +383,12 @@ class _StripRow extends StatelessWidget {
                 : Colors.transparent,
             borderRadius: BorderRadius.circular(5),
           ),
+          foregroundDecoration: focused
+              ? BoxDecoration(
+                  border: Border.all(color: themeColors['focusBorder']),
+                  borderRadius: BorderRadius.circular(5),
+                )
+              : null,
           child: Row(children: children),
         ),
       ),
@@ -680,82 +698,90 @@ class _FilesHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final added = changes.fold(0, (sum, change) => sum + change.added);
     final removed = changes.fold(0, (sum, change) => sum + change.removed);
-    return _StripRow(
-      onTap: onToggle,
-      children: [
-        // Narrow, the label gives way to the buttons.
-        Expanded(
-          child: Row(
-            children: [
-              AnimatedRotation(
-                turns: expanded ? 0.25 : 0,
-                duration: const Duration(milliseconds: 150),
-                child: Icon(
-                  Icons.chevron_right_rounded,
-                  size: 16,
-                  color: AppColors.textMuted,
+    final children = <Widget>[
+      // Narrow, the label gives way to the buttons.
+      Expanded(
+        child: Row(
+          children: [
+            AnimatedRotation(
+              turns: expanded ? 0.25 : 0,
+              duration: const Duration(milliseconds: 150),
+              child: Icon(
+                Icons.chevron_right_rounded,
+                size: 16,
+                color: AppColors.textMuted,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Flexible(
+              child: Text(
+                context.l10n.stripFilesChanged(changes.length),
+                maxLines: 1,
+                softWrap: false,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: AppColors.text, fontSize: 12),
+              ),
+            ),
+            if (showLineCounts) ...[
+              const SizedBox(width: 8),
+              Text(
+                '+$added',
+                style: TextStyle(
+                  color: themeColors['chat.linesAddedForeground'],
+                  fontFamily: AppFonts.mono,
+                  fontFamilyFallback: AppFonts.monoFallbacks,
+                  fontSize: 11.5,
                 ),
               ),
               const SizedBox(width: 4),
-              Flexible(
-                child: Text(
-                  context.l10n.stripFilesChanged(changes.length),
-                  maxLines: 1,
-                  softWrap: false,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: AppColors.text, fontSize: 12),
+              Text(
+                '-$removed',
+                style: TextStyle(
+                  color: themeColors['chat.linesRemovedForeground'],
+                  fontFamily: AppFonts.mono,
+                  fontFamilyFallback: AppFonts.monoFallbacks,
+                  fontSize: 11.5,
                 ),
               ),
-              if (showLineCounts) ...[
-                const SizedBox(width: 8),
-                Text(
-                  '+$added',
-                  style: TextStyle(
-                    color: themeColors['chat.linesAddedForeground'],
-                    fontFamily: AppFonts.mono,
-                    fontFamilyFallback: AppFonts.monoFallbacks,
-                    fontSize: 11.5,
-                  ),
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  '-$removed',
-                  style: TextStyle(
-                    color: themeColors['chat.linesRemovedForeground'],
-                    fontFamily: AppFonts.mono,
-                    fontFamilyFallback: AppFonts.monoFallbacks,
-                    fontSize: 11.5,
-                  ),
-                ),
-              ],
             ],
+          ],
+        ),
+      ),
+      const SizedBox(width: 8),
+      if (onUndo case final onUndo?) ...[
+        SizedBox(
+          height: 20,
+          child: FittedBox(
+            child: PanelButton(label: context.l10n.stripUndoAll, onTap: onUndo),
           ),
         ),
-        const SizedBox(width: 8),
-        if (onUndo case final onUndo?) ...[
-          SizedBox(
-            height: 20,
-            child: FittedBox(
-              child: PanelButton(
-                label: context.l10n.stripUndoAll,
-                onTap: onUndo,
-              ),
-            ),
-          ),
-          const SizedBox(width: 4),
-        ],
-        if (onKeep case final onKeep?)
-          SizedBox(
-            height: 20,
-            child: FittedBox(
-              child: PanelButton(
-                label: context.l10n.stripKeepAll,
-                primary: true,
-                onTap: onKeep,
-              ),
-            ),
-          ),
+        const SizedBox(width: 4),
       ],
+      if (onKeep case final onKeep?)
+        SizedBox(
+          height: 20,
+          child: FittedBox(
+            child: PanelButton(
+              label: context.l10n.stripKeepAll,
+              primary: true,
+              onTap: onKeep,
+            ),
+          ),
+        ),
+    ];
+    return FocusableActionDetector(
+      actions: {
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) => onToggle(),
+        ),
+      },
+      child: Builder(
+        builder: (context) => _StripRow(
+          focused: Focus.of(context).hasPrimaryFocus,
+          onTap: onToggle,
+          children: children,
+        ),
+      ),
     );
   }
 }

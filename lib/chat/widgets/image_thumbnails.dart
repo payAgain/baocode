@@ -28,11 +28,17 @@ class ImageThumbnails extends StatelessWidget {
     required this.images,
     this.onRemove,
     this.size = 48,
+    this.memoryOnly = false,
+    this.isPreviewCurrent,
   });
 
+  final bool Function()? isPreviewCurrent;
   final List<ImageAttachment> images;
   final ValueChanged<int>? onRemove;
   final double size;
+
+  /// Remote images stay in memory and their preview closes with the thumbnail.
+  final bool memoryOnly;
 
   @override
   Widget build(BuildContext context) {
@@ -41,11 +47,13 @@ class ImageThumbnails extends StatelessWidget {
       runSpacing: 6,
       children: [
         for (final (i, image) in images.indexed)
-          _Thumbnail(
+          ImageThumbnail(
             // A new image at this position is a new thumbnail.
             key: ObjectKey(image),
             image: image,
             size: size,
+            memoryOnly: memoryOnly,
+            isPreviewCurrent: isPreviewCurrent,
             onRemove: onRemove == null ? null : () => onRemove!(i),
           ),
       ],
@@ -53,69 +61,90 @@ class ImageThumbnails extends StatelessWidget {
   }
 }
 
-class _Thumbnail extends StatelessWidget {
-  const _Thumbnail({
+class ImageThumbnail extends StatefulWidget {
+  const ImageThumbnail({
     super.key,
     required this.image,
-    required this.size,
+    this.size = 48,
     this.onRemove,
+    this.memoryOnly = false,
+    this.isPreviewCurrent,
   });
 
   final ImageAttachment image;
   final double size;
   final VoidCallback? onRemove;
+  final bool memoryOnly;
+  final bool Function()? isPreviewCurrent;
+
+  @override
+  State<ImageThumbnail> createState() => _ImageThumbnailState();
+}
+
+class _ImageThumbnailState extends State<ImageThumbnail> {
+  DialogRoute<void>? _preview;
+
+  void _show() {
+    if (widget.isPreviewCurrent?.call() == false || _preview != null) return;
+    if (!widget.memoryOnly) {
+      showImagePreview(context, widget.image);
+      return;
+    }
+    final navigator = Navigator.of(context, rootNavigator: true);
+    final image = widget.image;
+    final route = DialogRoute<void>(
+      context: context,
+      themes: InheritedTheme.capture(from: context, to: navigator.context),
+      barrierColor: Colors.black87,
+      builder: (_) => _ImagePreview(
+        count: 1,
+        load: (_) => SynchronousFuture(image),
+        index: 0,
+        memoryOnly: true,
+      ),
+    );
+    _preview = route;
+    unawaited(
+      navigator.push(route).whenComplete(() {
+        if (identical(_preview, route)) _preview = null;
+      }),
+    );
+  }
+
+  @override
+  void dispose() {
+    if (_preview case final route?) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (route.isActive) route.navigator?.removeRoute(route);
+      });
+    }
+    if (widget.memoryOnly) {
+      unawaited(_thumbnailProvider(widget.image, widget.size).evict());
+    }
+    super.dispose();
+  }
+
+  ImageProvider _thumbnailProvider(ImageAttachment image, double size) {
+    final limit = (size * 3).round();
+    return widget.memoryOnly
+        ? ResizeImage(
+            MemoryImage(image.bytes),
+            width: limit,
+            height: limit,
+            policy: ResizeImagePolicy.fit,
+          )
+        : ResizeImage(MemoryImage(image.bytes), width: limit);
+  }
 
   @override
   Widget build(BuildContext context) {
+    final ImageThumbnail(:image, :size, :onRemove, :memoryOnly) = widget;
     return HoverBuilder(
       cursor: SystemMouseCursors.click,
       builder: (context, hovered) => Stack(
         clipBehavior: Clip.none,
         children: [
-          // In a message, a right click offers its menu (see
-          // fileLinkMenuAt).
-          FileLinkMenuRegion(
-            menu: ImageMenu(image),
-            child: Listener(
-              onPointerDown: (_) => PreviewPressScope._press(context),
-              child: GestureDetector(
-                onTap: () => showImagePreview(context, image),
-                child: IdeHover(
-                  message: image.name ?? '',
-                  child: Container(
-                    width: size,
-                    height: size,
-                    clipBehavior: Clip.antiAlias,
-                    decoration: BoxDecoration(
-                      color: AppColors.surface,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    // Over the picture, which is clipped to the same corners:
-                    // under it, the picture's corners would cover its curve.
-                    foregroundDecoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(
-                        color: hovered
-                            ? AppColors.textFaint
-                            : AppColors.borderStrong,
-                      ),
-                    ),
-                    child: Image.memory(
-                      image.bytes,
-                      fit: BoxFit.cover,
-                      cacheWidth: (size * 3).round(),
-                      gaplessPlayback: true,
-                      errorBuilder: (context, error, stack) => Icon(
-                        Icons.broken_image_outlined,
-                        size: 16,
-                        color: AppColors.textFaint,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
+          _picture(context, image, size, hovered, memoryOnly),
           if (onRemove case final remove? when hovered)
             Positioned(
               top: -5,
@@ -141,6 +170,52 @@ class _Thumbnail extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  Widget _picture(
+    BuildContext context,
+    ImageAttachment image,
+    double size,
+    bool hovered,
+    bool memoryOnly,
+  ) {
+    final clickable = Listener(
+      onPointerDown: (_) => PreviewPressScope._press(context),
+      child: GestureDetector(
+        onTap: _show,
+        child: IdeHover(
+          message: image.name ?? '',
+          child: Container(
+            width: size,
+            height: size,
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            foregroundDecoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                color: hovered ? AppColors.textFaint : AppColors.borderStrong,
+              ),
+            ),
+            child: Image(
+              image: _thumbnailProvider(image, size),
+              fit: BoxFit.cover,
+              gaplessPlayback: !memoryOnly,
+              errorBuilder: (context, error, stack) => Icon(
+                Icons.broken_image_outlined,
+                size: 16,
+                color: AppColors.textFaint,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    return memoryOnly
+        ? clickable
+        : FileLinkMenuRegion(menu: ImageMenu(image), child: clickable);
   }
 }
 
@@ -259,12 +334,14 @@ class _ImagePreview extends StatefulWidget {
     required this.load,
     required this.index,
     this.menu,
+    this.memoryOnly = false,
   });
 
   final int count;
   final Future<ImageAttachment?> Function(int index) load;
   final int index;
   final ChatItemMenu? Function(int index)? menu;
+  final bool memoryOnly;
 
   @override
   State<_ImagePreview> createState() => _ImagePreviewState();
@@ -277,6 +354,25 @@ class _ImagePreviewState extends State<_ImagePreview> {
   final Map<int, ImageAttachment?> _read = {};
 
   ImageAttachment? get _image => _read[_index];
+
+  ImageProvider _previewProvider(ImageAttachment image) => widget.memoryOnly
+      ? ResizeImage(
+          MemoryImage(image.bytes),
+          width: 1600,
+          height: 1600,
+          policy: ResizeImagePolicy.fit,
+        )
+      : MemoryImage(image.bytes);
+
+  @override
+  void dispose() {
+    if (widget.memoryOnly) {
+      for (final image in _read.values.nonNulls) {
+        unawaited(_previewProvider(image).evict());
+      }
+    }
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -359,8 +455,10 @@ class _ImagePreviewState extends State<_ImagePreview> {
     final several = widget.count > 1;
     return CallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.keyC, meta: true): _copy,
-        const SingleActivator(LogicalKeyboardKey.keyC, control: true): _copy,
+        if (!widget.memoryOnly) ...{
+          const SingleActivator(LogicalKeyboardKey.keyC, meta: true): _copy,
+          const SingleActivator(LogicalKeyboardKey.keyC, control: true): _copy,
+        },
         if (several) ...{
           const SingleActivator(LogicalKeyboardKey.arrowLeft): () => _step(-1),
           const SingleActivator(LogicalKeyboardKey.arrowRight): () => _step(1),
@@ -396,11 +494,21 @@ class _ImagePreviewState extends State<_ImagePreview> {
                           ),
                           child: Center(
                             child: GestureDetector(
-                              onSecondaryTapUp: (details) =>
-                                  _showMenu(context, details.globalPosition),
-                              child: Image.memory(
-                                image.bytes,
+                              onSecondaryTapUp: widget.memoryOnly
+                                  ? null
+                                  : (details) => _showMenu(
+                                      context,
+                                      details.globalPosition,
+                                    ),
+                              child: Image(
+                                image: _previewProvider(image),
                                 fit: BoxFit.contain,
+                                errorBuilder: widget.memoryOnly
+                                    ? (_, _, _) => const Icon(
+                                        Icons.broken_image_outlined,
+                                        color: Colors.white54,
+                                      )
+                                    : null,
                               ),
                             ),
                           ),

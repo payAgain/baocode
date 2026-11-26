@@ -6,7 +6,11 @@ import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
 import 'package:markdown/markdown.dart' as md;
 
+import '../chat/chat_models.dart';
+import '../chat/widgets/image_thumbnails.dart';
+import '../ide/ide_hover.dart';
 import '../l10n/l10n.dart';
+import '../theme/app_theme.dart';
 import 'desktop_host_chats.dart';
 import 'desktop_remote_media.dart';
 
@@ -143,9 +147,8 @@ class _PreviewClosed implements Exception {
   const _PreviewClosed();
 }
 
-/// Wrap a message bubble with the images belonging to that message.
-/// Selection and preview are inline so changing chats cannot leave a modal
-/// open on the wrong host. Rendering this widget never fetches or decodes.
+/// Wrap a message bubble with its attachment thumbnails and file previews.
+/// Relative file previews still read from the host only when clicked.
 class DesktopRemoteMessageImages extends StatefulWidget {
   const DesktopRemoteMessageImages({
     super.key,
@@ -172,6 +175,10 @@ class DesktopRemoteMessageImages extends StatefulWidget {
 class _DesktopRemoteMessageImagesState
     extends State<DesktopRemoteMessageImages> {
   (DesktopRemoteImage, Future<Uint8List>)? _preview;
+  final _thumbnails = <(_Source, Object, String?), Future<ImageAttachment>>{};
+
+  (_Source, Object, String?) _imageKey(DesktopRemoteImage image) =>
+      (image._source, image._value, image.label);
 
   (LinkPeer?, String, String, String?) _target(DesktopRemoteMessageImages w) =>
       (w.peer, w.chat.kind, w.chat.id, w.chat.projectId);
@@ -183,6 +190,7 @@ class _DesktopRemoteMessageImagesState
     super.didUpdateWidget(oldWidget);
     if (_target(oldWidget) != _target(widget) || !_current) {
       _preview = null;
+      _thumbnails.clear();
     } else if (_preview case (final selected, _)
         when !widget.images.any(
           (image) =>
@@ -191,6 +199,8 @@ class _DesktopRemoteMessageImagesState
         )) {
       _preview = null;
     }
+    final keys = widget.images.map(_imageKey).toSet();
+    _thumbnails.removeWhere((key, _) => !keys.contains(key));
   }
 
   bool _canShow(DesktopRemoteImage image) => switch (image._source) {
@@ -202,40 +212,104 @@ class _DesktopRemoteMessageImagesState
               widget.chat.projectId?.isNotEmpty == true),
   };
 
-  void _show(DesktopRemoteImage image) {
+  Future<ImageAttachment> _loadThumbnail(
+    DesktopRemoteImage image,
+    String label,
+    bool Function() current,
+  ) async {
+    final Object? response;
+    if (image._source == _Source.group) {
+      response = await widget.peer!.call(LinkMethods.groupImage, {
+        'group': widget.chat.id,
+        'image': image._value,
+      });
+      if (!current()) throw const _PreviewClosed();
+    } else {
+      response = image._value;
+    }
+    final bytes = await _imageBytes(response);
+    if (!current()) throw const _PreviewClosed();
+    return ImageAttachment(
+      bytes: bytes,
+      mediaType: (response as Map)['type'] as String,
+      name: image.label ?? label,
+    );
+  }
+
+  Widget _thumbnail(DesktopRemoteImage image, String label) {
+    final key = _imageKey(image);
+    final result = _thumbnails.putIfAbsent(key, () {
+      late final Future<ImageAttachment> result;
+      bool current() =>
+          mounted && _current && identical(_thumbnails[key], result);
+      result = _loadThumbnail(image, label, current);
+      result.ignore();
+      return result;
+    });
+    return FutureBuilder<ImageAttachment>(
+      key: ObjectKey(result),
+      future: result,
+      builder: (context, snapshot) {
+        if (!_current) return const SizedBox.shrink();
+        if (snapshot.data case final attachment?) {
+          return ImageThumbnail(
+            image: attachment,
+            memoryOnly: true,
+            isPreviewCurrent: () =>
+                _current && identical(_thumbnails[key], result),
+          );
+        }
+        final error = snapshot.error;
+        return IdeHover(
+          message: error == null
+              ? label
+              : '$label\n${remoteMediaError(context.l10n, error)}',
+          child: SizedBox.square(
+            dimension: 48,
+            child: error == null
+                ? Center(
+                    child: Icon(
+                      Icons.image_outlined,
+                      size: 16,
+                      color: AppColors.textFaint,
+                    ),
+                  )
+                : IconButton(
+                    onPressed: () => setState(() => _thumbnails.remove(key)),
+                    icon: Icon(
+                      Icons.broken_image_outlined,
+                      size: 16,
+                      color: AppColors.textFaint,
+                    ),
+                  ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _showFile(DesktopRemoteImage image) {
     if (!_current || !_canShow(image)) return;
     final peer = widget.peer!;
     final chat = widget.chat;
+    final path = image._value as String;
     late final Future<Uint8List> result;
     bool current() => mounted && _current && identical(_preview?.$2, result);
     result = () async {
-      switch (image._source) {
-        case _Source.inline:
-          return _imageBytes(image._value);
-        case _Source.group:
-          final response = await peer.call(LinkMethods.groupImage, {
-            'group': chat.id,
-            'image': image._value,
-          });
-          if (!current()) throw const _PreviewClosed();
-          return _imageBytes(response);
-        case _Source.relative:
-          final path = image._value as String;
-          if (chat.kind == 'project') {
-            return previewRemoteFileImage(
-              peer,
-              chat.projectId!,
-              path,
-              isCurrent: current,
-            );
-          }
-          final response = await peer.call(LinkMethods.image, {
-            'bot': chat.id,
-            'path': path,
-          });
-          if (!current()) throw const _PreviewClosed();
-          return _imageBytes(response, expectedType: remoteImageType(path));
+      if (chat.kind == 'project') {
+        return previewRemoteFileImage(
+          peer,
+          chat.projectId!,
+          path,
+          isCurrent: current,
+        );
       }
+      final response = await peer.call(LinkMethods.image, {
+        'bot': chat.id,
+        'path': path,
+      });
+      if (!current()) throw const _PreviewClosed();
+      return _imageBytes(response, expectedType: remoteImageType(path));
     }();
     result.ignore();
     setState(() => _preview = (image, result));
@@ -256,20 +330,21 @@ class _DesktopRemoteMessageImagesState
         widget.child,
         Wrap(
           alignment: widget.trailing ? WrapAlignment.end : WrapAlignment.start,
-          spacing: 4,
+          spacing: 6,
+          runSpacing: 6,
           children: [
             for (final (index, image) in images.indexed)
-              TextButton(
-                onPressed: () => _show(image),
-                child: Text(
-                  switch (image.label) {
-                    final name? => l10n.agentImageTitle(name),
-                    _ => l10n.imageChip(index + 1),
-                  },
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
+              if (image._source == _Source.relative)
+                TextButton(
+                  onPressed: () => _showFile(image),
+                  child: Text(
+                    l10n.agentImageTitle(image.label!),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                )
+              else
+                _thumbnail(image, l10n.imageChip(index + 1)),
           ],
         ),
         if (preview != null)

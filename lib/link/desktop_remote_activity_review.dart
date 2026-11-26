@@ -26,6 +26,7 @@ class _ReviewPreview {
   final bool fromStrip;
   (String, String)? diff;
   String? error;
+  bool stale = false;
   bool downloading = false;
   String? downloadStatus;
 }
@@ -70,11 +71,6 @@ bool _projectRelative(String path) =>
         .split('/')
         .every((part) => part.isNotEmpty && part != '.' && part != '..');
 
-bool _canStripReview(_Change change, {required bool keep}) =>
-    _projectRelative(change.path) &&
-    change.revision != null &&
-    (keep || !change.untracked && change.undoable == true);
-
 extension _ChangeReview on _DesktopRemoteActivityState {
   void _clearReviews() {
     for (final request in _reviewing.values) {
@@ -102,24 +98,43 @@ extension _ChangeReview on _DesktopRemoteActivityState {
   bool _reviewSurface(DesktopRemoteActivitySession session, bool fromStrip) =>
       _current(session) && (fromStrip || _open && _section == _Section.changes);
 
+  String? _reviewBlocked(
+    _ActivityText text,
+    DesktopRemoteActivitySession session,
+    _Change change, {
+    required bool guarded,
+  }) {
+    if (!_projectRelative(change.path)) return text.outsideProject;
+    if (_reviewing.containsKey(change.path)) return text.awaitingHost;
+    if (session._live) return text.generating;
+    if (guarded && change.revision == null) return text.legacyReview;
+    return null;
+  }
+
+  bool _canUndo(_Change change, {required bool guarded}) => guarded
+      ? !change.untracked && change.undoable == true
+      : change.undoable != false;
+
   Future<void> _review(
     DesktopRemoteActivitySession session,
     _Change change, {
     required bool keep,
     bool fromStrip = false,
     bool header = false,
+    _ReviewPreview? preview,
   }) async {
     final path = change.path;
+    final guarded = fromStrip || preview != null;
+    final text = _ActivityText(context);
     bool canReview() =>
         _reviewSurface(session, fromStrip) &&
         session._changes[path] == change &&
         (!header || session._changes.length == 1) &&
-        !_reviewing.containsKey(path) &&
-        (fromStrip
-            ? _canStripReview(change, keep: keep)
-            : _projectRelative(path) && (keep || change.undoable != false));
+        (preview == null ||
+            identical(_reviewPreview, preview) && !preview.stale) &&
+        _reviewBlocked(text, session, change, guarded: guarded) == null &&
+        (keep || _canUndo(change, guarded: guarded));
     if (!canReview()) return;
-    final text = _ActivityText(context);
     final host = widget.hostName;
     final action = switch ((keep, header)) {
       (true, true) => context.l10n.stripKeepAll,
@@ -163,6 +178,10 @@ extension _ChangeReview on _DesktopRemoteActivityState {
         _reviewing.remove(path);
         if (session._available && session._changes.containsKey(path)) {
           _reviewErrors[path] = error;
+          if (_reviewPreview case final current?
+              when error == _ReviewError.stale && current.change == change) {
+            current.stale = true;
+          }
         }
       });
     }
@@ -186,7 +205,8 @@ extension _ChangeReview on _DesktopRemoteActivityState {
     } on LinkRemoteException catch (error) {
       fail(switch (error.code) {
         'stale' || LinkErrors.notFound => _ReviewError.stale,
-        LinkErrors.unsupported => _ReviewError.unsupported,
+        LinkErrors.unsupported ||
+        LinkErrors.unknown => _ReviewError.unsupported,
         'conflict' => _ReviewError.conflict,
         LinkErrors.busy => _ReviewError.busy,
         _ => _ReviewError.failed,
@@ -223,6 +243,7 @@ extension _ChangeReview on _DesktopRemoteActivityState {
 
     (String, String)? diff;
     String? error;
+    var stale = false;
     try {
       final response = await session.peer.call(LinkMethods.read, {
         'session': session.session,
@@ -243,6 +264,7 @@ extension _ChangeReview on _DesktopRemoteActivityState {
         };
       }
     } on LinkRemoteException catch (failure) {
+      stale = failure.code == 'stale' || failure.code == LinkErrors.notFound;
       error = switch (failure.code) {
         'stale' || LinkErrors.notFound => text.reviewError(_ReviewError.stale),
         LinkErrors.unsupported || LinkErrors.unknown => text.previewUnavailable,
@@ -255,6 +277,7 @@ extension _ChangeReview on _DesktopRemoteActivityState {
     _changeState(() {
       preview.diff = diff;
       preview.error = error;
+      preview.stale = stale;
     });
   }
 
@@ -332,6 +355,7 @@ extension _ChangeReview on _DesktopRemoteActivityState {
           ),
         ),
         _activityRule(),
+        _diffReviewActions(text, session, preview),
         if (preview.downloadStatus case final status?)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -357,6 +381,53 @@ extension _ChangeReview on _DesktopRemoteActivityState {
     ),
   );
 
+  Widget _diffReviewActions(
+    _ActivityText text,
+    DesktopRemoteActivitySession session,
+    _ReviewPreview preview,
+  ) {
+    final change = preview.change;
+    final error = _reviewErrors[change.path];
+    final blocked = preview.stale
+        ? text.reviewError(_ReviewError.stale)
+        : _reviewBlocked(text, session, change, guarded: true);
+    final undoable = _canUndo(change, guarded: true);
+    void review({required bool keep}) => unawaited(
+      _review(
+        session,
+        change,
+        keep: keep,
+        fromStrip: preview.fromStrip,
+        preview: preview,
+      ),
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: Wrap(
+        spacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          if (blocked != null) ...[
+            if (blocked != preview.error) Text(blocked, style: _activityDetail),
+          ] else ...[
+            _ActivityAction(
+              label: text.keep,
+              onPressed: () => review(keep: true),
+            ),
+            _ActivityAction(
+              label: text.undo,
+              onPressed: undoable ? () => review(keep: false) : null,
+              secondary: true,
+            ),
+            if (!undoable) Text(text.undoUnavailable, style: _activityDetail),
+          ],
+          if (error != null && !preview.stale)
+            _ActivityError(text.reviewError(error)),
+        ],
+      ),
+    );
+  }
+
   Widget _changes(_ActivityText text, DesktopRemoteActivitySession session) {
     final changes = session._changes.values.toList();
     if (changes.isEmpty) {
@@ -367,7 +438,7 @@ extension _ChangeReview on _DesktopRemoteActivityState {
       count: changes.length,
       itemBuilder: (context, index) {
         final change = changes[index];
-        final pending = _reviewing.containsKey(change.path);
+        final blocked = _reviewBlocked(text, session, change, guarded: false);
         final counts = [
           if (change.added case final added?) '+$added',
           if (change.removed case final removed?) '−$removed',
@@ -428,9 +499,9 @@ extension _ChangeReview on _DesktopRemoteActivityState {
                       ].join(' · '),
                       style: _activityDetail,
                     ),
-                    if (pending)
-                      Text(text.awaitingHost, style: _activityDetail)
-                    else if (inProject)
+                    if (blocked != null)
+                      Text(blocked, style: _activityDetail)
+                    else
                       Wrap(
                         spacing: 4,
                         children: [
@@ -453,9 +524,7 @@ extension _ChangeReview on _DesktopRemoteActivityState {
                             secondary: true,
                           ),
                         ],
-                      )
-                    else
-                      Text(text.outsideProject, style: _activityDetail),
+                      ),
                     if (_reviewErrors[change.path] case final error?)
                       _ActivityError(text.reviewError(error)),
                   ],
@@ -474,6 +543,14 @@ extension _ReviewText on _ActivityText {
       _zh ? '此会话没有待处理的更改。' : 'No pending changes in this session.';
   String get keep => _zh ? '保留' : 'Keep';
   String get undo => _zh ? '撤销' : 'Undo';
+  String get undoUnavailable =>
+      _zh ? '此文件无法单独撤销。' : 'This file cannot be undone individually.';
+  String get generating => _zh
+      ? '代理正在生成，完成后可保留或撤销。'
+      : 'Wait for the agent to finish before keeping or undoing changes.';
+  String get legacyReview => _zh
+      ? '此主机版本不支持带版本校验的文件操作。'
+      : 'This host version does not support guarded file actions.';
   String keepDescription(String host) => _zh
       ? '保留 $host 上此会话对此文件的更改？'
       : 'Keep this session’s changes to this file on $host?';

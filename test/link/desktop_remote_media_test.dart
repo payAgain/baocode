@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:bao_link/bao_link.dart';
 import 'package:bao_markdown/bao_markdown.dart';
+import 'package:baocode/chat/widgets/image_thumbnails.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_host_composer.dart';
 import 'package:baocode/link/desktop_remote_media.dart';
@@ -227,23 +228,50 @@ void main() {
       });
       final finder = find.byType(MarkdownEditor);
       await tester.tap(finder);
+      await tester.pump();
+      final editor = tester.state<MarkdownEditorState>(finder);
+      const selection = TextSelection(baseOffset: 5, extentOffset: 1);
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(text: 'before', selection: selection),
+      );
+      await tester.pump();
+      tester.testTextInput.log.clear();
       await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
       await tester.pumpAndSettle();
-      expect(find.text('image.png'), findsOneWidget);
-      await tester.tap(find.byTooltip('Send'));
+      expect(
+        tester.widget<ImageThumbnail>(find.byType(ImageThumbnail)).image.name,
+        'image.png',
+      );
+      expect(find.byType(InputChip), findsNothing);
+      expect(tester.state<MarkdownEditorState>(finder), same(editor));
+      expect(editor.controller.selection, selection);
+      expect(tester.widget<MarkdownEditor>(finder).focusNode!.hasFocus, isTrue);
+      expect(tester.testTextInput.hasAnyClients, isTrue);
+      expect(
+        tester.testTextInput.log.map((call) => call.method),
+        isNot(contains('TextInput.clearClient')),
+      );
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: 'typed after paste',
+          selection: TextSelection.collapsed(offset: 17),
+        ),
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pumpAndSettle();
-      expect(sent.single.$1, isEmpty);
+      expect(sent.single.$1, 'typed after paste');
       expect(sent.single.$2.images.single.toWire(), {
         'name': 'image.png',
         'type': 'image/png',
         'data': _png,
       });
-      expect(find.text('image.png'), findsNothing);
+      expect(find.byType(ImageThumbnail), findsNothing);
 
+      expect(tester.state<MarkdownEditorState>(finder), same(editor));
+      expect(tester.testTextInput.hasAnyClients, isTrue);
       hasImage = false;
-      await tester.tap(finder);
       await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
@@ -303,7 +331,7 @@ void main() {
         );
         for (
           var i = 0;
-          i < 30 && !find.text('fixture.png').tryEvaluate();
+          i < 30 && !find.byType(ImageThumbnail).tryEvaluate();
           i++
         ) {
           await Future<void>.delayed(const Duration(milliseconds: 10));
@@ -311,7 +339,7 @@ void main() {
         }
       });
       await tester.pumpAndSettle();
-      expect(find.text('fixture.png'), findsOneWidget);
+      expect(find.byType(ImageThumbnail), findsOneWidget);
       expect(calls.map((c) => c.$1), [
         LinkMethods.state,
         LinkMethods.openGroup,
@@ -327,7 +355,7 @@ void main() {
           {'type': 'image/png', 'data': _png, 'name': 'fixture.png'},
         ],
       });
-      expect(find.text('fixture.png'), findsNothing);
+      expect(find.byType(ImageThumbnail), findsNothing);
     } finally {
       await tester.pumpWidget(const SizedBox());
       chats.dispose();
@@ -339,53 +367,47 @@ void main() {
     }
   });
 
-  testWidgets(
-    'group image waits for a click and discards a late response on switch',
-    (tester) async {
-      final delayed = Completer<Object?>();
-      final (client, host, calls) = await _pair(
-        (method, params) => delayed.future,
-      );
-      Future<void> mount(
-        DesktopHostChat chat,
-        List<DesktopRemoteImage> images,
-      ) => tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: DesktopRemoteMessageImages(
-              peer: client,
-              chat: chat,
-              images: images,
-              child: const Text('message'),
+  testWidgets('group thumbnail loading discards a late response on switch', (
+    tester,
+  ) async {
+    final delayed = Completer<Object?>();
+    final (client, host, calls) = await _pair(
+      (method, params) => delayed.future,
+    );
+    Future<void> mount(DesktopHostChat chat, List<DesktopRemoteImage> images) =>
+        tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: DesktopRemoteMessageImages(
+                peer: client,
+                chat: chat,
+                images: images,
+                child: const Text('message'),
+              ),
             ),
           ),
-        ),
-      );
-      try {
-        await mount(
-          _group,
-          DesktopRemoteImage.group(['7-0.png', '../other.png']),
         );
-        await tester.pumpAndSettle();
-        expect(calls, isEmpty);
-        expect(find.byType(Image), findsNothing);
-        expect(find.byType(TextButton), findsOneWidget);
-        await tester.tap(find.byType(TextButton));
-        await tester.pump();
-        expect(calls.single.$1, LinkMethods.groupImage);
-        expect(calls.single.$2, {'group': 'g1', 'image': '7-0.png'});
-        await mount(_dm, const []);
-        delayed.complete({'type': 'image/png', 'data': _png});
-        await tester.pumpAndSettle();
-        expect(find.byType(Image), findsNothing);
-        expect(find.byType(TextButton), findsNothing);
-      } finally {
-        await tester.pumpWidget(const SizedBox());
-        await client.close();
-        await host.close();
-      }
-    },
-  );
+    try {
+      await mount(
+        _group,
+        DesktopRemoteImage.group(['7-0.png', '../other.png']),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(Image), findsNothing);
+      expect(find.byType(TextButton), findsNothing);
+      expect(calls.single.$1, LinkMethods.groupImage);
+      expect(calls.single.$2, {'group': 'g1', 'image': '7-0.png'});
+      await mount(_dm, const []);
+      delayed.complete({'type': 'image/png', 'data': _png});
+      await tester.pumpAndSettle();
+      expect(find.byType(Image), findsNothing);
+      expect(find.byType(TextButton), findsNothing);
+    } finally {
+      await tester.pumpWidget(const SizedBox());
+      await client.close();
+      await host.close();
+    }
+  });
 }
 
 Future<void> _tap(WidgetTester tester, String key) async {
@@ -404,7 +426,7 @@ Future<void> _mountComposer(
       body: Align(
         alignment: Alignment.bottomCenter,
         child: DesktopHostComposer(
-          initialDraft: '',
+          initialDraft: DesktopHostDraft(''),
           busy: false,
           placeholder: 'Message',
           sendLabel: 'Send',

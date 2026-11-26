@@ -1033,7 +1033,7 @@ class IdeGitLogViewState extends State<IdeGitLogView> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         SizedBox(width: tree, child: _branchPane(git)),
-                        _Sash(
+                        IdeGitSash(
                           vertical: false,
                           color: _border,
                           size: tree,
@@ -1056,7 +1056,7 @@ class IdeGitLogViewState extends State<IdeGitLogView> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Expanded(child: log),
-            _Sash(
+            IdeGitSash(
               vertical: false,
               color: Colors.transparent,
               size: width,
@@ -1084,7 +1084,7 @@ class IdeGitLogViewState extends State<IdeGitLogView> {
           if (folded)
             const SizedBox(height: Islands.gap)
           else
-            _Sash(
+            IdeGitSash(
               vertical: true,
               color: Colors.transparent,
               size: height,
@@ -1134,7 +1134,7 @@ class IdeGitLogViewState extends State<IdeGitLogView> {
                 children: [
                   if (tree != null) ...[
                     SizedBox(width: tree, child: _branchPane(git)),
-                    _Sash(
+                    IdeGitSash(
                       vertical: false,
                       color: _border,
                       size: tree,
@@ -1142,7 +1142,7 @@ class IdeGitLogViewState extends State<IdeGitLogView> {
                     ),
                   ],
                   Expanded(child: main),
-                  _Sash(
+                  IdeGitSash(
                     vertical: false,
                     color: _border,
                     size: width,
@@ -1167,7 +1167,7 @@ class IdeGitLogViewState extends State<IdeGitLogView> {
                 if (folded)
                   Container(height: 1, color: _border)
                 else
-                  _Sash(
+                  IdeGitSash(
                     vertical: true,
                     color: _border,
                     size: height,
@@ -4922,8 +4922,9 @@ class _LoadMoreState extends State<_LoadMore> {
 /// line stays under it, back from past where the size stops too; while
 /// dragged, the cursor is its own over the whole window (VS Code's drag
 /// shield).
-class _Sash extends StatefulWidget {
-  const _Sash({
+class IdeGitSash extends StatefulWidget {
+  const IdeGitSash({
+    super.key,
     required this.vertical,
     required this.color,
     required this.size,
@@ -4948,10 +4949,10 @@ class _Sash extends StatefulWidget {
   final ValueChanged<double> onResize;
 
   @override
-  State<_Sash> createState() => _SashState();
+  State<IdeGitSash> createState() => IdeGitSashState();
 }
 
-class _SashState extends State<_Sash> {
+class IdeGitSashState extends State<IdeGitSash> {
   bool _hover = false;
   bool _dragging = false;
 

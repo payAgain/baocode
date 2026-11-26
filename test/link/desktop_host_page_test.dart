@@ -801,6 +801,8 @@ void main() {
     await tester.tap(find.text('Project chat'));
     await tester.pump();
     await _enterDraft(tester, 'Unsent project notes');
+    const selection = TextSelection(baseOffset: 14, extentOffset: 7);
+    _editor(tester).controller.selection = selection;
     await tester.tap(find.byTooltip('Back to host chats'));
     await tester.pump();
 
@@ -814,6 +816,7 @@ void main() {
     await tester.tap(find.text('Project chat'));
     await tester.pump();
     expect(_editor(tester).controller.text, 'Unsent project notes');
+    expect(_editor(tester).controller.selection, selection);
     expect(chats.sends, isEmpty);
   });
 

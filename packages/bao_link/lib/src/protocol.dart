@@ -80,7 +80,9 @@ abstract final class LinkMethods {
   /// desktop before it: nothing is asked, the files are left.
   static const rewindPlan = 'rewindPlan';
 
-  /// `{"session"}`: stops the turn under way.
+  /// `{"session", "expectedTurn"?}`: stops the turn under way. The optional
+  /// token is the advertised action `turn`; `stale` if another turn is now
+  /// running. No-op if the session is already idle.
   static const stop = 'stop';
 
   /// `{"session", "request", "answer"}`: answers what the agent asked (see
@@ -125,17 +127,48 @@ abstract final class LinkMethods {
   /// `{"project"}`: branch, HEAD and changed files in an authorized repository.
   static const projectGitStatus = 'projectGitStatus';
 
-  /// `{"project", "limit"?}`: a bounded history from the project's HEAD.
+  /// `{"project", "limit"?, "offset"?, "branch"?, "path"?, "author"?,
+  /// "since"?, "until"?, "search"?}`: bounded history rooted at HEAD or an exact
+  /// local branch. Text filters match literally. Returns `nextOffset` if more.
   static const projectGitHistory = 'projectGitHistory';
 
-  /// `{"project", "revision"}`: changed paths against the first parent.
+  /// `{"project", "revision", "branch"?}`: paths against the first parent of a
+  /// commit reachable from the same HEAD or local branch as history.
   static const projectGitCommitFiles = 'projectGitCommitFiles';
 
   /// `{"project", "path", "staged"?}`: a unified diff for a working change.
   static const projectGitWorkingDiff = 'projectGitWorkingDiff';
 
-  /// `{"project", "revision", "path"}`: the path's unified commit diff.
+  /// `{"project", "revision", "path", "branch"?}`: unified commit diff.
   static const projectGitCommitDiff = 'projectGitCommitDiff';
+
+  /// `{"project"}`: local `branches`, `canWrite` and `canPush`.
+  static const projectGitCapabilities = 'projectGitCapabilities';
+
+  /// `{"project", "expectedState", "files"}`: stage or unstage status rows
+  /// previously listed by the host. The response is the updated status.
+  static const projectGitStage = 'projectGitStage';
+  static const projectGitUnstage = 'projectGitUnstage';
+
+  /// `{"project"}`: bounded local stash entries, identified by object ID.
+  static const projectGitStashes = 'projectGitStashes';
+
+  /// `{"project", "id", "path"?}`: changed files or unified diff for a stash.
+  static const projectGitStashFiles = 'projectGitStashFiles';
+  static const projectGitStashDiff = 'projectGitStashDiff';
+
+  /// `{"project", "expectedState", "message"?, "includeUntracked"?}`.
+  static const projectGitCreateStash = 'projectGitCreateStash';
+
+  /// `{"project", "expectedState", "id"}`. Stash writes return updated status.
+  static const projectGitApplyStash = 'projectGitApplyStash';
+  static const projectGitPopStash = 'projectGitPopStash';
+  static const projectGitDropStash = 'projectGitDropStash';
+
+  /// `{"project", "expectedState", "message", "files", "push"?}`: commit the
+  /// selected status rows and optionally push to a safe configured upstream.
+  /// Returns `head`, `pushed`, and a separate `pushError` on push failure.
+  static const projectGitCommit = 'projectGitCommit';
 
   /// `{"session"}`: off the list (archived on the desktop).
   static const archive = 'archive';
@@ -564,6 +597,9 @@ abstract final class LinkErrors {
 
   /// Git could not list the project's local branches or switch to one.
   static const gitRejected = 'gitRejected';
+
+  /// A Git mutation may have completed, but its outcome could not be verified.
+  static const gitOutcomeUnknown = 'gitOutcomeUnknown';
 
   /// The request was not one the desktop knows: one from before it could.
   static const unknown = 'unknown';

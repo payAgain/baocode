@@ -107,8 +107,11 @@ class DesktopHostPage extends StatefulWidget {
 
 class _DesktopHostPageState extends State<DesktopHostPage> {
   // The connection belongs to the workbench and outlives this page. Keep
-  // its unsent text in memory when switching back to the local workspace.
-  static final _drafts = Expando<Map<(String, String, String), String>>();
+  // unsent drafts in memory when switching back to the local workspace.
+  // The host component is LinkPeer.remote, not the display name or route.
+  static final _drafts =
+      Expando<Map<(String, String, String), DesktopHostDraft>>();
+  static final _emptyDraft = DesktopHostDraft('');
 
   bool _working = false;
   bool _sidebarHidden = false;
@@ -1112,8 +1115,8 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     }
 
     Widget composer(Widget? deliveryMenu) => _HostComposer(
-      key: ObjectKey(connection),
-      initialDraft: drafts[chatKey] ?? '',
+      key: ValueKey((connection, peer, chat.projectId)),
+      initialDraft: drafts[chatKey] ?? _emptyDraft,
       busy: _busy || _chatBusy,
       controls: _chats.sessionControls,
       peer: peer,
@@ -1214,13 +1217,20 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                           onPickReply: _busy || _chatBusy
                               ? null
                               : (reply) {
-                                  if (_busy ||
+                                  final previous = drafts[chatKey];
+                                  if (!isCurrent() ||
+                                      _busy ||
                                       _chatBusy ||
-                                      (drafts[chatKey]?.trim().isNotEmpty ??
+                                      (previous?.text.trim().isNotEmpty ??
                                           false)) {
                                     return;
                                   }
-                                  setState(() => drafts[chatKey] = reply);
+                                  setState(
+                                    () => drafts[chatKey] = DesktopHostDraft(
+                                      reply,
+                                      images: previous?.images ?? const [],
+                                    ),
+                                  );
                                 },
                         )
                       : messages.isEmpty && !hasEarlier
@@ -1335,9 +1345,9 @@ class _HostComposer extends StatelessWidget {
     this.project,
   });
 
-  final String initialDraft;
+  final DesktopHostDraft initialDraft;
   final bool busy;
-  final ValueChanged<String> onChanged;
+  final ValueChanged<DesktopHostDraft> onChanged;
   final Future<bool> Function(String) onSend;
   final Future<bool> Function(String, DesktopRemoteAttachments)
   onSendWithAttachments;
@@ -1358,7 +1368,7 @@ class _HostComposer extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ?activityStrip,
+        activityStrip ?? const SizedBox.shrink(),
         DesktopHostComposer(
           initialDraft: initialDraft,
           busy: busy,

@@ -25,6 +25,7 @@ import 'desktop_host_chats.dart';
 import 'desktop_remote_git_client.dart';
 import 'desktop_remote_git_view.dart';
 import 'desktop_remote_media.dart';
+import 'desktop_remote_session_actions_snapshot.dart';
 
 part 'desktop_remote_activity_output.dart';
 part 'desktop_remote_activity_review.dart';
@@ -36,7 +37,7 @@ class DesktopRemoteActivitySession {
     required this.peer,
     required this.projectId,
     required this.session,
-    required this._currentState,
+    required this._currentSnapshot,
   });
 
   static final _bindings = Expando<DesktopRemoteActivitySession>();
@@ -60,28 +61,32 @@ class DesktopRemoteActivitySession {
       peer: peer,
       projectId: project,
       session: chat.id,
-      currentState: () {
+      currentSnapshot: () {
         final current = chats.remoteActionSnapshot(peer, chat);
         return current != null && identical(current.follow, follow)
-            ? current.state
+            ? current
             : null;
       },
     );
-    binding._apply(snapshot.state);
+    binding._apply(snapshot);
     return binding;
   }
 
   final LinkPeer peer;
   final String projectId;
   final String session;
-  final Map<String, Object?>? Function() _currentState;
+  final DesktopRemoteSessionSnapshot? Function() _currentSnapshot;
 
   Map<String, Object?>? _lastState;
+  bool _live = false;
   Map<String, LinkTask> _tasks = const {};
   Map<String, _Change> _changes = const {};
 
-  void _apply(Map<String, Object?> update) {
-    if (update['session'] != session || identical(update, _lastState)) return;
+  void _apply(DesktopRemoteSessionSnapshot snapshot) {
+    final update = snapshot.state;
+    if (update['session'] != session) return;
+    _live = snapshot.live;
+    if (identical(update, _lastState)) return;
     _lastState = update;
     final tasks = <String, LinkTask>{};
     if (update['tasks'] case final List<Object?> list) {
@@ -105,10 +110,10 @@ class DesktopRemoteActivitySession {
 
   bool get _available {
     if (peer.isClosed) return false;
-    final update = _currentState();
-    if (update == null || update['session'] != session) return false;
+    final snapshot = _currentSnapshot();
+    if (snapshot == null || snapshot.state['session'] != session) return false;
     // Re-check the latest host state even before the next widget rebuild.
-    _apply(update);
+    _apply(snapshot);
     return true;
   }
 }
@@ -146,6 +151,7 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
   _Section get _defaultSection =>
       widget.files == null ? _Section.tasks : _Section.files;
   Future<_ExtensionInventory>? _extensions;
+  bool _visitedGit = false;
   final _reviewing = <String, _ReviewRequest>{};
   final _reviewErrors = <String, _ReviewError>{};
   _ReviewPreview? _reviewPreview;
@@ -165,7 +171,17 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
       _clearOutput();
       _clearReviews();
       _extensions = null;
-      _section = _defaultSection;
+      final before = oldWidget.session;
+      final after = widget.session;
+      final sameProject =
+          before != null &&
+          after != null &&
+          identical(before.peer, after.peer) &&
+          before.projectId == after.projectId;
+      if (!sameProject || widget.files == null) {
+        _visitedGit = false;
+        _section = _defaultSection;
+      }
     }
     if (!_open ||
         widget.session?._available != true ||
@@ -205,6 +221,7 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     _section = section;
     _clearOutput();
     _reviewPreview = null;
+    if (section == _Section.changes && widget.files != null) _visitedGit = true;
     if (section == _Section.extensions) {
       if (widget.session case final session? when _active(session)) {
         _extensions ??= _loadExtensions(session);
@@ -355,9 +372,11 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     ];
     if (!ActivityStrip.hasContent(running, changes)) return null;
 
+    final text = _ActivityText(context);
+    String? blocked(_Change change) =>
+        _reviewBlocked(text, session, change, guarded: true);
     bool actionable(_Change change, {required bool keep}) =>
-        !_reviewing.containsKey(change.path) &&
-        _canStripReview(change, keep: keep);
+        blocked(change) == null && (keep || _canUndo(change, guarded: true));
     void review(_Change change, {required bool keep, bool header = false}) =>
         unawaited(
           _review(session, change, keep: keep, fromStrip: true, header: header),
@@ -371,7 +390,6 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     final undoSingle = single != null && actionable(single, keep: false)
         ? single
         : null;
-    final text = _ActivityText(context);
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -398,44 +416,68 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
           onUndo: undoSingle == null
               ? null
               : () => review(undoSingle, keep: false, header: true),
-          onKeepFiles: keepSingle == null
-              ? null
-              : (_) => review(keepSingle, keep: true),
-          onUndoFiles: undoSingle == null
-              ? null
-              : (_) => review(undoSingle, keep: false),
-          // Keep the tree's hover actions for a single file. With multiple
-          // files they would also offer unsafe folder-level actions.
-          fileActions: single != null
-              ? null
-              : (file) {
-                  final change = advertised[file.path];
-                  if (change == null) return const [];
-                  return [
-                    [
-                      if (actionable(change, keep: false))
-                        IdeMenuAction(
-                          text.undo,
-                          onSelected: () => review(change, keep: false),
-                        ),
-                      if (actionable(change, keep: true))
-                        IdeMenuAction(
-                          text.keep,
-                          onSelected: () => review(change, keep: true),
-                        ),
-                    ],
-                  ];
-                },
+          fileRowActions: (context, file) {
+            final change = advertised[file.path]!;
+            if (blocked(change) case final reason?) {
+              return [
+                Tooltip(
+                  message: reason,
+                  child: Icon(
+                    Codicons.info,
+                    size: 14,
+                    color: AppColors.textMuted,
+                  ),
+                ),
+              ];
+            }
+            return [
+              if (_canUndo(change, guarded: true))
+                _ActivityIconButton(
+                  icon: Codicons.discard,
+                  tooltip: text.undo,
+                  size: IdeListColors.rowHeight,
+                  onPressed: () => review(change, keep: false),
+                ),
+              _ActivityIconButton(
+                icon: Codicons.check,
+                tooltip: text.keep,
+                size: IdeListColors.rowHeight,
+                onPressed: () => review(change, keep: true),
+              ),
+            ];
+          },
+          fileActions: (file) {
+            final change = advertised[file.path]!;
+            return [
+              [
+                if (actionable(change, keep: false))
+                  IdeMenuAction(
+                    text.undo,
+                    onSelected: () => review(change, keep: false),
+                  ),
+                if (actionable(change, keep: true))
+                  IdeMenuAction(
+                    text.keep,
+                    onSelected: () => review(change, keep: true),
+                  ),
+              ],
+            ];
+          },
         ),
         if ((!_open || _section != _Section.changes) &&
-            (_reviewing.isNotEmpty || _reviewErrors.isNotEmpty))
+            (_reviewing.isNotEmpty ||
+                _reviewErrors.isNotEmpty ||
+                session._live && changes.isNotEmpty))
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
             child: switch (_reviewErrors.entries.lastOrNull) {
               MapEntry(:final key, :final value) => _ActivityError(
                 '$key · ${text.reviewError(value)}',
               ),
-              null => Text(text.awaitingHost, style: _activityDetail),
+              null => Text(
+                session._live ? text.generating : text.awaitingHost,
+                style: _activityDetail,
+              ),
             },
           ),
       ],
@@ -566,8 +608,32 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
                                             child: widget.files!,
                                           ),
                                         ),
+                                      if (hasFiles &&
+                                          _visitedGit &&
+                                          sessionAvailable)
+                                        Offstage(
+                                          offstage:
+                                              _section != _Section.changes,
+                                          child: ExcludeFocus(
+                                            excluding:
+                                                _section != _Section.changes,
+                                            child: DesktopRemoteGitView(
+                                              key: ValueKey((
+                                                session!.peer,
+                                                session.projectId,
+                                              )),
+                                              client: DesktopRemoteGitClient(
+                                                session.peer,
+                                              ),
+                                              project: session.projectId,
+                                              review: _changes(text, session),
+                                            ),
+                                          ),
+                                        ),
                                       if (sessionAvailable &&
-                                          _section != _Section.files)
+                                          _section != _Section.files &&
+                                          !(hasFiles &&
+                                              _section == _Section.changes))
                                         switch (_section) {
                                           _Section.tasks when _output != null =>
                                             _outputPane(text, _output!),
@@ -575,15 +641,6 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
                                             text,
                                             session!,
                                           ),
-                                          _Section.changes when hasFiles =>
-                                            DesktopRemoteGitView(
-                                              key: ObjectKey(session),
-                                              client: DesktopRemoteGitClient(
-                                                session!.peer,
-                                              ),
-                                              project: session.projectId,
-                                              review: _changes(text, session),
-                                            ),
                                           _Section.changes => _changes(
                                             text,
                                             session!,
@@ -851,21 +908,24 @@ class _ActivityIconButton extends StatelessWidget {
     required this.icon,
     required this.tooltip,
     required this.onPressed,
+    this.size = 28,
   });
 
   final IconData icon;
   final String tooltip;
   final VoidCallback? onPressed;
+  final double size;
 
   @override
   Widget build(BuildContext context) => IconButton(
     tooltip: tooltip,
     icon: Icon(icon, size: 16),
     onPressed: onPressed,
-    style: _activityButtonStyle(
-      context,
-      foreground: AppColors.textMuted,
-    ).copyWith(padding: const WidgetStatePropertyAll(EdgeInsets.zero)),
+    style: _activityButtonStyle(context, foreground: AppColors.textMuted)
+        .copyWith(
+          padding: const WidgetStatePropertyAll(EdgeInsets.zero),
+          minimumSize: WidgetStatePropertyAll(Size.square(size)),
+        ),
   );
 }
 

@@ -189,11 +189,11 @@ Future<void> _mountComposer(
       body: Align(
         alignment: Alignment.bottomCenter,
         child: DesktopHostComposer(
-          initialDraft: initialDraft,
+          initialDraft: DesktopHostDraft(initialDraft),
           busy: busy,
           placeholder: 'Message',
           sendLabel: 'Send',
-          onChanged: onChanged ?? (_) {},
+          onChanged: (draft) => onChanged?.call(draft.text),
           onSend: onSend,
         ),
       ),

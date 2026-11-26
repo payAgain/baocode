@@ -6,6 +6,7 @@ import 'package:bao_link/bao_link.dart';
 
 import 'package:path/path.dart' as p;
 
+import '../chat/chat_models.dart';
 import '../chat/composer/composer_files.dart';
 import '../l10n/l10n.dart';
 import '../workspace/window_controls.dart';
@@ -191,13 +192,46 @@ remoteProjectMentions(DesktopRemoteMediaTarget target) async {
 const remoteAttachmentLimit = LinkLimits.image;
 const remoteAttachmentCount = 8;
 
-class DesktopRemotePickedImage {
-  DesktopRemotePickedImage._(this.target, this.name, this.type, this._bytes);
+/// An image in a saved draft. Keep its authenticated conversation scope but
+/// release the connection that originally supplied that scope.
+class DesktopRemoteDraftImage {
+  DesktopRemoteDraftImage._(
+    DesktopRemoteMediaTarget target,
+    this.name,
+    this.type,
+    Uint8List bytes,
+  ) : _scope = _scopeOf(target),
+      _bytes = Uint8List.fromList(bytes).asUnmodifiableView();
 
-  final DesktopRemoteMediaTarget target;
+  final (String, String, String, String?) _scope;
   final String name;
   final String type;
   final Uint8List _bytes;
+
+  late final ImageAttachment preview = ImageAttachment(
+    bytes: _bytes,
+    mediaType: type,
+    name: name,
+  );
+
+  static (String, String, String, String?) _scopeOf(
+    DesktopRemoteMediaTarget target,
+  ) => (target.$1.remote, target.$2, target.$3, target.$4);
+
+  DesktopRemotePickedImage? bind(DesktopRemoteMediaTarget target) =>
+      target.$1.isClosed || _scopeOf(target) != _scope
+      ? null
+      : DesktopRemotePickedImage._(target, this);
+}
+
+class DesktopRemotePickedImage {
+  DesktopRemotePickedImage._(this.target, this.snapshot);
+
+  final DesktopRemoteMediaTarget target;
+  final DesktopRemoteDraftImage snapshot;
+
+  String get name => snapshot.name;
+  String get type => snapshot.type;
 
   factory DesktopRemotePickedImage.checked({
     required DesktopRemoteMediaTarget target,
@@ -212,14 +246,17 @@ class DesktopRemotePickedImage {
     if (!remoteImageSignature(bytes, type)) {
       throw const RemoteUnsupportedImage();
     }
-    return DesktopRemotePickedImage._(target, name, type, bytes);
+    return DesktopRemotePickedImage._(
+      target,
+      DesktopRemoteDraftImage._(target, name, type, bytes),
+    );
   }
 
-  int get size => _bytes.length;
+  int get size => snapshot._bytes.length;
   Map<String, Object?> toWire() => {
     'name': name,
     'type': type,
-    'data': base64Encode(_bytes),
+    'data': base64Encode(snapshot._bytes),
   };
 }
 

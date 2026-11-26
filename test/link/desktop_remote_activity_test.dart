@@ -7,7 +7,6 @@ import 'package:baocode/l10n/app_localizations.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_remote_activity.dart';
 import 'package:baocode/theme/app_theme.dart';
-import 'package:baocode/theme/codicons.dart';
 import 'package:baocode/theme/workbench_theme.dart' as workbench;
 import 'package:baocode/theme/workbench_theme_initial_colors.dart';
 import 'package:baocode/workspace/islands.dart' show IslandTab;
@@ -493,19 +492,17 @@ void main() {
     expect(tester.state(find.byType(EditableText)), same(chat));
     expect(find.text('unsent draft'), findsOneWidget);
 
+    final keep = _fileReviewAction(first, 'Keep');
+    final undo = _fileReviewAction(second, 'Undo');
+    expect(keep.hitTestable(), findsOneWidget);
+    expect(undo.hitTestable(), findsOneWidget);
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-    await mouse.addPointer(location: Offset.zero);
-    addTearDown(mouse.removePointer);
-    Future<void> fileAction(String path, IconData icon, String action) async {
-      final row = find.byKey(ValueKey(path));
-      await mouse.moveTo(tester.getCenter(row));
-      await tester.pump();
-      await _tap(tester, find.descendant(of: row, matching: find.byIcon(icon)));
-      await _tap(tester, _confirmButton(action));
-    }
-
-    await _openChangeMenu(tester, 'First.txt');
-    await _tap(tester, find.text('Keep'));
+    await mouse.addPointer(location: tester.getCenter(keep));
+    await mouse.down(tester.getCenter(keep));
+    await mouse.up();
+    await mouse.removePointer();
+    await tester.pumpAndSettle();
+    expect(find.byType(IdeCodeDiff), findsNothing);
     await _tap(tester, _confirmButton('Keep'));
     host.expectLast(LinkMethods.keep, {
       'session': 'session-a',
@@ -517,12 +514,108 @@ void main() {
     host.push('session-a', changes: [secondChange]);
     await tester.pumpAndSettle();
     expect(find.text('First.txt'), findsNothing);
-    await fileAction(second, Codicons.discard, 'Undo');
+    await _tap(tester, undo);
+    await _tap(tester, _confirmButton('Undo'));
     host.expectLast(LinkMethods.undo, {
       'session': 'session-a',
       'paths': [second],
       'expectedChange': 'second-rev',
     });
+    await host.close(tester);
+  });
+
+  testWidgets(
+    'composer file and diff review work with keyboard and reject stale confirmation',
+    (tester) async {
+      final host = await _Host.show(tester, showStrip: true);
+      const path = 'review.txt';
+      const change = {
+        'path': path,
+        'revision': 'old',
+        'preview': true,
+        'undoable': true,
+      };
+      host.reply = (method, _) => method == LinkMethods.read
+          ? {'original': 'before\n', 'text': 'after\n'}
+          : null;
+      host.push('session-a', changes: [change]);
+      await tester.pumpAndSettle();
+
+      Future<void> key(LogicalKeyboardKey key) async {
+        await tester.sendKeyEvent(key);
+        await tester.pumpAndSettle();
+      }
+
+      // Tab past the activity launcher, then expand the changes without a pointer.
+      await key(LogicalKeyboardKey.tab);
+      await key(LogicalKeyboardKey.tab);
+      await key(LogicalKeyboardKey.enter);
+      expect(_fileReviewAction(path, 'Undo').hitTestable(), findsOneWidget);
+      await key(LogicalKeyboardKey.tab);
+      await key(LogicalKeyboardKey.enter);
+      expect(find.byType(IdeCodeDiff), findsOneWidget);
+
+      final editor = find.byKey(const ValueKey('desktop-remote-diff-editor'));
+      Finder diffAction(String label) => find.descendant(
+        of: editor,
+        matching: find.widgetWithText(TextButton, label),
+      );
+      expect(diffAction('Undo').hitTestable(), findsOneWidget);
+      Focus.of(tester.element(find.text('Undo'))).requestFocus();
+      await tester.pump();
+      await key(LogicalKeyboardKey.space);
+      expect(find.byType(AlertDialog), findsOneWidget);
+      host.push(
+        'session-a',
+        changes: [
+          {...change, 'revision': 'new'},
+        ],
+      );
+      await tester.pumpAndSettle();
+      await _tap(tester, _confirmButton('Undo'));
+      expect(host.methods, [LinkMethods.open, LinkMethods.read]);
+      expect(find.textContaining('Review it again.'), findsOneWidget);
+
+      await _tap(tester, find.text(path));
+      await _tap(tester, diffAction('Keep'));
+      await _tap(tester, _confirmButton('Keep'));
+      host.expectLast(LinkMethods.keep, {
+        'session': 'session-a',
+        'paths': [path],
+        'expectedChange': 'new',
+      });
+      expect(
+        find.descendant(of: editor, matching: find.text('Waiting for host')),
+        findsOneWidget,
+      );
+      expect(find.byType(IdeCodeDiff), findsOneWidget);
+      host.push('session-a');
+      await tester.pumpAndSettle();
+      expect(editor, findsNothing);
+      expect(find.text(path), findsNothing);
+      await host.close(tester);
+    },
+  );
+
+  testWidgets('composer review blocks mutation while the host is generating', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, showStrip: true);
+    const path = 'live.txt';
+    const change = {'path': path, 'revision': 'rev', 'undoable': true};
+    host.push('session-a', changes: [change]);
+    await tester.pumpAndSettle();
+    await _tap(tester, find.text('1 file changed'));
+    await _tap(tester, _fileReviewAction(path, 'Keep'));
+    host.push('session-a', changes: [change], live: true);
+    await tester.pumpAndSettle();
+    await _tap(tester, _confirmButton('Keep'));
+    expect(host.methods, [LinkMethods.open]);
+    expect(_fileReviewAction(path, 'Keep'), findsNothing);
+    expect(find.textContaining('Wait for the agent to finish'), findsOneWidget);
+    host.push('session-a', changes: [change]);
+    await tester.pumpAndSettle();
+    expect(_fileReviewAction(path, 'Keep').hitTestable(), findsOneWidget);
     await host.close(tester);
   });
 
@@ -549,6 +642,17 @@ void main() {
     expect(find.byType(IdeCodeDiff), findsNothing);
     expect(find.text('Outside the selected project'), findsOneWidget);
     expect(host.methods, [LinkMethods.open]);
+    await _tap(tester, find.byTooltip('Close diff'));
+    expect(_fileReviewAction('/outside.txt', 'Undo'), findsNothing);
+    expect(_fileReviewAction('/outside.txt', 'Keep'), findsNothing);
+    expect(_fileReviewAction('legacy.txt', 'Keep'), findsNothing);
+    expect(_fileReviewAction('untracked.txt', 'Undo'), findsNothing);
+    expect(_fileReviewAction('untracked.txt', 'Keep'), findsOneWidget);
+    await _tap(tester, find.text('legacy.txt'));
+    expect(
+      find.text('This host version does not support guarded file actions.'),
+      findsOneWidget,
+    );
     await _tap(tester, find.byTooltip('Close diff'));
 
     for (final file in ['outside.txt', 'legacy.txt', 'untracked.txt']) {
@@ -767,6 +871,7 @@ void main() {
     host.reply = (method, args) => switch (method) {
       LinkMethods.projectGitStatus => _gitStatus(),
       LinkMethods.projectGitHistory => _gitHistory,
+      LinkMethods.projectGitCapabilities => null,
       LinkMethods.projectGitWorkingDiff => _gitDiff(
         args['staged'] == true ? stagedPatch : unstagedPatch,
       ),
@@ -788,7 +893,7 @@ void main() {
       'path': 'staged.txt',
       'staged': true,
     });
-    await _tap(tester, find.byTooltip('Back'));
+    await _tap(tester, find.byTooltip('Back from diff'));
     await _tap(tester, find.text('working.txt'));
     expect(_gitPatch(unstagedPatch), findsOneWidget);
     host.expectLast(LinkMethods.projectGitWorkingDiff, {
@@ -800,6 +905,7 @@ void main() {
       LinkMethods.open,
       LinkMethods.projectGitStatus,
       LinkMethods.projectGitHistory,
+      LinkMethods.projectGitCapabilities,
       LinkMethods.projectGitWorkingDiff,
       LinkMethods.projectGitWorkingDiff,
     ]);
@@ -842,8 +948,11 @@ void main() {
 
     await _tap(tester, find.byTooltip('Project sidebar'));
     await _tap(tester, _tab('changes'));
-    await _tap(tester, find.text('History'));
     expect(find.textContaining('Fixture Author'), findsOneWidget);
+    expect(
+      tester.getCenter(find.text('Fixture commit')).dy,
+      lessThan(tester.getCenter(find.text('working.txt')).dy),
+    );
     await _tap(tester, find.text('Fixture commit'));
     host.expectLast(LinkMethods.projectGitCommitFiles, {
       'project': 'project-a',
@@ -856,12 +965,51 @@ void main() {
       'path': 'committed.txt',
     });
     expect(_gitPatch(patch), findsOneWidget);
-    await _tap(tester, find.byTooltip('Back'));
+    await _tap(tester, find.byTooltip('Back from diff'));
     expect(find.text('committed.txt'), findsOneWidget);
     await _tap(tester, find.byTooltip('Back'));
     expect(find.text('Fixture commit'), findsOneWidget);
     await host.close(tester);
   });
+
+  testWidgets(
+    'project Git stages, browses stashes and keeps a failed commit draft',
+    (tester) async {
+      final host = await _Host.show(tester, showFiles: true);
+      host.reply = (method, _) => switch (method) {
+        LinkMethods.projectGitStatus ||
+        LinkMethods.projectGitStage => {..._gitStatus(), 'state': 'repo-state'},
+        LinkMethods.projectGitHistory => _gitHistory,
+        LinkMethods.projectGitCapabilities => {
+          'branches': ['main', 'topic'],
+          'canWrite': true,
+          'canPush': true,
+        },
+        LinkMethods.projectGitStashes => {
+          'entries': <Object>[],
+          'truncated': false,
+        },
+        LinkMethods.projectGitCommit => throw StateError('Commit rejected'),
+        _ => throw StateError(method),
+      };
+
+      await _tap(tester, find.byTooltip('Project sidebar'));
+      await _tap(tester, _tab('changes'));
+      await _tap(tester, find.byTooltip('Stage').first);
+      expect(host.methods, contains(LinkMethods.projectGitStage));
+      await _tap(tester, find.text('Stash'));
+      expect(find.text('No stashes'), findsOneWidget);
+      await _tap(tester, find.widgetWithText(TextButton, 'Commit'));
+      final input = find.widgetWithText(TextField, 'Commit message');
+      await tester.enterText(input, 'Draft commit message');
+      await tester.pump();
+      await _tap(tester, find.widgetWithText(FilledButton, 'Commit'));
+      expect(host.methods, contains(LinkMethods.projectGitCommit));
+      expect(find.text('Draft commit message'), findsOneWidget);
+      expect(find.textContaining('Git operation failed'), findsOneWidget);
+      await host.close(tester);
+    },
+  );
 
   testWidgets('an old host keeps its session change review available', (
     tester,
@@ -1096,6 +1244,11 @@ Map<String, Object?> _gitDiff(String text) => {
   'truncated': false,
 };
 
+Finder _fileReviewAction(String path, String label) => find.descendant(
+  of: find.byKey(ValueKey(path)),
+  matching: find.byTooltip(label),
+);
+
 Finder _confirmButton(String label) => find.descendant(
   of: find.byType(AlertDialog),
   matching: find.widgetWithText(TextButton, label),
@@ -1245,6 +1398,7 @@ class _Host {
     String session, {
     List<LinkTask> tasks = const [],
     List<Map<String, Object?>> changes = const [],
+    bool live = false,
   }) => LinkSessionUpdate(
     session: session,
     start: 0,
@@ -1252,14 +1406,16 @@ class _Host {
     count: 0,
     tasks: tasks,
     changes: changes,
+    live: live,
   );
 
   void push(
     String session, {
     List<LinkTask> tasks = const [],
     List<Map<String, Object?>> changes = const [],
+    bool live = false,
   }) {
-    final update = _update(session, tasks: tasks, changes: changes);
+    final update = _update(session, tasks: tasks, changes: changes, live: live);
     host.emit(
       LinkEvents.session,
       _slimmers[session]?.encode(update) ?? update.toJson(),

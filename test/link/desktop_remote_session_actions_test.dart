@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:bao_link/bao_link.dart';
+import 'package:baocode/chat/panels/interaction_panel.dart';
 import 'package:baocode/chat/widgets/inline_code.dart';
 import 'package:baocode/chat/widgets/user_message_bubble.dart';
+import 'package:baocode/kernel/kernel_types.dart' show QuestionAnswer;
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_host_project_history.dart';
 import 'package:baocode/link/desktop_remote_session_actions.dart';
@@ -32,10 +34,10 @@ void main() {
       'request': 'request-1',
       'answer': {'t': 'approval', 'decision': 'allowOnce'},
     });
-    final button = tester.widget<TextButton>(
-      find.widgetWithText(TextButton, 'Review host request'),
+    final button = tester.widget<PanelButton>(
+      find.widgetWithText(PanelButton, 'Review host request'),
     );
-    expect(button.onPressed, isNull);
+    expect(button.onTap, isNull);
     host.update('first');
     await tester.pumpAndSettle();
     expect(find.text('Review host request'), findsNothing);
@@ -68,6 +70,10 @@ void main() {
     expect(find.text('Edit old message'), findsNothing);
     host.update('first', items: [plan], sessionActions: {'startPlan': true});
     await tester.pumpAndSettle();
+    final start = tester.widget<PanelButton>(
+      find.widgetWithText(PanelButton, 'Start host plan'),
+    );
+    expect(start.primary, isTrue);
     await _tap(tester, 'Start host plan');
     expect(
       find.descendant(
@@ -373,7 +379,8 @@ void main() {
         },
       );
       await tester.pumpAndSettle();
-      await _tap(tester, 'Review host request');
+      expect(find.byType(InteractionPanel), findsOneWidget);
+      expect(find.byType(AlertDialog), findsNothing);
       await _tap(tester, 'Fixture A');
       await _tap(tester, 'Fixture B');
       await _tap(tester, 'Submit');
@@ -400,6 +407,43 @@ void main() {
       await host.close(tester);
     },
   );
+
+  testWidgets('a question answer cannot target a replacement host request', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester);
+    await host.select(tester, 'first');
+    Map<String, Object?> question(String id) => {
+      't': 'question',
+      'id': id,
+      'title': 'Fixture question',
+      'questions': [
+        {
+          'prompt': 'Which choice?',
+          'options': [
+            {'label': 'Fixture choice'},
+          ],
+        },
+      ],
+    };
+    host.update('first', interaction: question('original'));
+    await tester.pumpAndSettle();
+    final answer = tester
+        .widget<InteractionPanel>(find.byType(InteractionPanel))
+        .onAnswer;
+    host.update('first', interaction: question('replacement'));
+    await tester.idle();
+    answer(
+      const QuestionAnswer([
+        ['Fixture choice'],
+      ]),
+    );
+    await tester.pumpAndSettle();
+    expect(host.actions, isEmpty);
+    await _tap(tester, 'Fixture choice');
+    expect(host.actions.single.$2, containsPair('request', 'replacement'));
+    await host.close(tester);
+  });
 
   testWidgets('a replacement permission invalidates the still-painted button', (
     tester,

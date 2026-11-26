@@ -1104,10 +1104,12 @@ class ClaudeCodeKernel
   }
 
   void _write(KernelTurn turn, {required bool ask}) {
-    // The message may wait for the CLI to start.
-    final askEnded = _inAsk && !ask;
-    _inAsk = ask;
+    // The message may wait for the CLI to start. If it was stopped in the
+    // meantime, don't give it to the CLI at all.
     _whenReady((transport) {
+      if (_stoppedTurns.contains(turn.id)) return;
+      final askEnded = _inAsk && !ask;
+      _inAsk = ask;
       // Queued to go now, with tasks in the background: the CLI's interrupt
       // ends those too, so the CLI stops the turn for it itself, once the
       // call under way is done.

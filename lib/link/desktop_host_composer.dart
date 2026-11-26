@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import '../chat/chat_keys.dart';
 import '../chat/composer/composer_presentation.dart';
 import '../chat/floating/floating_registry.dart';
+import '../chat/widgets/image_thumbnails.dart';
 import '../l10n/l10n.dart';
 import '../workspace/window_controls.dart';
 import 'desktop_host_chats.dart';
@@ -15,8 +16,24 @@ import 'desktop_host_controls.dart';
 import 'desktop_host_session_controls.dart';
 import 'desktop_remote_media.dart';
 
+/// An in-memory snapshot without a live input connection or peer.
+class DesktopHostDraft {
+  DesktopHostDraft(
+    this.text, {
+    TextSelection? selection,
+    Iterable<DesktopRemoteDraftImage> images = const [],
+  }) : selection = selection ?? TextSelection.collapsed(offset: text.length),
+       images = List.unmodifiable(images);
+
+  final String text;
+  final TextSelection selection;
+  final List<DesktopRemoteDraftImage> images;
+
+  bool get isEmpty => text.isEmpty && images.isEmpty;
+}
+
 /// The normal chat editor and send controls for a host conversation.
-/// Key the composer by conversation so it can supply its own [initialDraft].
+/// Key the composer by conversation so it can supply its own initial draft.
 class DesktopHostComposer extends StatefulWidget {
   const DesktopHostComposer({
     super.key,
@@ -34,11 +51,11 @@ class DesktopHostComposer extends StatefulWidget {
     this.deliveryMenu,
   });
 
-  final String initialDraft;
+  final DesktopHostDraft initialDraft;
   final bool busy;
   final String placeholder;
   final String sendLabel;
-  final ValueChanged<String> onChanged;
+  final ValueChanged<DesktopHostDraft> onChanged;
   final Widget? deliveryMenu;
   final DesktopHostSessionControls? controls;
   final LinkPeer? peer;
@@ -59,7 +76,9 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
   final _focus = FocusNode(debugLabel: 'Host composer');
   late final MarkdownController _draft;
   int _savedVersion = 0;
-  bool _sending = false;
+  late TextSelection _savedSelection;
+  Object? _sendRequest;
+  bool get _sending => _sendRequest != null;
   final _images = <DesktopRemotePickedImage>[];
   final _mentions = <DesktopRemoteMention>[];
   Object? _mediaRequest;
@@ -94,34 +113,55 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
   @override
   void initState() {
     super.initState();
-    final text = widget.initialDraft;
+    final initial = widget.initialDraft;
+    final target = _target;
+    if (target != null) {
+      _images.addAll(
+        initial.images.map((image) => image.bind(target)).nonNulls,
+      );
+    }
     _draft = MarkdownController(
-      text: text,
-      selection: TextSelection.collapsed(offset: text.length),
+      text: initial.text,
+      selection: initial.selection,
       plain: true,
     )..addListener(_draftChanged);
+    _savedSelection = _draft.selection;
   }
 
   @override
   void didUpdateWidget(DesktopHostComposer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (_targetOf(oldWidget) != _target) {
+    final target = _target;
+    final initial = widget.initialDraft;
+    if (_targetOf(oldWidget) != target) {
       _images.clear();
+      if (target != null) {
+        _images.addAll(
+          initial.images.map((image) => image.bind(target)).nonNulls,
+        );
+      }
       _mentions.clear();
       _choices = null;
       _mediaRequest = null;
       _mediaError = null;
-      _sending = false;
+      _sendRequest = null;
     }
-    final suggested = widget.initialDraft;
-    // The open project may fill an empty draft from a suggested reply.
-    // Ordinary parent refreshes already reflect the editor's text.
-    if (suggested.isEmpty || suggested == _draft.text) return;
-    if (_draft.isComposing || _draft.text.trim().isNotEmpty) {
-      widget.onChanged(_draft.text);
+    // A suggested reply can fill an empty draft without replacing its images.
+    if (initial.text.isEmpty ||
+        initial.text == _draft.text ||
+        identical(initial, oldWidget.initialDraft)) {
       return;
     }
-    _draft.replace(0, _draft.length, suggested);
+    if (_draft.isComposing || _draft.text.trim().isNotEmpty) {
+      _saveDraft();
+      return;
+    }
+    _draft.replace(
+      0,
+      _draft.length,
+      initial.text,
+      selection: initial.selection,
+    );
     _focus.requestFocus();
   }
 
@@ -134,10 +174,20 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
 
   void _draftChanged() {
     final version = _draft.textVersion;
-    if (version == _savedVersion) return;
+    final selection = _draft.selection;
+    if (version == _savedVersion && selection == _savedSelection) return;
     _savedVersion = version;
-    widget.onChanged(_draft.text);
+    _savedSelection = selection;
+    _saveDraft();
   }
+
+  void _saveDraft() => widget.onChanged(
+    DesktopHostDraft(
+      _draft.text,
+      selection: _draft.selection,
+      images: _images.map((image) => image.snapshot),
+    ),
+  );
 
   bool get _canSend =>
       !widget.busy &&
@@ -180,25 +230,31 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
             _images,
             remoteMentionsIn(text, target, _mentions),
           );
-    setState(() => _sending = true);
+    final request = Object();
+    setState(() => _sendRequest = request);
     try {
       final confirmed = await (outgoing == null || outgoing.isEmpty
           ? widget.onSend(text)
           : widget.onSendWithAttachments!(text, outgoing));
       if (confirmed &&
           mounted &&
-          _target == target &&
+          identical(_sendRequest, request) &&
           (target == null || _current(target))) {
         if (outgoing != null) _images.removeWhere(outgoing.images.contains);
         if (_draft.textVersion == version && !_draft.isComposing) {
           _mentions.clear();
-          _draft
-            ..forgetUndo()
-            ..replaceUnrecorded(0, _draft.length, '');
+          _draft.forgetUndo();
+          if (text.isNotEmpty) {
+            _draft.replaceUnrecorded(0, _draft.length, '');
+            return; // The text listener saves the remaining images with it.
+          }
         }
+        if (outgoing != null && outgoing.images.isNotEmpty) _saveDraft();
       }
     } finally {
-      if (mounted && _target == target) setState(() => _sending = false);
+      if (mounted && identical(_sendRequest, request)) {
+        setState(() => _sendRequest = null);
+      }
     }
   }
 
@@ -259,7 +315,10 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
         availableBytes: _availableImageBytes,
         isCurrent: current,
       );
-      if (image != null && current()) _images.add(image);
+      if (image != null && current()) {
+        _images.add(image);
+        _saveDraft();
+      }
     }),
   );
 
@@ -296,6 +355,7 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
         attachments.add(attachment);
       }
       _images.addAll(attachments);
+      _saveDraft();
     });
     return handled || !_current(target);
   }
@@ -407,29 +467,34 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (online && choices != null) _mentionPicker(choices, zh),
-            if (_images.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-                child: Wrap(
-                  spacing: 4,
-                  children: [
-                    for (final image in _images)
-                      InputChip(
-                        label: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 135),
-                          child: Text(
-                            image.name,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        onDeleted: canChange
-                            ? () => setState(() => _images.remove(image))
-                            : null,
-                      ),
-                  ],
-                ),
-              ),
+            // Keep this slot even without media so Flutter never replaces the
+            // editor (and its input connection) as the controls above it change.
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (online && choices != null) _mentionPicker(choices, zh),
+                if (_images.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                    child: ImageThumbnails(
+                      key: ValueKey(online ? target : null),
+                      memoryOnly: true,
+                      isPreviewCurrent: () =>
+                          target != null && _current(target),
+                      images: [
+                        for (final image in _images) image.snapshot.preview,
+                      ],
+                      onRemove: canChange
+                          ? (index) => setState(() {
+                              _images.removeAt(index);
+                              _saveDraft();
+                            })
+                          : null,
+                    ),
+                  ),
+              ],
+            ),
             Padding(
               padding: composerEditorPadding,
               child: ClipRect(

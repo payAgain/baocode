@@ -110,19 +110,23 @@ class DesktopRemoteSessionActionsState
   void _reviewRequest(
     DesktopRemoteSessionSnapshot snapshot,
     InteractionRequest request,
-    String revision,
-  ) {
-    bool valid() => _interactionKey(_snapshot) == revision;
+    String revision, {
+    InteractionAnswer? directAnswer,
+  }) {
+    bool valid() =>
+        _interactionKey(_snapshot) == revision && _answered != revision;
     unawaited(
       _run(snapshot, LinkMethods.answer, valid, (peer, id) async {
-        final answer = await _ask<InteractionAnswer>(
-          snapshot,
-          valid,
-          (context) => switch (request) {
-            QuestionRequest() => _QuestionDialog(request: request),
-            ApprovalRequest() => _ApprovalDialog(request: request),
-          },
-        );
+        final answer =
+            directAnswer ??
+            switch (request) {
+              final ApprovalRequest approval => await _ask<InteractionAnswer>(
+                snapshot,
+                valid,
+                (context) => _ApprovalDialog(request: approval),
+              ),
+              QuestionRequest() => null,
+            };
         if (answer == null || !_available(snapshot) || !valid()) return;
         final payload = switch (answer) {
           QuestionAnswer(:final picks, :final skipped) => <String, Object?>{
@@ -181,9 +185,10 @@ class DesktopRemoteSessionActionsState
             ),
             actions: [
               _cancel(context),
-              OutlinedButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: Text(_text(context, 'Start plan', '执行计划')),
+              PanelButton(
+                primary: true,
+                onTap: () => Navigator.pop(context, true),
+                label: _text(context, 'Start plan', '执行计划'),
               ),
             ],
           ),
@@ -453,23 +458,15 @@ class DesktopRemoteSessionActionsState
       if (!listEquals(_editedItems, snapshot.items)) _editedItems = null;
       final ready = widget.enabled && !snapshot.busy && _operation == null;
       final children = <Widget>[
-        if (request != null &&
+        if (request is ApprovalRequest &&
             revision != null &&
             !_unsupported.contains(LinkMethods.answer))
-          TextButton.icon(
-            onPressed: ready && _answered != revision
+          PanelButton(
+            onTap: ready && _answered != revision
                 ? () => _reviewRequest(snapshot, request, revision)
                 : null,
-            icon: const Icon(Icons.question_answer_outlined, size: 16),
-            label: Text(_text(context, 'Review host request', '查看主机请求')),
-          ),
-        if (plan != null && !_unsupported.contains(LinkMethods.startPlan))
-          TextButton.icon(
-            onPressed: ready && _started != plan.revision
-                ? () => _startPlan(snapshot, plan)
-                : null,
-            icon: const Icon(Icons.play_arrow_outlined, size: 16),
-            label: Text(_text(context, 'Start host plan', '执行主机计划')),
+            primary: true,
+            label: _text(context, 'Review host request', '查看主机请求'),
           ),
         if (_goalCondition(snapshot) != null)
           TextButton.icon(
@@ -532,13 +529,56 @@ class DesktopRemoteSessionActionsState
         );
       }
       return layout(
-        actions: children.isEmpty
-            ? null
-            : Wrap(
+        actions: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (request is QuestionRequest &&
+                revision != null &&
+                _answered != revision &&
+                !_unsupported.contains(LinkMethods.answer))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: ExcludeFocus(
+                  excluding: !ready,
+                  child: IgnorePointer(
+                    ignoring: !ready,
+                    child: InteractionPanel(
+                      key: ValueKey((snapshot.follow, revision)),
+                      request: request,
+                      onAnswer: (answer) => _reviewRequest(
+                        snapshot,
+                        request,
+                        revision,
+                        directAnswer: answer,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (plan != null && !_unsupported.contains(LinkMethods.startPlan))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Align(
+                  alignment: AlignmentDirectional.centerEnd,
+                  child: PanelButton(
+                    label: _text(context, 'Start host plan', '执行主机计划'),
+                    tooltip: context.l10n.planStartHint,
+                    primary: true,
+                    onTap: ready && _started != plan.revision
+                        ? () => _startPlan(snapshot, plan)
+                        : null,
+                  ),
+                ),
+              ),
+            if (children.isNotEmpty)
+              Wrap(
                 spacing: 6,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: children,
               ),
+          ],
+        ),
         deliveryMenu: delivery
             ? SizedBox(
                 width: 28,
@@ -627,27 +667,6 @@ String? _quotaSummary(BuildContext context, Map<String, Object?> quota) {
     }
   }
   return provider is String ? provider : null;
-}
-
-class _QuestionDialog extends StatelessWidget {
-  const _QuestionDialog({required this.request});
-  final QuestionRequest request;
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: Text(request.title),
-    content: SizedBox(
-      width: 480,
-      child: SingleChildScrollView(
-        child: InteractionPanel(
-          key: ValueKey(request.id),
-          request: request,
-          onAnswer: (answer) => Navigator.pop(context, answer),
-        ),
-      ),
-    ),
-    actions: [_cancel(context)],
-  );
 }
 
 class _ApprovalDialog extends StatelessWidget {

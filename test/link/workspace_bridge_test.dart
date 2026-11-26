@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -56,6 +57,7 @@ void main() {
 
   late Workspace workspace;
   late FakeCli cli;
+  Completer<void>? startGate;
   late WorkspaceBridge bridge;
   late LinkPeer phone;
   late String id;
@@ -64,6 +66,7 @@ void main() {
   setUp(() async {
     asked.clear();
     updates.clear();
+    startGate = null;
     late final KernelDescriptor descriptor;
     descriptor = KernelDescriptor(
       id: 'claude-code',
@@ -82,7 +85,10 @@ void main() {
             cwd: '/p',
           ),
         ),
-        start: (_) async => cli = FakeCli(),
+        start: (_) async {
+          if (startGate case final gate?) await gate.future;
+          return cli = FakeCli();
+        },
         readHistoryPage: (session, {required turns, before}) async {
           asked.add(before);
           return switch (before) {
@@ -114,6 +120,8 @@ void main() {
       ),
       throttle: const Duration(milliseconds: 10),
     )..start();
+    desktop.onRequest = bridge.handle;
+    addTearDown(phone.close);
     final sub = phone.events
         .where((e) => e.name == LinkEvents.session)
         .listen(
@@ -346,6 +354,331 @@ void main() {
       },
     );
 
+    test(
+      'filters and pages local branch Git history and scopes its details',
+      () async {
+        final api = DesktopRemoteGitClient(client);
+        final tip = git(['rev-parse', 'refs/heads/feature/topic']);
+        final base = git(['rev-parse', 'HEAD']);
+        expect((await api.capabilities(root))!.branches, [
+          'feature/topic',
+          'main',
+        ]);
+        final first = (await api.history(
+          root,
+          limit: 1,
+          branch: 'feature/topic',
+          path: 'file',
+        ))!;
+        expect(first.commits.single.hash, tip);
+        expect(first.nextOffset, 1);
+        final second = (await api.history(
+          root,
+          limit: 1,
+          offset: first.nextOffset!,
+          branch: 'feature/topic',
+          path: 'file',
+        ))!;
+        expect(second.commits.single.hash, base);
+        expect(second.nextOffset, isNull);
+        final filtered = (await api.history(
+          root,
+          branch: 'feature/topic',
+          author: 'branch test',
+          search: 'FEATURE',
+          since: DateTime.utc(2000),
+          until: DateTime.utc(2099),
+        ))!;
+        expect(filtered.commits.single.hash, tip);
+        expect((await api.history(root, search: '.*'))!.commits, isEmpty);
+        expect(
+          (await api.history(root, since: DateTime.utc(2099)))!.commits,
+          isEmpty,
+        );
+        expect((await api.history(root, path: 'f*'))!.commits, isEmpty);
+        await expectLater(
+          api.history(root, branch: 'tag-only'),
+          rejected(LinkErrors.notFound),
+        );
+        await expectLater(api.history(root, offset: -1), rejected('bad'));
+        await expectLater(
+          api.commitFiles(root, tip),
+          rejected(LinkErrors.notFound),
+        );
+        expect(
+          (await api.commitFiles(
+            root,
+            tip,
+            branch: 'feature/topic',
+          ))!.files.single.path,
+          'file',
+        );
+        expect(
+          (await api.commitDiff(
+            root,
+            tip,
+            'file',
+            branch: 'feature/topic',
+          ))!.text,
+          contains('+feature'),
+        );
+      },
+    );
+
+    test('stages and unstages Git rows and rejects stale content and unauthorized writes', () async {
+      final api = DesktopRemoteGitClient(client);
+      final file = File('$root/file')..writeAsStringSync('one\n');
+      final old = (await api.status(root))!;
+      file.writeAsStringSync('two\n');
+      await expectLater(
+        api.stage(root, old.files, expectedState: old.state!),
+        rejected('stale'),
+      );
+      final fresh = (await api.status(root))!;
+      await expectLater(
+        api.stage(root, [
+          const RemoteGitFile(
+            path: '../file',
+            status: 'M',
+            group: 'workingTree',
+          ),
+        ], expectedState: fresh.state!),
+        rejected('bad'),
+      );
+      permitsGit = false;
+      expect(
+        await api.stage(root, fresh.files, expectedState: fresh.state!),
+        isNull,
+      );
+      permitsGit = true;
+      final staged = (await api.stage(
+        root,
+        fresh.files,
+        expectedState: fresh.state!,
+      ))!;
+      expect(staged.files.single.group, 'index');
+      expect(git(['show', ':file']), 'two');
+      final unstaged = (await api.unstage(
+        root,
+        staged.files,
+        expectedState: staged.state!,
+      ))!;
+      expect(unstaged.files.single.group, 'workingTree');
+      expect(git(['show', ':file']), 'main');
+    });
+
+    test('browses and changes Git stashes by stable ID', () async {
+      final api = DesktopRemoteGitClient(client);
+      final file = File('$root/file')..writeAsStringSync('first change\n');
+      final added = File('$root/new file')..writeAsStringSync('untracked\n');
+      final before = (await api.status(root))!;
+      final clean = (await api.createStash(
+        root,
+        expectedState: before.state!,
+        message: 'first',
+        includeUntracked: true,
+      ))!;
+      expect(clean.files, isEmpty);
+      expect(added.existsSync(), isFalse);
+      final first = (await api.stashes(root))!.entries.single;
+      expect(first.message, contains('first'));
+      expect(
+        (await api.stashFiles(root, first.id))!.files.map((file) => file.path),
+        ['file', 'new file'],
+      );
+      expect(
+        (await api.stashDiff(root, first.id, 'new file'))!.text,
+        contains('+untracked'),
+      );
+      file.writeAsStringSync('second change\n');
+      final second = (await api.status(root))!;
+      final cleanAgain = (await api.createStash(
+        root,
+        expectedState: second.state!,
+        message: 'second',
+      ))!;
+      final entries = (await api.stashes(root))!.entries;
+      expect(entries.last.id, first.id);
+      await expectLater(
+        api.dropStash(root, first.id, expectedState: clean.state!),
+        rejected('stale'),
+      );
+      final applied = (await api.applyStash(
+        root,
+        first.id,
+        expectedState: cleanAgain.state!,
+      ))!;
+      expect(applied.files.length, 2);
+      expect((await api.stashes(root))!.entries.length, 2);
+      git(['restore', 'file']);
+      added.deleteSync();
+      final reset = (await api.status(root))!;
+      final popped = (await api.popStash(
+        root,
+        first.id,
+        expectedState: reset.state!,
+      ))!;
+      expect(file.readAsStringSync(), 'first change\n');
+      expect((await api.stashes(root))!.entries.single.id, entries.first.id);
+      await api.dropStash(root, entries.first.id, expectedState: popped.state!);
+      expect((await api.stashes(root))!.entries, isEmpty);
+      await expectLater(
+        api.stashFiles(root, first.id),
+        rejected(LinkErrors.notFound),
+      );
+    });
+
+    test('commits selected Git working paths, preserves unrelated stage, and reports push failure separately', () async {
+      final api = DesktopRemoteGitClient(client);
+      final bare = '${folder.path}/remote.git';
+      git(['init', '--bare', '--quiet', bare]);
+      git(['remote', 'add', 'origin', bare]);
+      git(['push', '-qu', 'origin', 'main']);
+      expect((await api.capabilities(root))!.canPush, isTrue);
+      final receiverMarker = File('$bare/receiver-marker');
+      if (!Platform.isWindows) {
+        final receiver = File('$bare/hooks/pre-receive')
+          ..writeAsStringSync(
+            '#!/bin/sh\ntouch "${receiverMarker.path}"\nexit 1\n',
+          );
+        expect(Process.runSync('chmod', ['+x', receiver.path]).exitCode, 0);
+      }
+      File('$root/other').writeAsStringSync('unrelated stage\n');
+      File('$root/file').writeAsStringSync('staged\n');
+      git(['add', 'file', 'other']);
+      File('$root/file').writeAsStringSync('working\n');
+      File('$root/-added').writeAsStringSync('new path\n');
+      final status = (await api.status(root))!;
+      final result = (await api.commit(
+        root,
+        expectedState: status.state!,
+        message: 'selected',
+        push: true,
+        files: status.files.where((file) => file.path != 'other').toList(),
+      ))!;
+      expect(result.pushed, isTrue, reason: result.pushError);
+      expect(receiverMarker.existsSync(), isFalse);
+      expect(
+        git(['--git-dir=$bare', 'rev-parse', 'refs/heads/main']),
+        result.head,
+      );
+      expect(git(['show', 'HEAD:file']), 'working');
+      expect(git(['show', 'HEAD:-added']), 'new path');
+      expect(git(['diff', '--cached', '--name-only']), 'other');
+
+      git(['mv', '--', 'file', '-moved']);
+      final rename = (await api.status(root))!;
+      final renameCommit = (await api.commit(
+        root,
+        expectedState: rename.state!,
+        message: 'renamed',
+        files: [rename.files.singleWhere((file) => file.path == '-moved')],
+      ))!;
+      expect(git(['show', '${renameCommit.head}:-moved']), 'working');
+      expect(git(['ls-tree', '--name-only', 'HEAD']), '-added\n-moved');
+
+      // Move the receiver back along a divergent path without running its
+      // hooks. Push remains available, but a non-fast-forward must fail.
+      if (!Platform.isWindows) File('$bare/hooks/pre-receive').deleteSync();
+      git([
+        'push',
+        '-q',
+        'origin',
+        'refs/heads/feature/topic:refs/heads/diverged',
+      ]);
+      git([
+        '--git-dir=$bare',
+        'update-ref',
+        'refs/heads/main',
+        'refs/heads/diverged',
+      ]);
+      final remoteHead = git([
+        '--git-dir=$bare',
+        'rev-parse',
+        'refs/heads/main',
+      ]);
+      final remaining = (await api.status(root))!;
+      final local = (await api.commit(
+        root,
+        expectedState: remaining.state!,
+        message: 'local only',
+        files: remaining.files,
+        push: true,
+      ))!;
+      expect(local.pushed, isFalse);
+      expect(local.pushError, isNotNull);
+      expect(git(['rev-parse', 'HEAD']), local.head);
+      expect(
+        git(['--git-dir=$bare', 'rev-parse', 'refs/heads/main']),
+        remoteHead,
+      );
+
+      File('$root/other').writeAsStringSync('next change\n');
+      final next = (await api.status(root))!;
+      git(['config', 'remote.origin.pushurl', 'ext::disabled']);
+      expect((await api.capabilities(root))!.canPush, isFalse);
+      await expectLater(
+        api.commit(
+          root,
+          expectedState: next.state!,
+          message: 'stale upstream',
+          files: next.files,
+          push: true,
+        ),
+        rejected('stale'),
+      );
+    });
+
+    test('serializes Git writes and suppresses repository hooks', () async {
+      final api = DesktopRemoteGitClient(client);
+      File('$root/file').writeAsStringSync('updated\n');
+      final hookMarker = File('$root/.git/baocode-hook-marker');
+      final hookDir = Directory('$root/.git/host-hooks')..createSync();
+      if (!Platform.isWindows) {
+        final hook = File(
+          '${hookDir.path}/pre-commit',
+        )..writeAsStringSync('#!/bin/sh\ntouch "${hookMarker.path}"\nexit 1\n');
+        expect(Process.runSync('chmod', ['+x', hook.path]).exitCode, 0);
+      }
+      git(['config', 'core.hooksPath', hookDir.path]);
+      final status = (await api.status(root))!;
+      Future<Object?> stage() async {
+        try {
+          return await api.stage(
+            root,
+            status.files,
+            expectedState: status.state!,
+          );
+        } on LinkRemoteException catch (error) {
+          return error.code;
+        }
+      }
+
+      final results = await Future.wait([stage(), stage()]);
+      expect(results.whereType<RemoteGitStatus>(), hasLength(1));
+      expect(
+        results.whereType<String>().single,
+        anyOf(LinkErrors.busy, 'stale'),
+      );
+      final staged = (await api.status(root))!;
+      final commit = await api.commit(
+        root,
+        expectedState: staged.state!,
+        message: 'safe',
+        files: staged.files,
+      );
+      expect(commit, isNotNull);
+      expect(hookMarker.existsSync(), isFalse);
+      git(['config', 'filter.external.clean', 'false']);
+      expect((await api.capabilities(root))!.canWrite, isFalse);
+      File('$root/file').writeAsStringSync('another update\n');
+      final changed = (await api.status(root))!;
+      await expectLater(
+        api.stage(root, changed.files, expectedState: changed.state!),
+        rejected(LinkErrors.gitRejected),
+      );
+    });
+
     test('caps large patches and retains a truncated marker', () async {
       final api = DesktopRemoteGitClient(client);
       File('$root/file').writeAsStringSync('long line of patch text\n' * 32000);
@@ -396,6 +729,29 @@ void main() {
         expect(patch, contains('+actual working content'));
         expect(patch, isNot(contains('filtered')));
         expect(patch, isNot(contains('external-')));
+      },
+    );
+
+    test(
+      'reports an unknown outcome when the Git mutation loses its connection',
+      () async {
+        final (otherClient, otherHost) = await peers();
+        addTearDown(otherClient.close);
+        addTearDown(otherHost.close);
+        otherHost.onRequest = (method, params) async {
+          expect(method, LinkMethods.projectGitCommit);
+          await otherHost.close();
+          return null;
+        };
+        await expectLater(
+          DesktopRemoteGitClient(otherClient).commit(
+            root,
+            expectedState: 'example',
+            message: 'commit',
+            files: const [],
+          ),
+          rejected(LinkErrors.gitOutcomeUnknown),
+        );
       },
     );
 
@@ -804,6 +1160,84 @@ void main() {
       expect(session.queued.map((entry) => entry.$2.text), [
         'next synthetic turn',
       ]);
+    },
+  );
+
+  test(
+    'remote stop interrupts the advertised turn and rejects a stale stop',
+    () async {
+      await phone.call(LinkMethods.open, {'session': id});
+      final session = workspace.threads.first.session;
+      session.send(const ComposerMessage(text: 'first turn'));
+      await settle();
+      final first = updates.last.actions!['turn'];
+      expect(first, isA<int>());
+      expect(updates.last.live, isTrue);
+
+      await phone.call(LinkMethods.stop, {
+        'session': id,
+        'expectedTurn': first,
+      });
+      expect(cli.requests('interrupt'), hasLength(1));
+      expect(session.lastTurnInterrupted, isTrue);
+      await settle();
+      expect(updates.last.live, isFalse);
+
+      // Repeating a stop after the target ends has no further effect.
+      await phone.call(LinkMethods.stop, {
+        'session': id,
+        'expectedTurn': first,
+      });
+      expect(cli.requests('interrupt'), hasLength(1));
+      session.send(const ComposerMessage(text: 'next turn'));
+      await settle();
+      final next = updates.last.actions!['turn'];
+      expect(next, isA<int>());
+      expect(next, isNot(first));
+      await expectLater(
+        phone.call(LinkMethods.stop, {'session': id, 'expectedTurn': first}),
+        throwsA(
+          isA<LinkRemoteException>().having((e) => e.code, 'code', 'stale'),
+        ),
+      );
+      expect(session.isStreaming, isTrue);
+      expect(cli.requests('interrupt'), hasLength(1));
+
+      // Older clients can still stop the session without a turn token.
+      await phone.call(LinkMethods.stop, {'session': id});
+      expect(cli.requests('interrupt'), hasLength(2));
+      expect(session.isStreaming, isFalse);
+    },
+  );
+
+  test(
+    'remote stop during startup keeps the prompt from reaching the CLI',
+    () async {
+      await phone.call(LinkMethods.open, {'session': id});
+      final session = workspace.threads.first.session;
+      final oldCli = cli;
+      final gate = startGate = Completer<void>();
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      session.restart();
+      session.send(const ComposerMessage(text: 'cancel before the CLI starts'));
+      await settle();
+      final turn = updates.last.actions!['turn'];
+      expect(turn, isA<int>());
+      await phone.call(LinkMethods.stop, {'session': id, 'expectedTurn': turn});
+      expect(session.lastTurnInterrupted, isTrue);
+      await settle();
+      expect(updates.last.live, isFalse);
+
+      gate.complete();
+      await settle();
+      expect(cli, isNot(same(oldCli)));
+      expect(cli.users, isEmpty);
+      session.send(const ComposerMessage(text: 'send after restart'));
+      await settle();
+      expect(cli.users, hasLength(1));
+      expect(cli.users.single.toString(), contains('send after restart'));
     },
   );
 

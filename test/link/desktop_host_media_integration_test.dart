@@ -4,11 +4,13 @@ import 'dart:io';
 
 import 'package:bao_link/bao_link.dart';
 import 'package:bao_markdown/bao_markdown.dart';
+import 'package:baocode/chat/widgets/image_thumbnails.dart';
 import 'package:baocode/l10n/l10n.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_host_connection.dart';
 import 'package:baocode/link/desktop_host_page.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -61,7 +63,7 @@ void main() {
           await tester.tap(attachment);
           for (
             var i = 0;
-            i < 40 && find.text('fixture.png').evaluate().isEmpty;
+            i < 40 && _thumbnail('fixture.png').evaluate().isEmpty;
             i++
           ) {
             await Future<void>.delayed(const Duration(milliseconds: 10));
@@ -69,7 +71,7 @@ void main() {
           }
         });
         await tester.pumpAndSettle();
-        expect(find.text('fixture.png'), findsOneWidget);
+        expect(_thumbnail('fixture.png'), findsOneWidget);
         expect(fixture.requests(LinkMethods.sendGroup), isEmpty);
         final send = find.byTooltip('Send');
         await tester.tap(send);
@@ -82,14 +84,30 @@ void main() {
             {'type': 'image/png', 'data': _png, 'name': 'fixture.png'},
           ],
         });
-        expect(find.text('fixture.png'), findsOneWidget);
+        expect(_thumbnail('fixture.png'), findsOneWidget);
         await tester.tap(send);
         await tester.pump();
         expect(fixture.requests(LinkMethods.sendGroup), hasLength(2));
-        expect(find.text('fixture.png'), findsOneWidget);
+        expect(_thumbnail('fixture.png'), findsOneWidget);
+        final editor = find.byType(MarkdownEditor);
+        await tester.tap(editor);
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: 'Next message',
+            selection: TextSelection.collapsed(offset: 3),
+          ),
+        );
         ack.complete({'seq': 3});
         await tester.pumpAndSettle();
-        expect(find.text('fixture.png'), findsNothing);
+        expect(_thumbnail('fixture.png'), findsNothing);
+        await tester.tap(find.byTooltip('Back to host chats'));
+        await tester.pumpAndSettle();
+        await fixture.select(tester, 'Fixture room');
+        final draft = tester.widget<MarkdownEditor>(editor).controller;
+        expect(draft.text, 'Next message');
+        expect(draft.selection, const TextSelection.collapsed(offset: 3));
+        expect(_thumbnail('fixture.png'), findsNothing);
       } finally {
         if (!ack.isCompleted) ack.complete(null);
         await fixture.close(tester);
@@ -100,7 +118,108 @@ void main() {
     },
   );
 
-  testWidgets('group image lookup uses the selected group and image ID', (
+  testWidgets('an image-only draft stays with its host and conversation', (
+    tester,
+  ) async {
+    final fixture = await _Fixture.open(
+      tester,
+      (method, _) => switch (method) {
+        LinkMethods.openGroup => {'messages': [], 'more': false},
+        LinkMethods.sendGroup => {'seq': 1},
+        _ => null,
+      },
+    );
+    final messenger = tester.binding.defaultBinaryMessenger;
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    messenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (_) async => null,
+    );
+    messenger.setMockMethodCallHandler(_window, (call) async {
+      expect(call.method, 'readPasteboardImages');
+      return [
+        {'bytes': base64Decode(_png), 'type': 'image/png', 'name': 'draft.png'},
+      ];
+    });
+    try {
+      final editor = find.byType(MarkdownEditor);
+      final thumbnail = _thumbnail('draft.png');
+      Future<void> pasteImage() async {
+        await tester.tap(editor);
+        await tester.pump();
+        await tester.state<MarkdownEditorState>(editor).paste();
+        await tester.pumpAndSettle();
+        expect(thumbnail, findsOneWidget);
+      }
+
+      Future<void> closeChat() async {
+        await tester.tap(find.byTooltip('Back to host chats'));
+        await tester.pumpAndSettle();
+      }
+
+      await fixture.select(tester, 'Fixture room');
+      await pasteImage();
+      expect(tester.widget<MarkdownEditor>(editor).controller.text, isEmpty);
+      await closeChat();
+      await fixture.select(tester, 'Other room');
+      expect(thumbnail, findsNothing);
+      await closeChat();
+      await fixture.select(tester, 'Fixture room');
+      expect(thumbnail, findsOneWidget);
+
+      await fixture.switchHost(tester, 'other-host');
+      await fixture.select(tester, 'Fixture room');
+      expect(thumbnail, findsNothing);
+      await fixture.switchHost(tester, 'media-host');
+      await fixture.select(tester, 'Fixture room');
+      expect(thumbnail, findsOneWidget);
+      await tester.tap(thumbnail);
+      await tester.pumpAndSettle();
+      expect(find.byType(InteractiveViewer), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      final state = tester.state<MarkdownEditorState>(editor);
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: tester.getCenter(thumbnail));
+      await tester.pump();
+      final remove = find.descendant(
+        of: thumbnail,
+        matching: find.byIcon(Icons.close_rounded),
+      );
+      await tester.tap(remove);
+      await mouse.removePointer();
+      await tester.pumpAndSettle();
+      expect(thumbnail, findsNothing);
+      expect(tester.state<MarkdownEditorState>(editor), same(state));
+      await closeChat();
+      await fixture.select(tester, 'Fixture room');
+      expect(thumbnail, findsNothing);
+      await pasteImage();
+      await fixture.switchHost(tester, 'media-host');
+      await fixture.select(tester, 'Fixture room');
+      await tester.tap(find.byTooltip('Send'));
+      await tester.pumpAndSettle();
+      expect(fixture.requests(LinkMethods.sendGroup).single, {
+        'group': _room.id,
+        'text': '',
+        'id': isA<String>(),
+        'images': [
+          {'type': 'image/png', 'data': _png, 'name': 'draft.png'},
+        ],
+      });
+      expect(thumbnail, findsNothing);
+      await closeChat();
+      await fixture.select(tester, 'Fixture room');
+      expect(thumbnail, findsNothing);
+    } finally {
+      await fixture.close(tester);
+      messenger.setMockMethodCallHandler(SystemChannels.platform, null);
+      messenger.setMockMethodCallHandler(_window, null);
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('group user attachments show thumbnails for admitted image IDs', (
     tester,
   ) async {
     final fixture = await _Fixture.open(
@@ -112,7 +231,11 @@ void main() {
               seq: 1,
               at: DateTime(2026),
               from: linkGroupUser,
-              images: const ['fixture-group-image', '../invalid.png'],
+              images: const [
+                'fixture-group-image',
+                'second-group-image',
+                '../invalid.png',
+              ],
             ).toJson(),
           ],
           'more': false,
@@ -123,24 +246,28 @@ void main() {
     );
     try {
       await fixture.select(tester, 'Fixture room');
-      expect(fixture.requests(LinkMethods.groupImage), isEmpty);
+      final first = _thumbnail('Image 1');
+      final second = _thumbnail('Image 2');
+      await _waitFor(tester, first);
+      await _waitFor(tester, second);
+      expect(first, findsOneWidget);
+      expect(second, findsOneWidget);
+      expect(find.text('Image 1'), findsNothing);
       expect(find.text('Image 2'), findsNothing);
-      await tester.runAsync(() async {
-        await tester.tap(find.text('Image 1'));
-        for (var i = 0; i < 40 && find.byType(Image).evaluate().isEmpty; i++) {
-          await Future<void>.delayed(const Duration(milliseconds: 10));
-          await tester.pump();
-        }
-      });
-      await tester.pumpAndSettle();
-      expect(fixture.requests(LinkMethods.groupImage).single, {
-        'group': _room.id,
-        'image': 'fixture-group-image',
-      });
+      expect(_thumbnail('Image 3'), findsNothing);
       expect(
-        tester.widget<Image>(find.byType(Image)).image,
-        isA<ResizeImage>(),
+        fixture.requests(LinkMethods.groupImage),
+        unorderedEquals([
+          {'group': _room.id, 'image': 'fixture-group-image'},
+          {'group': _room.id, 'image': 'second-group-image'},
+        ]),
       );
+      await tester.tap(second);
+      await tester.pumpAndSettle();
+      expect(find.byType(InteractiveViewer), findsOneWidget);
+      expect(fixture.requests(LinkMethods.groupImage), hasLength(2));
+      await fixture.switchHost(tester, 'other-host');
+      expect(find.byType(InteractiveViewer), findsNothing);
     } finally {
       await fixture.close(tester);
     }
@@ -244,9 +371,10 @@ void main() {
         final prompt = find
             .textContaining('Synthetic project prompt')
             .hitTestable();
-        final attachment = find.text('Image: prompt.png');
+        final attachment = _thumbnail('prompt.png');
         final figure = find.text('Image: project.png');
         final nextPrompt = find.text('Later project prompt').hitTestable();
+        await _waitFor(tester, attachment);
         expect(attachment, findsOneWidget);
         expect(figure, findsOneWidget);
         expect(find.text('Conversation images'), findsNothing);
@@ -326,6 +454,20 @@ Map<String, Object?> _history(String session, List<Object?> items) =>
     ).toJson();
 Map<String, Object?> _user(String text) => {'t': 'user', 'text': text};
 Map<String, Object?> _reply(String text) => {'t': 'text', 'text': text};
+Finder _thumbnail(String name) => find.byWidgetPredicate(
+  (widget) => widget is ImageThumbnail && widget.image.name == name,
+);
+
+Future<void> _waitFor(WidgetTester tester, Finder finder) async {
+  await tester.runAsync(() async {
+    for (var i = 0; i < 40 && finder.evaluate().isEmpty; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await tester.pump();
+    }
+  });
+  await tester.pumpAndSettle();
+}
+
 Map<String, Object?> _imageTool(String path) => {
   't': 'tool',
   'status': 'succeeded',
@@ -334,21 +476,22 @@ Map<String, Object?> _imageTool(String path) => {
 };
 
 class _Fixture {
-  _Fixture(this.connection, this.chats, this.host, this.calls);
+  _Fixture(this.connection, this.chats, this.host, this.calls, this.handler);
 
   final _Connection connection;
   final DesktopHostChats chats;
-  final LinkPeer host;
+  LinkPeer host;
   final List<(String, Map<String, Object?>)> calls;
+  final LinkRequestHandler handler;
 
-  static Future<_Fixture> open(
-    WidgetTester tester,
+  static Future<(LinkPeer, LinkPeer)> _connect(
+    String id,
     LinkRequestHandler handler,
+    List<(String, Map<String, Object?>)> calls,
   ) async {
-    final calls = <(String, Map<String, Object?>)>[];
     final (clientWire, hostWire) = MemoryLinkConnection.pair(
       a: 'media-client',
-      b: 'media-host',
+      b: id,
     );
     final accepting = LinkPeer.accept(
       hostWire,
@@ -362,7 +505,10 @@ class _Fixture {
               system: 'Windows',
             ),
             bots: const [_bot],
-            groups: const [_room],
+            groups: const [
+              _room,
+              LinkGroup(id: 'other-room', name: 'Other room', members: []),
+            ],
             projects: const [_project],
             sessions: [
               SessionSummary(
@@ -377,12 +523,21 @@ class _Fixture {
         return handler(method, params);
       },
     );
-    final client = await LinkPeer.connect(clientWire);
+    return (await LinkPeer.connect(clientWire), await accepting);
+  }
+
+  static Future<_Fixture> open(
+    WidgetTester tester,
+    LinkRequestHandler handler,
+  ) async {
+    final calls = <(String, Map<String, Object?>)>[];
+    final (client, host) = await _connect('media-host', handler, calls);
     final fixture = _Fixture(
       _Connection(client),
       DesktopHostChats()..bind(client),
-      await accepting,
+      host,
       calls,
+      handler,
     );
     await tester.pumpWidget(
       MaterialApp(
@@ -411,10 +566,24 @@ class _Fixture {
     await tester.pumpAndSettle();
   }
 
+  Future<void> switchHost(WidgetTester tester, String id) async {
+    final previous = connection.peer;
+    chats.bind(null);
+    connection.replacePeer(null);
+    await previous?.close();
+    await host.close();
+    await tester.pumpAndSettle();
+    final (client, nextHost) = await _connect(id, handler, calls);
+    host = nextHost;
+    chats.bind(client);
+    connection.replacePeer(client);
+    await tester.pumpAndSettle();
+  }
+
   Future<void> close(WidgetTester tester) async {
     await tester.pumpWidget(const SizedBox.shrink());
     chats.dispose();
-    await connection.peer.close();
+    await connection.peer?.close();
     await host.close();
     connection.dispose();
   }
@@ -423,11 +592,17 @@ class _Fixture {
 class _Connection extends ChangeNotifier implements DesktopHostConnection {
   _Connection(this.peer);
   @override
-  final LinkPeer peer;
+  LinkPeer? peer;
+
+  void replacePeer(LinkPeer? next) {
+    peer = next;
+    notifyListeners();
+  }
+
   @override
   bool get groupSelected => true;
   @override
-  String get selectedHostId => peer.remote;
+  String? get selectedHostId => peer?.remote;
   @override
   String get hostName => 'Fixture host';
   @override

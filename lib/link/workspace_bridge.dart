@@ -111,14 +111,15 @@ class WorkspaceBridge {
   /// branch cache and connected clients after Git has run.
   final void Function(Project project)? onBranchChanged;
 
-  /// Rechecks signed desktop group membership while a Git read is in flight.
+  /// Rechecks signed desktop group membership during scoped Git operations.
   final bool Function()? permitsProjectGit;
-  int _projectGitReads = 0;
+  int _projectGitRequests = 0;
 
   Future<Object?> _projectGit(
     String method,
-    Map<String, Object?> params,
-  ) async {
+    Map<String, Object?> params, {
+    bool write = false,
+  }) async {
     void authorize() {
       if (_disposed || peer.isClosed) throw const LinkClosedException('gone');
       if (permitsProjectGit?.call() != true) {
@@ -137,20 +138,37 @@ class WorkspaceBridge {
         'Project Git requires a single local repository on the host',
       );
     }
-    if (_projectGitReads >= 4) {
-      throw const LinkRemoteException(LinkErrors.busy, 'Too many Git reads');
-    }
-    _projectGitReads++;
-    try {
-      final result = await readProjectGit(project.root, method, params);
+    void recheck() {
       authorize();
       if (!identical(_project(project.path), project) ||
           workspace.multiRootAt(project.path) != null) {
         throw const LinkRemoteException(LinkErrors.notFound, 'Project changed');
       }
+    }
+
+    if (_projectGitRequests >= 4) {
+      throw const LinkRemoteException(LinkErrors.busy, 'Too many Git requests');
+    }
+    _projectGitRequests++;
+    try {
+      final result = write
+          ? await _withRepositoryWrite(
+              project,
+              () => readProjectGit(
+                project.root,
+                method,
+                params,
+                authorizeWrite: () {
+                  recheck();
+                  _checkRepositoryIdle(project);
+                },
+              ),
+            )
+          : await readProjectGit(project.root, method, params);
+      recheck();
       return result;
     } finally {
-      _projectGitReads--;
+      _projectGitRequests--;
     }
   }
 
@@ -442,52 +460,71 @@ class WorkspaceBridge {
       if (branch is! String || branch.isEmpty) {
         throw const LinkRemoteException(LinkErrors.notFound, 'No branch named');
       }
-      final root = await git.repositoryRoot();
-      if (root == null) throw unsupported;
-      if (!_switchingRepositories.add(root)) {
-        throw const LinkRemoteException(
-          LinkErrors.busy,
-          'A branch switch is in progress',
-        );
-      }
-      try {
-        await git.switchLocalBranch(
-          branch,
-          checkHead: (head) {
-            if (_disposed || peer.isClosed) {
-              throw const LinkClosedException('gone');
-            }
-            if (!_canSwitchBranch(
-              _project(project.path),
-              branchOf?.call(project),
-            )) {
-              throw unsupported;
-            }
-            if (head.oid != params['expectedHead'] ||
-                head.branch != params['expectedBranch']) {
-              throw const LinkRemoteException('stale', 'The host HEAD changed');
-            }
-            if (_repositoryHasActiveSession(project, root)) {
-              throw const LinkRemoteException(
-                LinkErrors.busy,
-                'A session is using this repository',
-              );
-            }
-          },
-        );
-      } finally {
-        _switchingRepositories.remove(root);
-        // A post-checkout hook can fail after HEAD has already moved.
-        onBranchChanged!(project);
-        pushState();
-      }
-      return null;
+      return await _withRepositoryWrite(project, () async {
+        try {
+          return await readProjectGit(
+            project.root,
+            LinkMethods.switchProjectBranch,
+            params,
+            authorizeWrite: () {
+              if (_disposed || peer.isClosed)
+                throw const LinkClosedException('gone');
+              if (permitsProjectGit?.call() == false ||
+                  !identical(_project(project.path), project) ||
+                  !_canSwitchBranch(project, branchOf?.call(project))) {
+                throw unsupported;
+              }
+              _checkRepositoryIdle(project);
+            },
+          );
+        } finally {
+          onBranchChanged!(project);
+          pushState();
+        }
+      });
     } on IdeGitException catch (error) {
       throw LinkRemoteException(LinkErrors.gitRejected, error.message);
     }
   }
 
-  static final _switchingRepositories = <String>{};
+  // Shared by every connected peer, including linked worktrees of one repo.
+  static final _writingRepositories = <String>{};
+
+  Future<Object?> _withRepositoryWrite(
+    Project project,
+    Future<Object?> Function() write,
+  ) async {
+    final String key;
+    try {
+      key = await projectGitRepositoryKey(project.root);
+    } on IdeGitException {
+      throw const LinkRemoteException(
+        LinkErrors.gitRejected,
+        'Could not inspect the Git repository',
+      );
+    }
+    if (!_writingRepositories.add(key)) {
+      throw const LinkRemoteException(
+        LinkErrors.busy,
+        'Another Git operation is in progress',
+      );
+    }
+    try {
+      _checkRepositoryIdle(project);
+      return await write();
+    } finally {
+      _writingRepositories.remove(key);
+    }
+  }
+
+  void _checkRepositoryIdle(Project project) {
+    if (_repositoryHasActiveSession(project, project.root)) {
+      throw const LinkRemoteException(
+        LinkErrors.busy,
+        'A session is using this repository',
+      );
+    }
+  }
 
   bool _repositoryHasActiveSession(Project project, String root) {
     bool overlaps(String path) {
@@ -702,7 +739,7 @@ class WorkspaceBridge {
             session.pendingInteraction != null ||
             (params['now'] == true &&
                 (params['expectedTurn'] == null ||
-                    params['expectedTurn'] != _turnToken(session))))) {
+                    params['expectedTurn'] != session.activeTurnToken)))) {
       throw const LinkRemoteException('stale', 'The running turn changed');
     }
     if (!session.canSend) {
@@ -734,7 +771,19 @@ class WorkspaceBridge {
       case LinkMethods.projectGitCommitFiles:
       case LinkMethods.projectGitWorkingDiff:
       case LinkMethods.projectGitCommitDiff:
+      case LinkMethods.projectGitCapabilities:
+      case LinkMethods.projectGitStashes:
+      case LinkMethods.projectGitStashFiles:
+      case LinkMethods.projectGitStashDiff:
         return _projectGit(method, params);
+      case LinkMethods.projectGitStage:
+      case LinkMethods.projectGitUnstage:
+      case LinkMethods.projectGitCreateStash:
+      case LinkMethods.projectGitApplyStash:
+      case LinkMethods.projectGitPopStash:
+      case LinkMethods.projectGitDropStash:
+      case LinkMethods.projectGitCommit:
+        return _projectGit(method, params, write: true);
       case LinkMethods.open:
         final thread = _thread(params['session']);
         final id = idOf(thread);
@@ -820,7 +869,18 @@ class WorkspaceBridge {
           'setting': RewindFilesSetting.current().name,
         };
       case LinkMethods.stop:
-        _thread(params['session']).session.stop();
+        final session = _thread(params['session']).session;
+        final turn = session.activeTurnToken;
+        if (turn == null) return null;
+        if (params.containsKey('expectedTurn') &&
+            params['expectedTurn'] != turn) {
+          throw const LinkRemoteException('stale', 'The active turn changed');
+        }
+        session.stop();
+        // Kernel cancellation publishes its turn end synchronously.
+        if (session.activeTurnToken == turn) {
+          throw const LinkRemoteException('failed', 'Could not stop the turn');
+        }
         return null;
       case LinkMethods.answer:
         final session = _thread(params['session']).session;
@@ -2047,7 +2107,7 @@ class _Follow {
       'queue': session.canQueue,
       'edit': session.canEditMessages,
       'startPlan': session.canStartPlan,
-      'turn': ?_turnToken(session),
+      'turn': ?session.activeTurnToken,
     };
     final restText = jsonEncode([
       earlier,
@@ -2270,17 +2330,6 @@ class _Follow {
     session.detach();
   }
 }
-
-/// Token for the running turn shown in a Send now confirmation.
-int? _turnToken(ChatSession session) => switch (session.itemCount) {
-  final count when session.isStreaming && count > 0 => switch (session.itemAt(
-    count - 1,
-  )) {
-    LiveStatusItem(:final startedAt) => startedAt?.millisecondsSinceEpoch,
-    _ => null,
-  },
-  _ => null,
-};
 
 /// A task's output the phone watches: looked at every so often, and what
 /// was added sent ([LinkEvents.output]); all of its tail again when it was

@@ -481,6 +481,7 @@ class DesktopHostChats extends ChangeNotifier {
     final view = _view;
     _view = null;
     _projectHistories[this] = null;
+    if (view != null) _controls[view]?.dispose();
     if (view?.target == null || view!.peer.isClosed) return;
     unawaited(
       view.peer

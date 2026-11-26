@@ -214,6 +214,7 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
       return;
     }
     if (event is KernelInfoChanged || _transcript.apply(event)) {
+      if (event is TurnStarted) _turnToken = ++_nextTurnToken;
       _cache.clear();
       _timeQuiet();
       _reviewEvent(event);
@@ -661,6 +662,13 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
       index < _transcript.length ? _transcript.idAt(index) : null;
 
   // --- Projections ------------------------------------------------------------
+
+  // Keep each start distinct, even if the next queued turn starts immediately.
+  static int _nextTurnToken = DateTime.now().microsecondsSinceEpoch;
+  int? _turnToken;
+
+  /// Identifies the running turn so a remote action can target it safely.
+  int? get activeTurnToken => isStreaming ? _turnToken : null;
 
   @override
   bool get isStreaming => _transcript.activeTurn != null;

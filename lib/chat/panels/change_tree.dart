@@ -37,6 +37,7 @@ class ChangeTree extends StatefulWidget {
     this.onKeep,
     this.onUndo,
     this.fileActions,
+    this.fileRowActions,
   });
 
   /// The project's directory: the tree's top.
@@ -61,6 +62,10 @@ class ChangeTree extends StatefulWidget {
   /// What else a file's menu offers, after opening its changes: the ways
   /// to open it, its path.
   final List<List<IdeMenuEntry>> Function(FileChange file)? fileActions;
+
+  /// Always-visible controls scoped to a file, never to its folder.
+  final List<Widget> Function(BuildContext context, FileChange file)?
+  fileRowActions;
 
   static const defaultMaxRows = 7;
 
@@ -226,13 +231,28 @@ class ChangeTreeState extends State<ChangeTree> {
         padding: EdgeInsets.zero,
         itemExtent: rowHeight,
         itemCount: rows.length,
-        itemBuilder: (context, index) => switch (rows[index]) {
-          final _FolderRow row => _folderRow(row),
-          final _FileRow row => _fileRow(row),
+        findChildIndexCallback: (key) {
+          final index = rows.indexWhere((row) => _rowKey(row) == key);
+          return index == -1 ? null : index;
+        },
+        itemBuilder: (context, index) {
+          final row = rows[index];
+          return KeyedSubtree(
+            key: _rowKey(row),
+            child: switch (row) {
+              _FolderRow() => _folderRow(row),
+              _FileRow() => _fileRow(row),
+            },
+          );
         },
       ),
     );
   }
+
+  static Key _rowKey(_Row row) => switch (row) {
+    _FolderRow(:final folder) => ValueKey(('folder', folder.path)),
+    _FileRow(:final change) => ValueKey(('file', change.path)),
+  };
 
   /// Undo and Keep for [changes], those that can be.
   List<Widget> _actions(List<FileChange> changes) {
@@ -291,41 +311,66 @@ class ChangeTreeState extends State<ChangeTree> {
     );
   }
 
+  Widget _keyboardRow(
+    VoidCallback? onActivate,
+    Widget Function(bool focused) builder,
+  ) {
+    if (widget.fileRowActions == null || onActivate == null) {
+      return builder(false);
+    }
+    return FocusableActionDetector(
+      actions: {
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) => onActivate(),
+        ),
+      },
+      child: Builder(
+        builder: (context) => builder(Focus.of(context).hasPrimaryFocus),
+      ),
+    );
+  }
+
   Widget _folderRow(_FolderRow row) {
     final folder = row.folder;
     final collapsed = _collapsed.contains(folder.path);
-    return IdeListRow(
-      key: ValueKey('folder:${folder.path}'),
-      tooltip: _paths.relative(folder.path, from: widget.root),
-      onTap: () => _toggle(folder.path),
-      onContextMenu: (position) => _showMenu(position, row.changes),
-      builder: (context, hovered) => Padding(
-        padding: EdgeInsets.only(
-          left: 8.0 + (row.depth - 1) * IdeListColors.indent,
-          right: 8,
-        ),
-        child: Row(
-          children: [
-            SizedBox(
-              width: 22,
-              child: Transform.translate(
-                offset: const Offset(3, 0),
-                child: Icon(
-                  collapsed ? Codicons.chevronRight : Codicons.chevronDown,
-                  size: 16,
-                  color: IdeListColors.foreground,
+    void toggle() => _toggle(folder.path);
+    return _keyboardRow(
+      toggle,
+      (focused) => IdeListRow(
+        key: ValueKey('folder:${folder.path}'),
+        focused: focused,
+        focusedItem: focused,
+        tooltip: _paths.relative(folder.path, from: widget.root),
+        onTap: toggle,
+        onContextMenu: (position) => _showMenu(position, row.changes),
+        builder: (context, hovered) => Padding(
+          padding: EdgeInsets.only(
+            left: 8.0 + (row.depth - 1) * IdeListColors.indent,
+            right: 8,
+          ),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 22,
+                child: Transform.translate(
+                  offset: const Offset(3, 0),
+                  child: Icon(
+                    collapsed ? Codicons.chevronRight : Codicons.chevronDown,
+                    size: 16,
+                    color: IdeListColors.foreground,
+                  ),
                 ),
               ),
-            ),
-            FolderIcon(folder.path, expanded: !collapsed),
-            const SizedBox(width: 6),
-            Expanded(
-              child: IdeResourceLabel(
-                name: folder.label,
-                actions: [if (hovered) ..._actions(row.changes)],
+              FolderIcon(folder.path, expanded: !collapsed),
+              const SizedBox(width: 6),
+              Expanded(
+                child: IdeResourceLabel(
+                  name: folder.label,
+                  actions: [if (hovered) ..._actions(row.changes)],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -347,44 +392,52 @@ class ChangeTreeState extends State<ChangeTree> {
     final relative = _paths.isWithin(widget.root, change.path)
         ? _paths.relative(change.path, from: widget.root)
         : change.path;
-    final open = widget.onOpen;
-    return IdeListRow(
-      key: ValueKey(change.path),
-      tooltip: ['$relative • $kind', ?note].join('\n'),
-      onTap: open == null ? null : () => open(change),
-      onContextMenu: (position) => _showMenu(position, [change], file: change),
-      builder: (context, hovered) => Padding(
-        padding: EdgeInsets.only(
-          left: 8.0 + (row.depth - 1) * IdeListColors.indent + 22,
-          right: 8,
-        ),
-        child: Row(
-          children: [
-            FileIcon(change.path),
-            const SizedBox(width: 6),
-            Expanded(
-              child: IdeResourceLabel(
-                name: _paths.basename(change.path),
-                strikeThrough: row.status.strikeThrough,
-                letter: row.status.letter,
-                letterColor: row.status.color,
-                actions: [
-                  if (hovered) ..._actions([change]),
-                  // What the tooltip says, hinted at while it can show.
-                  if (hovered && note != null && !change.conflict)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 4),
-                      child: Icon(
-                        Codicons.info,
-                        size: 13,
-                        color: IdeListColors.description,
+    final onOpen = widget.onOpen;
+    final open = onOpen == null ? null : () => onOpen(change);
+    return _keyboardRow(
+      open,
+      (focused) => IdeListRow(
+        key: ValueKey(change.path),
+        focused: focused,
+        focusedItem: focused,
+        tooltip: ['$relative • $kind', ?note].join('\n'),
+        onTap: open,
+        onContextMenu: (position) =>
+            _showMenu(position, [change], file: change),
+        builder: (context, hovered) => Padding(
+          padding: EdgeInsets.only(
+            left: 8.0 + (row.depth - 1) * IdeListColors.indent + 22,
+            right: 8,
+          ),
+          child: Row(
+            children: [
+              FileIcon(change.path),
+              const SizedBox(width: 6),
+              Expanded(
+                child: IdeResourceLabel(
+                  name: _paths.basename(change.path),
+                  strikeThrough: row.status.strikeThrough,
+                  letter: row.status.letter,
+                  letterColor: row.status.color,
+                  actions: [
+                    if (hovered) ..._actions([change]),
+                    // What the tooltip says, hinted at while it can show.
+                    if (hovered && note != null && !change.conflict)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 4),
+                        child: Icon(
+                          Codicons.info,
+                          size: 13,
+                          color: IdeListColors.description,
+                        ),
                       ),
-                    ),
-                  _LineCounts(change),
-                ],
+                    _LineCounts(change),
+                    ...?widget.fileRowActions?.call(context, change),
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

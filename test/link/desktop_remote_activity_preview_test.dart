@@ -28,6 +28,7 @@ import 'desktop_mutual_pairing_test.dart' show Machine;
 import 'my_computers_test.dart' show admit, tap, tapMember;
 
 const _output = String.fromEnvironment('BAOCODE_HOST_ACTIVITY_PREVIEW');
+const _light = bool.fromEnvironment('BAOCODE_HOST_ACTIVITY_PREVIEW_LIGHT');
 const _hostName = '工作室 Mac mini';
 const _session = 'preview-session';
 const _chatTitle = '整理发布检查清单';
@@ -197,8 +198,29 @@ void main() {
         await tester.tap(find.byTooltip('返回更改').hitTestable());
         await tester.pumpAndSettle();
         expect(tester.state(composer), same(composerState));
+        fixture.gitAvailable = true;
+        await tap(tester, '重试');
+        expect(find.text('发布前检查').hitTestable(), findsOneWidget);
+        expect(
+          find
+              .byWidgetPredicate(
+                (widget) =>
+                    widget is TextField &&
+                    widget.decoration?.hintText == '提交信息',
+              )
+              .hitTestable(),
+          findsOneWidget,
+        );
+        await _capture(tester, surface, 'wide-git-changes.png');
+        await tap(tester, 'Stash');
+        expect(find.text('没有 Stash').hitTestable(), findsOneWidget);
         await tap(tester, '任务');
-        expect(find.text('执行发布前检查').hitTestable(), findsOneWidget);
+        expect(
+          find
+              .descendant(of: sidebar, matching: find.text('执行发布前检查'))
+              .hitTestable(),
+          findsOneWidget,
+        );
         await _capture(tester, surface, 'wide-tasks.png');
 
         tester.view.physicalSize = const Size(520, 730);
@@ -236,8 +258,65 @@ void main() {
 class _Fixture {
   final _slimmer = LinkSessionSlimmer();
   bool populated = false;
+  bool gitAvailable = false;
+  static const head = '0123456789abcdef0123456789abcdef01234567';
 
   Object? reply(String method, Map<String, Object?> args) => switch (method) {
+    LinkMethods.projectGitStatus when gitAvailable => {
+      'branch': 'main',
+      'head': head,
+      'state': 'preview-state',
+      'files': [
+        {
+          'path': 'docs/release-checklist.md',
+          'status': 'M',
+          'group': 'workingTree',
+        },
+      ],
+      'truncated': false,
+    },
+    LinkMethods.projectGitHistory when gitAvailable => {
+      'commits': [
+        {
+          'hash': head,
+          'shortHash': '0123456',
+          'subject': '发布前检查',
+          'authorName': 'yyyy2001',
+          'authorDate': DateTime(2026, 11, 24).toIso8601String(),
+          'parentIds': <String>[],
+          'refs': ['HEAD -> main'],
+        },
+      ],
+      'truncated': false,
+      'nextOffset': null,
+    },
+    LinkMethods.projectGitCapabilities when gitAvailable => {
+      'branches': ['main'],
+      'canWrite': true,
+      'canPush': false,
+    },
+    LinkMethods.projectGitStashes when gitAvailable => {
+      'entries': <Object>[],
+      'truncated': false,
+    },
+    LinkMethods.projectGitStage when gitAvailable => {
+      'branch': 'main',
+      'head': head,
+      'state': 'preview-state',
+      'files': <Object>[],
+      'truncated': false,
+    },
+    LinkMethods.projectGitCreateStash when gitAvailable => {
+      'branch': 'main',
+      'head': head,
+      'state': 'preview-state',
+      'files': <Object>[],
+      'truncated': false,
+    },
+    LinkMethods.projectGitCommit when gitAvailable => {
+      'head': head,
+      'pushed': false,
+    },
     LinkMethods.state => LinkState(
       device: const DeviceInfo(name: _hostName, kind: 'mac', system: 'macOS'),
       projects: const [
@@ -376,13 +455,15 @@ class _FixtureConnection extends ChangeNotifier
 }
 
 Future<void> _loadPreviewTheme() async {
-  const path = 'themes/theme-bao/themes/bao-dark-color-theme.json';
+  final path = _light
+      ? 'themes/theme-bao/themes/bao-light-color-theme.json'
+      : 'themes/theme-bao/themes/bao-dark-color-theme.json';
   final theme = ColorThemeData.fromExtensionTheme(
-    const IThemeExtensionPoint(
-      id: 'Bao Dark',
-      label: 'Bao Dark',
+    IThemeExtensionPoint(
+      id: _light ? 'Bao Light' : 'Bao Dark',
+      label: _light ? 'Bao Light' : 'Bao Dark',
       path: path,
-      uiTheme: 'vs-dark',
+      uiTheme: _light ? 'vs' : 'vs-dark',
     ),
     path,
     extensionId: 'baocode.theme-bao',

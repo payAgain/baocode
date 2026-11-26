@@ -124,6 +124,73 @@ void main() {
     },
   );
 
+  testWidgets(
+    'stop remains available when the host advances to the next turn',
+    (tester) async {
+      final host = await _Host.show(tester);
+      await _tap(tester, 'First session');
+      final button = find.byType(ComposerSendButton);
+      host.update('first', live: true, turn: 1);
+      await tester.pumpAndSettle();
+
+      final firstReply = Completer<Object?>();
+      host.reply = (_, _) => firstReply.future;
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(host.actions.single.$1, LinkMethods.stop);
+      expect(host.actions.single.$2, {'session': 'first', 'expectedTurn': 1});
+      expect(host.chats.sessionControls!.canStop, isFalse);
+      host.update('first', live: true, turn: 1);
+      await tester.pumpAndSettle();
+      expect(host.chats.sessionControls!.canStop, isFalse);
+
+      // Throttling can fold the end of one turn and the start of another
+      // into the same snapshot, with no idle update between them.
+      host.update('first', live: true, turn: 2);
+      await tester.pumpAndSettle();
+      expect(host.chats.sessionControls!.canStop, isTrue);
+      firstReply.completeError(
+        const LinkRemoteException('stale', 'Turn changed'),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Could not stop the host session.'), findsNothing);
+
+      host.reply = null;
+      await tester.tap(button);
+      await tester.pumpAndSettle();
+      expect(host.actions.last.$1, LinkMethods.stop);
+      expect(host.actions.last.$2, {'session': 'first', 'expectedTurn': 2});
+      expect(host.actions, hasLength(2));
+      host.update('first');
+      await tester.pumpAndSettle();
+    },
+  );
+
+  testWidgets('stop can be retried when no turn confirmation arrives', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester);
+    await _tap(tester, 'First session');
+    host.update('first', live: true, turn: 1);
+    await tester.pumpAndSettle();
+    final button = find.byType(ComposerSendButton);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(host.chats.sessionControls!.canStop, isFalse);
+
+    await tester.pump(const Duration(seconds: 6));
+    expect(find.text('Could not stop the host session.'), findsOneWidget);
+    expect(host.chats.sessionControls!.canStop, isTrue);
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(host.actions, hasLength(2));
+    expect(host.actions.last.$2, {'session': 'first', 'expectedTurn': 1});
+
+    // Closing the follow drops its pending stop confirmation.
+    await _tap(tester, 'Second session');
+    expect(find.text('Could not stop the host session.'), findsNothing);
+  });
+
   testWidgets('a late choice rejection is ignored after switching sessions', (
     tester,
   ) async {
@@ -726,6 +793,7 @@ class _Host {
     List<LinkChoice>? choices,
     bool live = false,
     Map<String, Object?>? context,
+    int? turn,
   }) {
     _host.emit(
       LinkEvents.session,
@@ -735,6 +803,7 @@ class _Host {
           choices: choices ?? _choices(),
           live: live,
           context: context,
+          turn: turn,
         ),
       ),
     );
@@ -754,6 +823,7 @@ class _Host {
     required List<LinkChoice> choices,
     bool live = false,
     Map<String, Object?>? context,
+    int? turn,
   }) => LinkSessionUpdate(
     session: session,
     start: 0,
@@ -762,6 +832,7 @@ class _Host {
     choices: choices,
     live: live,
     context: context,
+    actions: turn == null ? null : {'turn': turn},
   );
 }
 
