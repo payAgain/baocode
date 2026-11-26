@@ -14,7 +14,6 @@ import '../chat/composer/file_drop.dart';
 import '../chat/floating/floating_placement.dart';
 import '../chat/widgets/hover_builder.dart';
 import '../chat/widgets/inline_rename_field.dart';
-import '../chat/widgets/pixel_loader.dart';
 import '../chat/widgets/scroll_edge_fade.dart';
 import '../forge/forge_api.dart' show ForgeState;
 import '../forge/forge_ref.dart' show ForgeItemKind;
@@ -26,7 +25,6 @@ import '../ide/ide_commands.dart' show ideUsesMacKeys;
 import '../ide/ide_hover.dart';
 import '../ide/ide_list.dart';
 import '../ide/ide_speed_search.dart';
-import '../ide/ide_spinning.dart';
 import '../kernel/agent_kernel.dart' show KernelChoiceKind;
 import '../keybindings/chat_keybindings.dart';
 import '../keybindings/default_keybindings.dart' show openSettingsCommandId;
@@ -49,8 +47,11 @@ import '../workspace/window_controls.dart';
 import '../workspace/workspace.dart';
 import '../workspace/workspace_dialog.dart';
 import 'sidebar_menu.dart';
+import 'sidebar_rows.dart';
 import 'sidebar_times.dart';
-import '../theme/svg_icons.dart';
+
+export 'sidebar_rows.dart'
+    show SidebarIconButton, StatusIndicator, relativeTime;
 
 enum SidebarGrouping {
   project('Project', Icons.folder_outlined),
@@ -75,19 +76,6 @@ enum SidebarGrouping {
     time => l10n.sidebarByDate,
     status => l10n.sidebarByStatus,
   };
-}
-
-/// `now`, `5m`, `3h`, `2d`, `3w`, then the date; in [l10n]'s language
-/// (English when null).
-String relativeTime(DateTime time, DateTime now, [AppLocalizations? l10n]) {
-  final strings = l10n ?? englishLocalizations;
-  final elapsed = now.difference(time);
-  if (elapsed.inMinutes < 1) return strings.sidebarTimeNow;
-  if (elapsed.inHours < 1) return strings.sidebarTimeMinutes(elapsed.inMinutes);
-  if (elapsed.inDays < 1) return strings.sidebarTimeHours(elapsed.inHours);
-  if (elapsed.inDays < 7) return strings.sidebarTimeDays(elapsed.inDays);
-  if (elapsed.inDays < 35) return strings.sidebarTimeWeeks(elapsed.inDays ~/ 7);
-  return strings.sidebarMonthDay('${time.month}', time.day);
 }
 
 /// A heading and the agents under it.
@@ -326,7 +314,7 @@ class Sidebar extends StatefulWidget {
 class _SidebarState extends State<Sidebar>
     with IdeKeyboardList<Sidebar>
     implements ChatDragList {
-  static const _rowHeight = 32.0;
+  static const _rowHeight = SidebarSessionRow.extent;
 
   /// The agents a project shows until asked for more (pinned ones apart).
   static const _recent = 5;
@@ -1415,7 +1403,7 @@ class _SidebarState extends State<Sidebar>
           items: () => _hostItems(l10n),
           builder: (context, menu) => HoverBuilder(
             cursor: SystemMouseCursors.click,
-            builder: (context, hovered) => _RowHover(
+            builder: (context, hovered) => SidebarRowHover(
               content: (context) => Text(
                 [
                   if (current != null && label != current) current,
@@ -1720,7 +1708,7 @@ class _SidebarState extends State<Sidebar>
             _ListRowKind.header,
             group,
             ValueKey(group.id),
-            _GroupHeader.extent,
+            SidebarProjectRow.extent,
           ),
         );
         if (group.pinned && group.threads.isEmpty) {
@@ -2028,7 +2016,6 @@ class _SidebarState extends State<Sidebar>
       thread: thread,
       status: _statusOf(thread),
       model: () => _modelOf(thread),
-      height: _rowHeight,
       stashes: switch ((widget.stashes, thread.id)) {
         (final stashes?, final session?) => stashes.of(session),
         _ => const [],
@@ -2107,11 +2094,7 @@ class _SidebarState extends State<Sidebar>
     final multi = _workspace.workspaceOf(project);
     final pinned = _workspace.isPinnedProject(project);
     return [
-      SidebarMenuItem(
-        l10n.sidebarNewAgentHere,
-        icon: Icons.add_rounded,
-        onSelected: () => _create(project),
-      ),
+      SidebarRowMenuItems.newAgent(l10n, () => _create(project)),
       if (multi != null)
         SidebarMenuItem(
           l10n.sidebarEditWorkspace,
@@ -2147,10 +2130,10 @@ class _SidebarState extends State<Sidebar>
           icon: editor.icon,
           onSelected: () => _openInEditor(project, editor),
         ),
-      SidebarMenuItem(
-        pinned ? l10n.sidebarUnpin : l10n.sidebarPin,
-        icon: pinned ? Icons.push_pin : Icons.push_pin_outlined,
-        onSelected: () => _workspace.setPinnedProject(project, !pinned),
+      SidebarRowMenuItems.pin(
+        l10n,
+        pinned,
+        () => _workspace.setPinnedProject(project, !pinned),
       ),
       SidebarMenuItem(
         l10n.sidebarChangeIcon,
@@ -2174,10 +2157,9 @@ class _SidebarState extends State<Sidebar>
         icon: Icons.inventory_2_outlined,
         onSelected: () => _workspace.archiveAll(project),
       ),
-      SidebarMenuItem(
-        l10n.sidebarRemoveFromList,
-        icon: Icons.visibility_off_outlined,
-        onSelected: () => _workspace.hideProject(project),
+      SidebarRowMenuItems.removeProject(
+        l10n,
+        () => _workspace.hideProject(project),
       ),
       if (multi != null)
         SidebarMenuItem(
@@ -2830,9 +2812,6 @@ class _NavRow extends StatelessWidget {
 }
 
 class _GroupHeader extends StatelessWidget {
-  static const double extent = 40;
-  static const double topGap = 8;
-
   const _GroupHeader({
     required this.group,
     required this.collapsed,
@@ -2921,137 +2900,51 @@ class _GroupHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final menu = this.menu;
-    if (menu == null) return _build(context, null);
-    return SidebarMenu(
-      items: menu,
-      placement: (side: FloatingSide.bottom, align: FloatingAlign.end),
-      builder: _build,
-    );
-  }
-
-  Widget _build(BuildContext context, SidebarMenuState? menu) {
     final project = group.project;
-    final header = HoverBuilder(
-      cursor: onToggle == null ? MouseCursor.defer : SystemMouseCursors.click,
-      builder: (context, hovered) {
-        final active = hovered || (menu?.isOpen ?? false);
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: onToggle,
-          onSecondaryTapUp: menu == null
-              ? null
-              : (details) => menu.open(details.globalPosition),
-          child: Container(
-            height: extent - topGap,
-            margin: const EdgeInsets.only(top: topGap),
-            padding: EdgeInsets.only(left: light ? 6 : 4, right: 2),
-            decoration: BoxDecoration(
-              color: (active || dragged || located) && project != null
-                  ? AppColors.hover
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(5),
-            ),
-            child: Row(
-              children: [
-                if (!light) ...[
-                  AnimatedRotation(
-                    turns: collapsed ? 0 : 0.25,
-                    duration: const Duration(milliseconds: 150),
-                    child: Icon(
-                      Icons.chevron_right_rounded,
-                      size: 15,
-                      color: hovered
-                          ? AppColors.textMuted
-                          : AppColors.textFaint,
-                    ),
-                  ),
-                  const SizedBox(width: 2),
-                ],
-                if (icon case final icon?) ...[icon, const SizedBox(width: 4)],
-                // The dot right after the name, the rest of the row after.
-                Expanded(
-                  child: Row(
-                    children: [
-                      Flexible(
-                        child: switch (host) {
-                          final host? => ListenableBuilder(
-                            listenable: host,
-                            builder: (context, child) => Opacity(
-                              opacity: host.down ? 0.55 : 1,
-                              child: child,
-                            ),
-                            child: _label(project),
-                          ),
-                          null => _label(project),
-                        },
-                      ),
-                      if (host case final host?)
-                        ListenableBuilder(
-                          listenable: host,
-                          builder: (context, _) =>
-                              host.state == SshHostState.connected ||
-                                  host.state == SshHostState.idle
-                              ? const SizedBox.shrink()
-                              : Padding(
-                                  padding: const EdgeInsets.only(left: 5),
-                                  child: _RowHover(
-                                    content: (context) => Text(
-                                      _hostStateLabel(context.l10n, host),
-                                    ),
-                                    child: _HostDot(host),
-                                  ),
-                                ),
-                        ),
-                      if (pinned) ...[
-                        const SizedBox(width: 4),
-                        Icon(
-                          Icons.push_pin,
-                          size: 11,
-                          color: AppColors.textFaint,
-                        ),
-                      ],
-                      if (_hiddenStatus(context) case final status?) ...[
-                        const SizedBox(width: 6),
-                        status,
-                      ],
-                    ],
-                  ),
-                ),
-                if (collapsed && !light && group.threads.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: Text(
-                      '${group.threads.length}',
-                      style: TextStyle(
-                        color: AppColors.textFaint,
-                        fontSize: 11,
-                      ),
-                    ),
-                  ),
-                if (active && menu != null)
-                  SidebarIconButton(
-                    icon: Icons.more_horiz_rounded,
-                    tooltip: context.l10n.sidebarMoreActions,
-                    size: 20,
-                    onTap: menu.open,
-                  ),
-                if (onCreate case final onCreate? when active)
-                  _newDragged(
-                    SidebarIconButton(
-                      icon: Icons.add_rounded,
-                      tooltip: context.l10n.sidebarNewAgentIn(group.label),
-                      size: 20,
-                      onTap: onCreate,
-                    ),
-                  ),
-              ],
-            ),
-          ),
+    final host = this.host;
+    return SidebarProjectRow(
+      title: group.label,
+      collapsed: collapsed,
+      onToggle: onToggle,
+      icon: icon,
+      pinned: pinned,
+      hiddenCount: group.threads.length,
+      hiddenStatus: _hiddenStatus(context),
+      isProject: project != null,
+      light: light,
+      highlighted: dragged || located,
+      speedMatch: speedMatch ?? const [],
+      menuItems: menu,
+      onCreate: onCreate,
+      wrapCreateButton: _newDragged,
+      decorateLabel: (label) {
+        final decorated = _decorateLabel(project, label);
+        if (host == null) return decorated;
+        return ListenableBuilder(
+          listenable: host,
+          builder: (context, child) =>
+              Opacity(opacity: host.down ? 0.55 : 1, child: child),
+          child: decorated,
         );
       },
+      labelDetails: host == null
+          ? null
+          : ListenableBuilder(
+              listenable: host,
+              builder: (context, _) =>
+                  host.state == SshHostState.connected ||
+                      host.state == SshHostState.idle
+                  ? const SizedBox.shrink()
+                  : Padding(
+                      padding: const EdgeInsets.only(left: 5),
+                      child: SidebarRowHover(
+                        content: (context) =>
+                            Text(_hostStateLabel(context.l10n, host)),
+                        child: _HostDot(host),
+                      ),
+                    ),
+            ),
     );
-    return header;
   }
 
   /// Folded, what its agents are doing, as their rows would say: a spinner
@@ -3074,7 +2967,7 @@ class _GroupHeader extends StatelessWidget {
         : statuses.containsKey(ThreadStatus.unread)
         ? ThreadStatus.unread
         : null;
-    return _RowHover(
+    return SidebarRowHover(
       content: (context) => Text(told),
       child: Semantics(
         label: told,
@@ -3094,23 +2987,13 @@ class _GroupHeader extends StatelessWidget {
     );
   }
 
-  Widget _label(Project? project) {
-    final label = Text.rich(
-      ideSpeedSpan(group.label, speedMatch ?? const []),
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: TextStyle(
-        color: project != null ? AppColors.text : AppColors.textMuted,
-        fontSize: project != null ? 13 : 11.5,
-        fontWeight: project != null ? FontWeight.w600 : FontWeight.w500,
-      ),
-    );
+  Widget _decorateLabel(Project? project, Widget label) {
     if (project == null) return label;
     if (folders case final folders?) {
       // A workspace: how many folders after its name, which they are over
       // it.
       final color = AppColors.textFaint;
-      return _RowHover(
+      return SidebarRowHover(
         content: (context) => Text(
           [
             context.l10n.workspaceHover(
@@ -3146,7 +3029,7 @@ class _GroupHeader extends StatelessWidget {
       // With folders added to it: how many after its name, which they are
       // under where it is.
       final color = AppColors.textFaint;
-      return _RowHover(
+      return SidebarRowHover(
         content: (context) => Text(
           [project.path, for (final folder in added) '+ $folder'].join('\n'),
         ),
@@ -3195,7 +3078,7 @@ class _GroupHeader extends StatelessWidget {
             ),
           );
         }
-        return _RowHover(
+        return SidebarRowHover(
           content: (context) => Text(
             [
               project.root,
@@ -3226,120 +3109,6 @@ class _GroupHeader extends StatelessWidget {
       },
     );
   }
-}
-
-/// The workbench hover of a row or header, placed as [IdeHover.followMouse]
-/// places it, in an overlay entry of its own: an [IdeHover] (an
-/// OverlayPortal) within the menu's OverlayPortal around each row leaves
-/// the desktop engines' semantics tree behind as it hides.
-class _RowHover extends StatefulWidget {
-  const _RowHover({required this.content, required this.child});
-
-  final WidgetBuilder content;
-  final Widget child;
-
-  @override
-  State<_RowHover> createState() => _RowHoverState();
-}
-
-class _RowHoverState extends State<_RowHover> {
-  Timer? _timer;
-  OverlayEntry? _entry;
-
-  /// Where the pointer last moved over the target, in the target.
-  Offset _mouse = Offset.zero;
-
-  void _enter(PointerEnterEvent event) {
-    _mouse = event.localPosition;
-    _timer?.cancel();
-    _timer = Timer(ideHoverDelay, _show);
-  }
-
-  void _hide() {
-    _timer?.cancel();
-    _timer = null;
-    _entry
-      ?..remove()
-      ..dispose();
-    _entry = null;
-  }
-
-  void _show() {
-    final box = context.findRenderObject();
-    final overlay = Overlay.maybeOf(context);
-    final overlayBox = overlay?.context.findRenderObject();
-    if (overlay == null ||
-        box is! RenderBox ||
-        !box.attached ||
-        overlayBox is! RenderBox) {
-      return;
-    }
-    final target =
-        box.localToGlobal(Offset.zero, ancestor: overlayBox) & box.size;
-    final x = target.left + _mouse.dx + 10;
-    final entry = _entry = OverlayEntry(
-      builder: (context) => CustomSingleChildLayout(
-        delegate: _BelowMouse(target, x),
-        child: IgnorePointer(
-          child: ExcludeSemantics(
-            // In the window's overlay, above the sidebar's Material: the
-            // text style is its own.
-            child: Material(
-              type: MaterialType.transparency,
-              child: IdeHoverBox(
-                compact: false,
-                child: widget.content(context),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-    overlay.insert(entry);
-  }
-
-  @override
-  void dispose() {
-    _hide();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => Listener(
-    onPointerDown: (_) => _hide(),
-    onPointerSignal: (_) => _hide(),
-    child: MouseRegion(
-      onEnter: _enter,
-      onHover: (event) => _mouse = event.localPosition,
-      onExit: (_) => _hide(),
-      child: widget.child,
-    ),
-  );
-}
-
-/// Below the target (above where there is no room), from [x]; inside the
-/// overlay (hoverWidget.ts `layout`).
-class _BelowMouse extends SingleChildLayoutDelegate {
-  const _BelowMouse(this.target, this.x);
-
-  final Rect target;
-  final double x;
-
-  @override
-  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
-      constraints.loosen();
-
-  @override
-  Offset getPositionForChild(Size size, Size childSize) {
-    final y = target.bottom + childSize.height > size.height
-        ? target.top - childSize.height
-        : target.bottom - 2;
-    return clampHoverOffset(Offset(x, y), childSize, size);
-  }
-
-  @override
-  bool shouldRelayout(_BelowMouse oldDelegate) =>
-      oldDelegate.target != target || oldDelegate.x != x;
 }
 
 /// A project's header dragged to another place among the projects: past a
@@ -3546,7 +3315,6 @@ class _ThreadRow extends StatelessWidget {
     required this.thread,
     required this.status,
     required this.model,
-    required this.height,
     this.stashes = const [],
     this.onOpenStash,
     this.pulls = const [],
@@ -3583,7 +3351,6 @@ class _ThreadRow extends StatelessWidget {
 
   /// The model it runs on, as its hover shows it; none when unknown.
   final String? Function() model;
-  final double height;
 
   /// The stashes it carries out: a tag on it, opened by [onOpenStash].
   final List<SidebarStash> stashes;
@@ -3666,160 +3433,123 @@ class _ThreadRow extends StatelessWidget {
         ),
       ];
     }
-    return [
-      if (onOpenStash case final open?)
-        for (final stash in stashes)
+    return _actions(pinned: pinned, archived: archived).items(
+      l10n,
+      before: [
+        if (onOpenStash case final open?)
+          for (final stash in stashes)
+            SidebarMenuItem(
+              l10n.sidebarOpenStash(stash.id),
+              icon: Codicons.note,
+              onSelected: () => open(stash.id),
+            ),
+        if (onOpenPull case final open?)
+          for (final pull in pulls)
+            SidebarMenuItem(
+              l10n.sidebarOpenPull(pull.tag),
+              icon: Codicons.gitPullRequest,
+              onSelected: () => open(pull.url),
+            ),
+      ],
+      afterArchive: [
+        if (onDetach case final detach?)
           SidebarMenuItem(
-            l10n.sidebarOpenStash(stash.id),
-            icon: Codicons.note,
-            onSelected: () => open(stash.id),
+            l10n.sidebarDetachAside,
+            icon: Codicons.debugDisconnect,
+            onSelected: detach,
           ),
-      if (onOpenPull case final open?)
-        for (final pull in pulls)
+        // A conversation to copy: none before the first message.
+        if (thread.id != null && (!thread.isOpen || thread.session.canFork))
           SidebarMenuItem(
-            l10n.sidebarOpenPull(pull.tag),
-            icon: Codicons.gitPullRequest,
-            onSelected: () => open(pull.url),
+            l10n.sidebarFork,
+            icon: Codicons.repoForked,
+            onSelected: onFork,
           ),
-      SidebarMenuItem(
-        l10n.commonRename,
-        icon: Icons.edit_outlined,
-        onSelected: onRename,
-      ),
-      if (!thread.archived && onDetach == null)
-        SidebarMenuItem(
-          pinned ? l10n.sidebarUnpin : l10n.sidebarPin,
-          icon: pinned ? Icons.push_pin : Icons.push_pin_outlined,
-          onSelected: onPin,
-        ),
-      SidebarMenuItem(
-        archived ? l10n.sidebarUnarchive : l10n.sidebarArchive,
-        icon: Icons.inventory_2_outlined,
-        onSelected: onArchive,
-      ),
-      if (onDetach case final detach?)
-        SidebarMenuItem(
-          l10n.sidebarDetachAside,
-          icon: Codicons.debugDisconnect,
-          onSelected: detach,
-        ),
-      // A conversation to copy: none before the first message.
-      if (thread.id != null && (!thread.isOpen || thread.session.canFork))
-        SidebarMenuItem(
-          l10n.sidebarFork,
-          icon: Codicons.repoForked,
-          onSelected: onFork,
-        ),
-      // Claude Code finds the conversation by it (none before the first
-      // message).
-      if (thread.id case final id?)
-        SidebarMenuItem(
-          l10n.sidebarCopySessionId,
-          icon: Icons.content_copy_rounded,
-          onSelected: () =>
-              unawaited(Clipboard.setData(ClipboardData(text: id))),
-        ),
-      SidebarMenuItem(
-        l10n.commonDelete,
-        icon: Icons.delete_outline_rounded,
-        destructive: true,
-        onSelected: onDelete,
-      ),
-    ];
+        if (thread.id case final id?)
+          SidebarMenuItem(
+            l10n.sidebarCopySessionId,
+            icon: Icons.content_copy_rounded,
+            onSelected: () =>
+                unawaited(Clipboard.setData(ClipboardData(text: id))),
+          ),
+      ],
+    );
   }
+
+  SidebarSessionActions _actions({
+    required bool pinned,
+    required bool archived,
+  }) => SidebarSessionActions(
+    pinned: pinned,
+    archived: archived,
+    onRename: onRename,
+    onPin: !thread.archived && onDetach == null ? onPin : null,
+    onArchive: onArchive,
+    onDelete: onDelete,
+  );
 
   @override
   Widget build(BuildContext context) {
-    final row = SidebarMenu(
-      items: () => _items(context.l10n),
-      placement: (side: FloatingSide.bottom, align: FloatingAlign.end),
-      builder: (context, menu) => IdeListRow(
-        height: height,
-        selected: selected,
-        focusedItem: focusedItem,
-        focused: focused,
-        keepSelectionActive: true,
-        onTap: renaming ? null : onTap,
-        onDoubleTap: renaming ? null : onRename,
-        onContextMenu: (position) {
-          onContextMenu();
-          menu.open(position);
-        },
-        builder: (context, hovered) {
-          final active = hovered || menu.isOpen;
-          final foreground = selected
-              ? IdeListColors.activeSelectionForeground
-              : hovered
-              ? IdeListColors.hoverForeground
-              : IdeListColors.foreground;
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              Padding(
-                // An aside under the one it was asked beside.
-                padding: EdgeInsets.only(
-                  left: onDetach == null ? 16 : 16 + _asideIndent,
-                  right: 4,
-                ),
-                // Too narrow, what is beside the title gives way (its hover
-                // tells it), before the title is cut to nothing.
-                child: GiveWayRow(
-                  children: [
-                    GiveWay(
-                      Padding(
-                        padding: const EdgeInsets.only(right: 6),
-                        child: SizedBox(
-                          width: 14,
-                          child: Center(
-                            child: switch (asides) {
-                              final asides? when active => _AsidesArrow(
-                                folded: asides.folded,
-                                tooltip: asides.folded
-                                    ? context.l10n.sidebarUnfoldAsides(
-                                        asides.count,
-                                      )
-                                    : context.l10n.sidebarFoldAsides,
-                                onTap: asides.onToggle,
-                              ),
-                              _ => StatusIndicator(status),
-                            },
-                          ),
-                        ),
-                      ),
-                    ),
-                    GiveWay.fill(
-                      minWidth: renaming ? 0 : _titleMinWidth,
-                      renaming
-                          ? InlineRenameField(
-                              initial: thread.localizedTitle(context.l10n),
-                              onDone: onRenamed,
-                            )
-                          // What the row has no room for, over the title
-                          // (not the buttons that come and go beside it).
-                          : _RowHover(
-                              content: (context) => _buildHover(context.l10n),
-                              child: Align(
-                                alignment: Alignment.centerLeft,
-                                child: _buildTitle(context.l10n, foreground),
-                              ),
-                            ),
-                    ),
-                    if (!renaming)
-                      ..._buildTrailing(active, context.l10n, foreground),
-                  ],
-                ),
-              ),
-            ],
-          );
-        },
-      ),
+    final l10n = context.l10n;
+    final title = thread.localizedTitle(l10n);
+    final row = SidebarSessionRow(
+      title: title,
+      selected: selected,
+      focusedItem: focusedItem,
+      focused: focused,
+      onTap: onTap,
+      onDoubleTap: onRename,
+      status: status,
+      emphasized: thread.status == ThreadStatus.unread,
+      updatedAt: thread.updatedAt,
+      showTime: showTime,
+      suppressTimestamp: thread.status == ThreadStatus.needsInput,
+      actions: _actions(pinned: thread.pinned, archived: thread.archived),
+      menuItems: () => _items(l10n),
+      onContextMenu: onContextMenu,
+      extraIndent: onDetach == null ? 0 : _asideIndent,
+      titleSuffix: [
+        if (showProject) ...[
+          const TextSpan(text: '  '),
+          if (projectIcon case final icon?) ...[
+            WidgetSpan(alignment: PlaceholderAlignment.middle, child: icon),
+            const TextSpan(text: ' '),
+          ],
+          TextSpan(
+            text: thread.project.name,
+            style: TextStyle(
+              color: selected
+                  ? IdeListColors.activeSelectionForeground
+                  : AppColors.textFaint,
+              fontSize: 11.5,
+              fontWeight: FontWeight.normal,
+            ),
+          ),
+        ],
+      ],
+      editor: renaming
+          ? InlineRenameField(initial: title, onDone: onRenamed)
+          : null,
+      hoverContent: (context) => _buildHover(context.l10n),
+      leading: (context, active) => switch (asides) {
+        final asides? when active => _AsidesArrow(
+          folded: asides.folded,
+          tooltip: asides.folded
+              ? context.l10n.sidebarUnfoldAsides(asides.count)
+              : context.l10n.sidebarFoldAsides,
+          onTap: asides.onToggle,
+        ),
+        _ => null,
+      },
+      trailing: (context, active, foreground) =>
+          _buildTrailing(active, context.l10n, foreground),
     );
     // Dragged out onto the conversations, it shows beside them.
     return ChatDragSource(
       drag: renaming || onDetach != null ? null : drag,
       thread: thread,
       threads: dragThreads,
-      child: Semantics(selected: selected, child: row),
+      child: row,
     );
   }
 
@@ -3879,52 +3609,6 @@ class _ThreadRow extends StatelessWidget {
       ),
     );
   }
-
-  Widget _buildTitle(AppLocalizations l10n, Color foreground) {
-    final status = thread.status;
-    return Text.rich(
-      TextSpan(
-        children: [
-          TextSpan(text: thread.localizedTitle(l10n)),
-          if (showProject) ...[
-            const TextSpan(text: '  '),
-            if (projectIcon case final icon?) ...[
-              WidgetSpan(alignment: PlaceholderAlignment.middle, child: icon),
-              const TextSpan(text: ' '),
-            ],
-            TextSpan(
-              text: thread.project.name,
-              style: TextStyle(
-                color: selected ? foreground : AppColors.textFaint,
-                fontSize: 11.5,
-                fontWeight: FontWeight.normal,
-              ),
-            ),
-          ],
-        ],
-      ),
-      maxLines: 1,
-      softWrap: false,
-      overflow: TextOverflow.ellipsis,
-      // Hover actions change the available width. Keep the line metrics
-      // stable when truncation changes which fallback fonts remain visible.
-      strutStyle: const StrutStyle(
-        fontSize: 12.5,
-        height: 1.4,
-        forceStrutHeight: true,
-      ),
-      style: TextStyle(
-        color: foreground,
-        fontSize: 12.5,
-        fontWeight: status == ThreadStatus.unread
-            ? FontWeight.w600
-            : FontWeight.normal,
-      ),
-    );
-  }
-
-  /// The least the title is cut to before what is beside it gives way.
-  static const _titleMinWidth = 80.0;
 
   /// What is beside the title, each a gap before it; giving way the diff
   /// first, then the time, the pull request's tag, the stash's.
@@ -4010,59 +3694,6 @@ class _ThreadRow extends StatelessWidget {
             ),
           ),
         ),
-      // The time; while hovered, pin and archive in its place (the rest is
-      // in the context menu), which never give way.
-      if (active)
-        GiveWay(
-          gap(
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (!thread.archived && onDetach == null)
-                  SidebarIconButton(
-                    icon: thread.pinned
-                        ? Icons.push_pin
-                        : Icons.push_pin_outlined,
-                    tooltip: thread.pinned
-                        ? l10n.sidebarUnpin
-                        : l10n.sidebarPin,
-                    size: 20,
-                    onTap: onPin,
-                  ),
-                SidebarIconButton(
-                  icon: thread.archived
-                      ? Icons.unarchive_outlined
-                      : Icons.inventory_2_outlined,
-                  tooltip: thread.archived
-                      ? l10n.sidebarUnarchive
-                      : l10n.sidebarArchive,
-                  size: 20,
-                  onTap: onArchive,
-                ),
-              ],
-            ),
-          ),
-        )
-      else if (showTime)
-        GiveWay(
-          priority: 1,
-          gap(
-            // Wider where the language's times are.
-            ConstrainedBox(
-              constraints: const BoxConstraints(minWidth: 26),
-              child: Text(
-                thread.status == ThreadStatus.needsInput
-                    ? ''
-                    : relativeTime(thread.updatedAt, DateTime.now(), l10n),
-                textAlign: TextAlign.right,
-                maxLines: 1,
-                // A step under the title's, selected or not.
-                style: TextStyle(color: AppColors.textFaint, fontSize: 11),
-              ),
-            ),
-          ),
-        ),
-      const GiveWay(SizedBox(width: 2)),
     ];
   }
 }
@@ -4293,117 +3924,6 @@ class _TagPill extends StatelessWidget {
       ],
     ),
   );
-}
-
-/// What an agent needs: a spinner while it runs, an amber dot when it
-/// waits on a question, a blue dot when it finished unseen.
-class StatusIndicator extends StatelessWidget {
-  const StatusIndicator(this.status, {super.key});
-
-  /// As the agent sessions list shows an agent waiting on the user.
-  static Color get needsInputColor => themeColors['list.warningForeground'];
-
-  final ThreadStatus status;
-
-  @override
-  Widget build(BuildContext context) {
-    return switch (status) {
-      // A little under the list's text, as its dots are.
-      ThreadStatus.running => const PixelLoader.agent(size: 12),
-      ThreadStatus.needsInput => _Dot(needsInputColor),
-      ThreadStatus.unread => _Dot(AppColors.accent),
-      ThreadStatus.idle => const SizedBox.shrink(),
-    };
-  }
-}
-
-class _Dot extends StatelessWidget {
-  const _Dot(this.color);
-
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 7,
-      height: 7,
-      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-    );
-  }
-}
-
-/// Small square icon button with a hover fill.
-class SidebarIconButton extends StatelessWidget {
-  const SidebarIconButton({
-    super.key,
-    required this.icon,
-    required this.tooltip,
-    required this.onTap,
-    this.size = 24,
-    this.command,
-    this.keyContext = ChatKeys.chatLayout,
-    this.spinning = false,
-  });
-
-  final IconData icon;
-
-  /// Its icon turning: what it started still goes on.
-  final bool spinning;
-
-  /// What it does: its label, and its hover's text.
-  final String tooltip;
-  final VoidCallback onTap;
-  final double size;
-
-  /// The command it runs, if a keybinding can run it too: its hover adds
-  /// the key, as the keybindings have it now (`Hide sidebar (⌘B)`).
-  final String? command;
-
-  /// The context keys where it is, which pick the keybinding shown: the
-  /// chat layout's by default.
-  final Map<String, Object> keyContext;
-
-  @override
-  Widget build(BuildContext context) {
-    // The workbench hover, as the IDE's action buttons have, titled as
-    // upstream's action bar items are (actionViewItems.ts `getTooltip`,
-    // `titleAndKb`); the label without the key.
-    return IdeHover(
-      message: switch (command) {
-        final command? => ChatKeys.titleWithKey(tooltip, command, keyContext),
-        null => tooltip,
-      },
-      excludeFromSemantics: true,
-      child: Semantics(
-        button: true,
-        label: tooltip,
-        child: HoverBuilder(
-          cursor: SystemMouseCursors.click,
-          builder: (context, hovered) => GestureDetector(
-            onTap: onTap,
-            child: Container(
-              width: size,
-              height: size,
-              decoration: BoxDecoration(
-                color: hovered
-                    ? themeColors['toolbar.hoverBackground']
-                    : Colors.transparent,
-                borderRadius: BorderRadius.circular(5),
-              ),
-              child: switch (AppIcon(
-                icon,
-                size: size * 0.65,
-                color: hovered ? AppColors.text : AppColors.textMuted,
-              )) {
-                final icon when spinning => IdeSpinning(icon),
-                final icon => icon,
-              },
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 /// Update, beside the settings' gear while an update waits: a pill in the

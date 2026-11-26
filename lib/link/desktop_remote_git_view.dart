@@ -7,10 +7,22 @@ import 'package:path/path.dart' as p;
 
 import '../ide/git/git_graph_painter.dart';
 import '../ide/git/git_model.dart';
+import '../ide/git/ide_git_commit_panel.dart'
+    show IdeGitCommitPanel, IdeGitCommitTabs;
 import '../ide/git/ide_git_list_tree_switch.dart';
-import '../ide/git/ide_git_log_view.dart' show IdeGitSash;
+import '../ide/git/ide_git_log_view.dart'
+    show IdeGitIslandSplit, IdeGitLogView, ideCommitChangeStatus;
+import '../ide/git/ide_git_patch_reader.dart';
+import '../ide/git/ide_git_presentation.dart';
 import '../ide/git/scm_tree.dart';
+import '../ide/ide_dates.dart';
+import '../l10n/l10n.dart';
+import '../ide/ide_input.dart';
+import '../ide/ide_list.dart';
+import '../theme/material_file_icons.dart';
 import '../theme/app_theme.dart' show AppColors;
+import '../theme/codicons.dart';
+import '../theme/workbench_theme.dart' show themeColors;
 import '../workspace/islands.dart';
 import 'desktop_remote_git_client.dart';
 
@@ -46,6 +58,7 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
   RemoteGitStash? _stash;
   Future<RemoteGitDiff?>? _diff;
   String? _diffPath;
+  String? _diffGroup;
   bool _workingDiff = false;
   String? _branch;
   String? _path;
@@ -61,6 +74,7 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
   bool _tree = false;
   bool _folded = false;
   double? _detailsHeight;
+  double? _detailsWidth;
 
   bool get _zh => Localizations.localeOf(context).languageCode == 'zh';
   String _text(String en, String zh) => _zh ? zh : en;
@@ -166,6 +180,7 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
     RemoteGitStash? stash,
   }) => setState(() {
     _diffPath = file.path;
+    _diffGroup = file.group;
     _workingDiff = commit == null && stash == null;
     _diff = stash != null
         ? _client.stashDiff(_project, stash.id, file.path)
@@ -272,43 +287,48 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
 
   Widget _split(RemoteGitStatus status) => LayoutBuilder(
     builder: (context, limits) {
-      final maxDetails = math.max(0.0, limits.maxHeight - 120);
-      final height = _folded
-          ? math.min(40.0, maxDetails)
-          : (_detailsHeight ?? math.max(limits.maxHeight / 2, 310.0))
-                .clamp(0.0, maxDetails)
-                .toDouble();
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(
-            child: Island(
-              color: AppColors.code,
-              child: _diff == null ? _log(status) : _diffView(),
-            ),
-          ),
-          if (height > 0) ...[
-            if (_folded)
-              const SizedBox(height: Islands.gap)
-            else
-              IdeGitSash(
-                vertical: true,
-                color: Colors.transparent,
-                size: height,
-                after: true,
-                gap: true,
-                onResize: (height) => setState(
-                  () => _detailsHeight = height
-                      .clamp(math.min(145.0, maxDetails), maxDetails)
-                      .toDouble(),
-                ),
-              ),
-            SizedBox(
-              height: height,
-              child: Island(color: AppColors.code, child: _details(status)),
-            ),
-          ],
-        ],
+      final beside = IdeGitLogView.detailsBeside(limits.maxWidth);
+      final folded = !beside && _folded;
+      final maxDetails = beside
+          ? math.min(
+              limits.maxWidth * .6,
+              math.max(220.0, limits.maxWidth - 280),
+            )
+          : math.min(
+              limits.maxHeight * .75,
+              math.max(0.0, limits.maxHeight - 120),
+            );
+      final preferred = beside
+          ? _detailsWidth ?? 380.0
+          : folded
+          ? IdeGitCommitPanel.foldedHeight
+          : _detailsHeight ?? math.max(limits.maxHeight / 2, 340.0);
+      return IdeGitIslandSplit(
+        beside: beside,
+        extent: math.min(preferred, maxDetails),
+        onResize: folded
+            ? null
+            : (size) => setState(() {
+                final clamped = size
+                    .clamp(
+                      math.min(beside ? 220.0 : 145.0, maxDetails),
+                      maxDetails,
+                    )
+                    .toDouble();
+                if (beside) {
+                  _detailsWidth = clamped;
+                } else {
+                  _detailsHeight = clamped;
+                }
+              }),
+        log: Island(
+          color: AppColors.code,
+          child: _diff == null ? _log(status) : _diffView(),
+        ),
+        details: Island(
+          color: AppColors.code,
+          child: _details(status, beside: beside, folded: folded),
+        ),
       );
     },
   );
@@ -321,29 +341,27 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
         child: Row(
           children: [
             Expanded(
-              child: TextField(
-                controller: _search,
-                enabled: _capabilities != null,
-                decoration: InputDecoration(
-                  isDense: true,
-                  hintText: _text('Search commits', '搜索提交信息'),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 7,
+              child: IgnorePointer(
+                ignoring: _capabilities == null,
+                child: ExcludeFocus(
+                  excluding: _capabilities == null,
+                  child: IdeInputBox(
+                    controller: _search,
+                    placeholder: _text('Search commits', '搜索提交信息'),
+                    radius: Islands.controlRadius,
+                    onChanged: (_) {
+                      _searchDelay?.cancel();
+                      _searchDelay = Timer(
+                        const Duration(milliseconds: 250),
+                        () => setState(_loadHistory),
+                      );
+                    },
+                    onSubmitted: (_) {
+                      _searchDelay?.cancel();
+                      setState(_loadHistory);
+                    },
                   ),
-                  border: const OutlineInputBorder(),
                 ),
-                onChanged: (_) {
-                  _searchDelay?.cancel();
-                  _searchDelay = Timer(
-                    const Duration(milliseconds: 250),
-                    () => setState(_loadHistory),
-                  );
-                },
-                onSubmitted: (_) {
-                  _searchDelay?.cancel();
-                  setState(_loadHistory);
-                },
               ),
             ),
             _icon(
@@ -379,29 +397,30 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
                   for (final branch in capabilities.branches)
                     PopupMenuItem(value: branch, child: Text(branch)),
                 ],
-                child: Padding(
-                  padding: const EdgeInsets.all(7),
-                  child: Text(
-                    '${_branch ?? _text('Current branch', '当前分支')} ▾',
-                    style: const TextStyle(fontSize: 12),
-                  ),
+                child: _filterLabel(
+                  Codicons.gitBranch,
+                  _branch ?? _text('Current branch', '当前分支'),
+                  active: _branch != null,
+                  dropdown: true,
                 ),
               ),
-              TextButton(
-                onPressed: () => _filterPathOrAuthor(path: true),
-                child: Text(_path ?? _text('Path', '路径')),
+              _filter(
+                Codicons.file,
+                _path ?? _text('Path', '路径'),
+                _path != null,
+                () => _filterPathOrAuthor(path: true),
               ),
-              TextButton(
-                onPressed: () => _filterPathOrAuthor(path: false),
-                child: Text(_author ?? _text('Author', '作者')),
+              _filter(
+                Codicons.person,
+                _author ?? _text('Author', '作者'),
+                _author != null,
+                () => _filterPathOrAuthor(path: false),
               ),
-              TextButton(
-                onPressed: _filterDate,
-                child: Text(
-                  _dates == null
-                      ? _text('Date', '日期')
-                      : _text('Date ✓', '日期 ✓'),
-                ),
+              _filter(
+                Codicons.calendar,
+                _text('Date', '日期'),
+                _dates != null,
+                _filterDate,
               ),
               _icon(
                 _text('Clear filters', '清除筛选'),
@@ -420,6 +439,63 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
       const Divider(height: 1),
       Expanded(child: _historyRows(status)),
     ],
+  );
+
+  Widget _filter(
+    IconData icon,
+    String label,
+    bool active,
+    VoidCallback onTap,
+  ) => TextButton(
+    style: _toolbarStyle(active),
+    onPressed: onTap,
+    child: _filterLabel(icon, label),
+  );
+
+  ButtonStyle _toolbarStyle(bool selected) => TextButton.styleFrom(
+    foregroundColor: AppColors.textPrimary,
+    backgroundColor: Islands.segmentFill(selected: selected, hovered: false),
+    padding: const EdgeInsets.symmetric(horizontal: 8),
+    minimumSize: const Size(0, 26),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(Islands.rowRadius),
+    ),
+    textStyle: Theme.of(context).textTheme.labelLarge
+        ?.copyWith(fontSize: 12, fontWeight: FontWeight.w500),
+  );
+
+  Widget _filterLabel(
+    IconData icon,
+    String label, {
+    bool active = false,
+    bool dropdown = false,
+  }) => Padding(
+    padding: EdgeInsets.symmetric(horizontal: dropdown ? 8 : 0, vertical: 5),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          icon,
+          size: 14,
+          color: active ? AppColors.accent : themeColors['icon.foreground'],
+        ),
+        const SizedBox(width: 4),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 105),
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 12),
+          ),
+        ),
+        if (dropdown) ...[
+          const SizedBox(width: 3),
+          const Icon(Codicons.chevronDown, size: 12),
+        ],
+      ],
+    ),
   );
 
   Future<void> _filterPathOrAuthor({required bool path}) async {
@@ -473,6 +549,10 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
             date: commit.authorDate ?? DateTime.fromMillisecondsSinceEpoch(0),
           ),
       ], headRevision: status.head);
+      final graphWidth = rows
+          .fold(24.0, (width, row) => math.max(width, ideGraphWidth(row)))
+          .clamp(24.0, 72.0)
+          .toDouble();
       return ListView.builder(
         itemCount: rows.length + 2,
         itemBuilder: (context, index) {
@@ -516,76 +596,108 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
           final when = date == null
               ? ''
               : MaterialLocalizations.of(context).formatShortDate(date);
-          return _row(
-            label: commit.subject,
-            leading: ExcludeSemantics(
-              child: CustomPaint(
-                size: Size(ideGraphWidth(row).clamp(11.0, 72.0), 25),
-                painter: IdeGraphPainter(
-                  row,
-                  background: AppColors.code,
-                  height: 25,
-                ),
+          final selected = _commit?.hash == commit.hash;
+          void select() => _selectCommit(commit);
+          return IdeGitKeyboardAction(
+            key: ValueKey(commit.hash),
+            onActivate: select,
+            child: IdeListRow(
+              height: ideGitHistoryRowHeight,
+              builder: (context, hovered) => Row(
+                children: [
+                  IdeGitHistoryGraph(
+                    row: row,
+                    width: graphWidth,
+                    background: IdeGitHistoryGraph.rowBackground(
+                      background: AppColors.code,
+                      selected: selected,
+                      focused: false,
+                      hovered: hovered,
+                    ),
+                    hovered: hovered,
+                  ),
+                  Expanded(
+                    flex: 3,
+                    child: Text(
+                      commit.subject,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: row.kind == IdeGraphRowKind.head
+                            ? FontWeight.w600
+                            : null,
+                        color: IdeListColors.foreground,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      commit.authorName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: IdeListColors.description,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
               ),
+              tooltip: [
+                commit.subject,
+                commit.shortHash,
+                commit.authorName,
+                when,
+                ...commit.refs,
+              ].where((value) => value.isNotEmpty).join(' · '),
+              selected: selected,
+              onTap: select,
             ),
-            trailing: Text(
-              commit.authorName,
-              style: const TextStyle(fontSize: 11),
-              overflow: TextOverflow.ellipsis,
-            ),
-            tooltip: [
-              commit.subject,
-              commit.shortHash,
-              commit.authorName,
-              when,
-              ...commit.refs,
-            ].where((value) => value.isNotEmpty).join(' · '),
-            selected: _commit?.hash == commit.hash,
-            onTap: () => _selectCommit(commit),
           );
         },
       );
     },
   );
 
-  Widget _details(RemoteGitStatus status) => LayoutBuilder(
+  Widget _details(
+    RemoteGitStatus status, {
+    required bool beside,
+    required bool folded,
+  }) => LayoutBuilder(
     builder: (context, constraints) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          children: [
-            if (_commit case final commit?)
-              Expanded(child: _back(commit.subject, () => _selectCommit(null)))
-            else ...[
-              _tab(
-                _text('Commit', '提交'),
-                !_stashTab,
-                () => setState(() {
-                  _stashTab = false;
-                  _folded = false;
-                }),
-              ),
-              _tab(
-                'Stash',
-                _stashTab,
-                () => setState(() {
-                  _stashTab = true;
-                  _folded = false;
-                  _stashes ??= _client.stashes(_project);
-                }),
-              ),
-              const Spacer(),
+        if (_commit case final commit?)
+          Row(
+            children: [
+              Expanded(child: _back(commit.subject, () => _selectCommit(null))),
+              if (!beside)
+                _icon(
+                  folded
+                      ? _text('Expand details', '展开')
+                      : _text('Fold details', '折叠'),
+                  folded ? Icons.expand_more : Icons.expand_less,
+                  () => setState(() => _folded = !_folded),
+                ),
             ],
-            _icon(
-              _folded
-                  ? _text('Expand details', '展开')
-                  : _text('Fold details', '折叠'),
-              _folded ? Icons.expand_more : Icons.expand_less,
-              () => setState(() => _folded = !_folded),
-            ),
-          ],
-        ),
-        if (!_folded && constraints.maxHeight > 72) ...[
+          )
+        else
+          IdeGitCommitTabs(
+            stashSelected: _stashTab,
+            folded: folded,
+            onToggleFold: beside
+                ? null
+                : () => setState(() => _folded = !_folded),
+            onSelect: (stash) => setState(() {
+              _stashTab = stash;
+              _folded = false;
+              if (stash) _stashes ??= _client.stashes(_project);
+            }),
+          ),
+        if (!folded && constraints.maxHeight > 72) ...[
           const Divider(height: 1),
           Expanded(
             child: _commit != null
@@ -691,59 +803,27 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
               child: _files(status.files, status.truncated, working: true),
             ),
             if (showForm && _capabilities?.canWrite == true)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    TextField(
-                      controller: _message,
-                      minLines: 1,
-                      maxLines: 2,
-                      decoration: InputDecoration(
-                        isDense: true,
-                        contentPadding: const EdgeInsets.all(6),
-                        border: const OutlineInputBorder(),
-                        hintText: _text('Commit message', '提交信息'),
-                      ),
-                    ),
-                    ValueListenableBuilder(
-                      valueListenable: _message,
-                      builder: (context, value, _) {
-                        final enabled =
-                            commitEnabled && value.text.trim().isNotEmpty;
-                        return SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Row(
-                            children: [
-                              FilledButton(
-                                onPressed: enabled
-                                    ? () => _submit(
-                                        expected,
-                                        selected,
-                                        push: false,
-                                      )
-                                    : null,
-                                child: Text(_text('Commit', '提交')),
-                              ),
-                              const SizedBox(width: 4),
-                              OutlinedButton(
-                                onPressed:
-                                    enabled && _capabilities?.canPush == true
-                                    ? () => _submit(
-                                        expected,
-                                        selected,
-                                        push: true,
-                                      )
-                                    : null,
-                                child: Text(_text('Commit and Push', '提交并推送')),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
-                    ),
-                  ],
+              IdeGitCommitForm(
+                message: IdeInputBox(
+                  controller: _message,
+                  maxLines: 2,
+                  placeholder: _text('Commit message', '提交信息'),
+                  radius: Islands.controlRadius,
+                ),
+                actions: ValueListenableBuilder(
+                  valueListenable: _message,
+                  builder: (context, value, _) {
+                    final enabled =
+                        commitEnabled && value.text.trim().isNotEmpty;
+                    return IdeGitCommitActions(
+                      onCommit: enabled
+                          ? () => _submit(expected, selected, push: false)
+                          : null,
+                      onPush: enabled && _capabilities?.canPush == true
+                          ? () => _submit(expected, selected, push: true)
+                          : null,
+                    );
+                  },
                 ),
               ),
           ],
@@ -834,14 +914,22 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
               return ListView(
                 children: [
                   for (final stash in result.entries)
-                    _row(
-                      label: stash.message,
-                      leading: const Icon(Icons.inventory_2_outlined, size: 14),
+                    IdeGitStashRow(
+                      key: ValueKey(stash.id),
+                      message: stash.message,
+                      tooltip: stash.message,
+                      description: stash.date == null
+                          ? null
+                          : ideFromNow(
+                              stash.date!,
+                              ago: true,
+                              l10n: context.l10n,
+                            ),
                       onTap: () => setState(() {
                         _stash = stash;
                         _stashFiles = _client.stashFiles(_project, stash.id);
                       }),
-                      trailing: expected == null
+                      actions: expected == null
                           ? null
                           : PopupMenuButton<_StashAction>(
                               tooltip: _text('Stash actions', 'Stash 操作'),
@@ -970,9 +1058,28 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
         _ => file.originalPath ?? '',
       };
       final expected = _expected;
+      final directory = p.posix.dirname(file.path);
+      final tree = _tree && working;
+      final status = switch ((file.group, file.status)) {
+        ('untracked', _) => IdeGitStatus.untracked,
+        ('merge', _) => IdeGitStatus.bothModified,
+        ('workingTree', 'M') => IdeGitStatus.modified,
+        ('workingTree', 'D') => IdeGitStatus.deleted,
+        _ => ideCommitChangeStatus(file.status),
+      };
       return _row(
-        label: _tree && working ? p.posix.basename(file.path) : file.path,
+        label: file.path,
         depth: depth,
+        content: IdeGitFileLabel(
+          icon: FileIcon(file.path),
+          name: p.posix.basename(file.path),
+          description: tree || directory == '.' ? null : directory,
+          status: file.status,
+          statusColor: status.color,
+          strikeThrough: status.strikeThrough,
+        ),
+        selected:
+            _diff != null && _diffPath == file.path && _diffGroup == file.group,
         tooltip: [
           file.path,
           group,
@@ -992,14 +1099,21 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
                   ),
                 ),
               )
-            : const Icon(Icons.insert_drive_file_outlined, size: 14),
+            : null,
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             if (group.isNotEmpty)
-              Text(group, style: const TextStyle(fontSize: 10)),
-            const SizedBox(width: 5),
-            Text(file.status, style: const TextStyle(fontSize: 11)),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 100),
+                child: Text(
+                  group,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 10),
+                ),
+              ),
+            if (group.isNotEmpty) const SizedBox(width: 5),
             if (working && expected != null && file.group != 'merge')
               _icon(
                 file.group == 'index'
@@ -1036,20 +1150,15 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
           for (final node in nodes) {
             switch (node) {
               case IdeScmTreeFolder():
-                yield Padding(
-                  padding: EdgeInsetsDirectional.only(start: 8 + depth * 12),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.folder_outlined, size: 14),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(
-                          node.label,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                      ),
-                    ],
+                yield IdeListRow(
+                  builder: (context, _) => Padding(
+                    padding: EdgeInsetsDirectional.only(
+                      start: 4 + math.min(depth, 6) * 12,
+                    ),
+                    child: IdeGitFileLabel(
+                      icon: FolderIcon(node.path, expanded: true),
+                      name: node.label,
+                    ),
                   ),
                 );
                 yield* nodesAt(node.children, depth + 1);
@@ -1104,17 +1213,12 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
             if (diff == null) {
               return _notice(_text('Could not load Git diff', '无法加载 Git 差异'));
             }
-            if (diff.text.isEmpty && !diff.truncated) {
-              return _notice(_text('No textual diff', '没有文本差异'));
-            }
-            return SingleChildScrollView(
-              padding: const EdgeInsets.all(12),
-              child: SelectableText(
-                diff.truncated
-                    ? '${diff.text}\n${_text('Diff truncated', '差异已截断')}'
-                    : diff.text,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-              ),
+            return IdeGitPatchReader(
+              patch: diff.text,
+              emptyLabel: _text('No textual diff', '没有文本差异'),
+              truncationLabel: diff.truncated
+                  ? _text('Diff truncated', '差异已截断')
+                  : null,
             );
           },
         ),
@@ -1127,50 +1231,30 @@ class _DesktopRemoteGitViewState extends State<DesktopRemoteGitView> {
     required VoidCallback onTap,
     Widget? leading,
     Widget? trailing,
+    Widget? content,
     String? tooltip,
     bool selected = false,
     int depth = 0,
-  }) => Tooltip(
-    message: tooltip ?? label,
-    child: Semantics(
+  }) => IdeGitKeyboardAction(
+    onActivate: onTap,
+    child: IdeListRow(
+      tooltip: tooltip ?? label,
       selected: selected,
-      child: InkWell(
-        onTap: onTap,
-        child: Container(
-          color: Islands.segmentFill(selected: selected, hovered: false),
-          height: 27,
-          padding: EdgeInsetsDirectional.only(start: 8 + depth * 12, end: 8),
-          child: Row(
-            children: [
-              if (leading != null) ...[leading, const SizedBox(width: 6)],
-              Expanded(
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 12),
-                ),
-              ),
-              if (trailing != null) ...[const SizedBox(width: 6), trailing],
-            ],
-          ),
+      onTap: onTap,
+      height: ideGitHistoryRowHeight,
+      builder: (context, hovered) => Padding(
+        padding: EdgeInsetsDirectional.only(
+          start: 4 + math.min(depth, 6) * 12,
+          end: 4,
+        ),
+        child: Row(
+          children: [
+            if (leading != null) ...[leading, const SizedBox(width: 6)],
+            Expanded(child: content ?? IdeResourceLabel(name: label)),
+            if (trailing != null) ...[const SizedBox(width: 6), trailing],
+          ],
         ),
       ),
-    ),
-  );
-
-  Widget _tab(String label, bool selected, VoidCallback onTap) => Semantics(
-    selected: selected,
-    child: TextButton(
-      style: TextButton.styleFrom(
-        backgroundColor: Islands.segmentFill(
-          selected: selected,
-          hovered: false,
-        ),
-        visualDensity: VisualDensity.compact,
-      ),
-      onPressed: onTap,
-      child: Text(label),
     ),
   );
 

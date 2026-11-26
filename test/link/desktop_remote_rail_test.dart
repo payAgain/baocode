@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:bao_link/bao_link.dart';
+import 'package:baocode/chat/side_panel/file_preview.dart';
 import 'package:baocode/ide/file_service.dart';
 import 'package:baocode/l10n/l10n.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
@@ -231,12 +232,16 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('example.md'));
       await tester.pumpAndSettle();
+      final preview = find.byType(ReadOnlyFileLines);
       expect(
-        find.byWidgetPredicate(
-          (widget) => widget is SelectableText && widget.data == content,
-        ),
-        findsOneWidget,
+        tester.widget<ReadOnlyFileLines>(preview).lines,
+        content.split('\n'),
       );
+      expect(
+        tester.getRect(find.text('src')).right,
+        lessThan(tester.getRect(preview).left),
+      );
+      expect(find.byKey(const ValueKey('remote-files-sash')), findsOneWidget);
       expect(find.byType(Image), findsNothing);
       expect(
         calls.map((call) => [call.$1, call.$2]),
@@ -266,6 +271,52 @@ void main() {
       expect(tester.getRect(input), originalBounds);
     } finally {
       await tester.pumpWidget(const SizedBox.shrink());
+      await client.close();
+      await host.close();
+    }
+  });
+
+  testWidgets('copy all in a virtualized preview copies the full source', (
+    tester,
+  ) async {
+    final content = [
+      '\tfirst line',
+      ...List.generate(160, (index) => 'line $index'),
+      'last unmounted line',
+      '',
+    ].join('\r\n');
+    final (client, host, _) = await _pair(
+      (method, _) => switch (method) {
+        LinkMethods.folder => {
+          'folders': [],
+          'files': ['large.txt'],
+        },
+        LinkMethods.read => {'text': content},
+        _ => throw StateError(method),
+      },
+    );
+    const channel = SystemChannels.platform;
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final copies = <MethodCall>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'Clipboard.setData') copies.add(call);
+      return null;
+    });
+    try {
+      await _mount(tester, client);
+      await _click(
+        tester,
+        find.byKey(const ValueKey('desktop-remote-project-sidebar-toggle')),
+      );
+      await _click(tester, find.text('large.txt'));
+      final copy = find.byKey(const ValueKey('desktop-remote-copy-all'));
+      expect(find.text('last unmounted line'), findsNothing);
+      expect(copy, findsOneWidget);
+      await _click(tester, copy);
+      expect(copies.single.arguments, {'text': content});
+    } finally {
+      await tester.pumpWidget(const SizedBox());
+      messenger.setMockMethodCallHandler(channel, null);
       await client.close();
       await host.close();
     }
@@ -432,7 +483,7 @@ void main() {
       expect(find.text('Windows host content only'), findsOneWidget);
       await _click(tester, find.text('empty.txt'));
       expect(
-        tester.widget<SelectableText>(find.byType(SelectableText)).data,
+        tester.widget<ReadOnlyFileLines>(find.byType(ReadOnlyFileLines)).lines,
         isEmpty,
       );
       expect(

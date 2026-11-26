@@ -161,6 +161,7 @@ class _TerminalViewState extends State<TerminalView> with TextInputClient {
   IBufferRange? _linkRange() => _link?.range;
 
   TerminalInstance get _instance => widget.instance;
+  bool get _outputOnly => _instance.outputOnly;
 
   @override
   void initState() {
@@ -252,16 +253,17 @@ class _TerminalViewState extends State<TerminalView> with TextInputClient {
       instance.terminal.buffers.onBufferActivate((_) => _gutterChanged()),
     );
     instance.addListener(_instanceChanged);
+    _render.setSelection(
+      selection.selectionStart,
+      selection.selectionEnd,
+      columnSelectMode: selection.isColumnSelectMode,
+    );
+    if (_outputOnly) return;
     _attachShellIntegration();
     _subscriptions.add(
       instance.find.onDidChange((_) {
         if (mounted) setState(() {});
       }),
-    );
-    _render.setSelection(
-      selection.selectionStart,
-      selection.selectionEnd,
-      columnSelectMode: selection.isColumnSelectMode,
     );
     if (widget.mirror) return;
     _owning = true;
@@ -323,7 +325,7 @@ class _TerminalViewState extends State<TerminalView> with TextInputClient {
   }
 
   void _renderChanged() {
-    if (_owning && _render.hasValidSize) {
+    if ((_owning || _outputOnly) && _render.hasValidSize) {
       _instance.mouse.cellSize = _render.cellSize;
     }
     _updateInputGeometry();
@@ -806,7 +808,7 @@ class _TerminalViewState extends State<TerminalView> with TextInputClient {
         ? null
         : _render.getMouseReportCoords(position);
     final instance = _instance;
-    final link = coords == null
+    final link = coords == null || _outputOnly
         ? null
         : await instance.links.linkAt(
             coords.col,
@@ -848,6 +850,23 @@ class _TerminalViewState extends State<TerminalView> with TextInputClient {
     final instance = _instance;
     final mac = defaultTargetPlatform == TargetPlatform.macOS;
     final windows = defaultTargetPlatform == TargetPlatform.windows;
+    if (_outputOnly) {
+      return showIdeMenu(
+        context,
+        position: position,
+        entries: [
+          IdeMenuAction(
+            context.l10n.commonCopy,
+            enabled: instance.selection.hasSelection,
+            onSelected: () => unawaited(instance.clipboard.copySelection()),
+          ),
+          IdeMenuAction(
+            context.l10n.commonSelectAll,
+            onSelected: instance.selection.selectAll,
+          ),
+        ],
+      );
+    }
     // The workbench's keybindings for its commands, else the terminal's.
     final workbench = widget.shouldSkipShell != null;
     String? keys(String command, String? own) => workbench
@@ -938,13 +957,30 @@ class _TerminalViewState extends State<TerminalView> with TextInputClient {
     final instance = _instance;
     final mirror = widget.mirror;
     return CallbackShortcuts(
-      bindings: mirror ? const {} : _findKeys,
+      bindings: mirror
+          ? const {}
+          : _outputOnly
+          ? {
+              SingleActivator(
+                LogicalKeyboardKey.keyC,
+                meta: ideUsesMacKeys,
+                control: !ideUsesMacKeys,
+              ): () =>
+                  unawaited(instance.clipboard.copySelection()),
+              SingleActivator(
+                LogicalKeyboardKey.keyA,
+                meta: ideUsesMacKeys,
+                control: !ideUsesMacKeys,
+              ): instance.selection.selectAll,
+            }
+          : _findKeys,
       child: LayoutBuilder(
         builder: (context, constraints) => Stack(
           children: [
             Positioned.fill(child: _terminal(instance)),
-            Positioned.fill(child: _commandMarks(instance)),
-            if (!mirror && instance.find.isVisible) _findWidget(constraints),
+            if (!_outputOnly) Positioned.fill(child: _commandMarks(instance)),
+            if (!mirror && !_outputOnly && instance.find.isVisible)
+              _findWidget(constraints),
           ],
         ),
       ),
@@ -967,9 +1003,11 @@ class _TerminalViewState extends State<TerminalView> with TextInputClient {
         onPointerHover: _pointerHover,
         onPointerUp: _pointerUp,
         onPointerCancel: instance.mouse.handlePointerCancel,
-        onWheel: instance.mouse.handlePointerScroll,
-        onPanZoomUpdate: instance.mouse.handlePointerPanZoomUpdate,
-        capturesWheel: _capturesWheel,
+        onWheel: _outputOnly ? null : instance.mouse.handlePointerScroll,
+        onPanZoomUpdate: _outputOnly
+            ? null
+            : instance.mouse.handlePointerPanZoomUpdate,
+        capturesWheel: _outputOnly ? null : _capturesWheel,
         mouseCursor: _cursor,
         background: widget.background,
       ),
@@ -980,7 +1018,7 @@ class _TerminalViewState extends State<TerminalView> with TextInputClient {
       focusNode: mirror ? null : instance.focusNode,
       canRequestFocus: mirror ? false : null,
       skipTraversal: mirror ? true : null,
-      onKeyEvent: mirror ? null : _handleKey,
+      onKeyEvent: mirror || _outputOnly ? null : _handleKey,
       child: screen,
     );
   }

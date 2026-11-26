@@ -4,11 +4,14 @@ import 'dart:io';
 
 import 'package:bao_link/bao_link.dart';
 import 'package:bao_markdown/bao_markdown.dart';
+import 'package:baocode/bots/desktop_bot_message_row.dart';
 import 'package:baocode/chat/widgets/image_thumbnails.dart';
+import 'package:baocode/chat/widgets/inline_code.dart';
 import 'package:baocode/l10n/l10n.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_host_connection.dart';
 import 'package:baocode/link/desktop_host_page.dart';
+import 'package:baocode/sidebar/sidebar_rows.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -101,7 +104,7 @@ void main() {
         ack.complete({'seq': 3});
         await tester.pumpAndSettle();
         expect(_thumbnail('fixture.png'), findsNothing);
-        await tester.tap(find.byTooltip('Back to host chats'));
+        await tester.tap(find.byTooltip('Close chat'));
         await tester.pumpAndSettle();
         await fixture.select(tester, 'Fixture room');
         final draft = tester.widget<MarkdownEditor>(editor).controller;
@@ -153,7 +156,7 @@ void main() {
       }
 
       Future<void> closeChat() async {
-        await tester.tap(find.byTooltip('Back to host chats'));
+        await tester.tap(find.byTooltip('Close chat'));
         await tester.pumpAndSettle();
       }
 
@@ -219,6 +222,52 @@ void main() {
     }
   });
 
+  testWidgets(
+    'paired user text styles inline code without rendering Markdown',
+    (tester) async {
+      const literal =
+          '![secret](file:///private/secret.png) [link](https://example.com)';
+      final fixture = await _Fixture.open(
+        tester,
+        (method, _) => switch (method) {
+          LinkMethods.openGroup => {
+            'messages': [
+              LinkGroupMessage(
+                seq: 1,
+                at: DateTime(2026),
+                from: linkGroupUser,
+                text: 'Run `date` next. $literal',
+              ).toJson(),
+            ],
+            'more': false,
+          },
+          _ => null,
+        },
+      );
+      try {
+        await fixture.select(tester, 'Fixture room');
+        final row = find.byType(DesktopBotMessageRow);
+        final text = tester.widget<InlineCodeText>(
+          find.descendant(of: row, matching: find.byType(InlineCodeText)),
+        );
+        final spans = (text.span as TextSpan).children!;
+        expect(spans.whereType<InlineCodeSpan>().single.text?.trim(), 'date');
+        expect(text.span.toPlainText(), endsWith(literal));
+        expect(
+          spans.whereType<TextSpan>().every((span) => span.recognizer == null),
+          isTrue,
+        );
+        expect(
+          find.descendant(of: row, matching: find.byType(Image)),
+          findsNothing,
+        );
+        expect(fixture.requests(LinkMethods.groupImage), isEmpty);
+      } finally {
+        await fixture.close(tester);
+      }
+    },
+  );
+
   testWidgets('group user attachments show thumbnails for admitted image IDs', (
     tester,
   ) async {
@@ -252,6 +301,11 @@ void main() {
       await _waitFor(tester, second);
       expect(first, findsOneWidget);
       expect(second, findsOneWidget);
+      final row = find.ancestor(
+        of: first,
+        matching: find.byType(DesktopBotMessageRow),
+      );
+      expect(tester.widget<DesktopBotMessageRow>(row).sentAt, DateTime(2026));
       expect(find.text('Image 1'), findsNothing);
       expect(find.text('Image 2'), findsNothing);
       expect(_thumbnail('Image 3'), findsNothing);
@@ -264,6 +318,11 @@ void main() {
       );
       await tester.tap(second);
       await tester.pumpAndSettle();
+      expect(find.byType(InteractiveViewer), findsOneWidget);
+      expect(find.text('2 / 2'), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pumpAndSettle();
+      expect(find.text('1 / 2'), findsOneWidget);
       expect(find.byType(InteractiveViewer), findsOneWidget);
       expect(fixture.requests(LinkMethods.groupImage), hasLength(2));
       await fixture.switchHost(tester, 'other-host');
@@ -329,7 +388,7 @@ void main() {
         'bot': _bot.id,
         'path': 'private.png',
       });
-      await tester.tap(find.byTooltip('Back to host chats'));
+      await tester.tap(find.byTooltip('Close chat'));
       await tester.pumpAndSettle();
       await fixture.select(tester, 'Fixture room');
       imageReply.complete({'type': 'image/png', 'data': _png});
@@ -562,7 +621,7 @@ class _Fixture {
   ];
 
   Future<void> select(WidgetTester tester, String title) async {
-    await tester.tap(find.text(title));
+    await tester.tap(find.widgetWithText(SidebarSessionRow, title));
     await tester.pumpAndSettle();
   }
 

@@ -255,15 +255,23 @@ class ChangeReview extends ChangeNotifier {
   bool _disposed = false;
 
   /// Runs [operation] after those before it; a failure stops the review.
-  Future<void> _enqueue(Future<void> Function() operation) =>
-      _queue = _queue.then((_) async {
-        if (_disposed || _failure != null) return;
-        try {
-          await operation();
-        } on Object catch (error) {
-          abandon('$error');
-        }
-      });
+  /// A rejected [validate] only fails this call and leaves the queue usable.
+  Future<void> _enqueue(
+    Future<void> Function() operation, {
+    void Function()? validate,
+  }) {
+    final next = _queue.then((_) async {
+      if (_disposed || _failure != null) return;
+      validate?.call();
+      try {
+        await operation();
+      } on Object catch (error) {
+        abandon('$error');
+      }
+    });
+    _queue = validate == null ? next : next.catchError((Object _) {});
+    return next;
+  }
 
   /// Stops it for [reason]: its changes are no longer known.
   void abandon(String reason) {
@@ -500,17 +508,22 @@ class ChangeReview extends ChangeNotifier {
 
   // --- Keep and Undo -----------------------------------------------------------
 
+  /// Whether an agent write has started without a matching completion yet.
+  bool get isWriting => _entries.values.any((entry) => entry.writing > 0);
+
   /// Keeps the changes to [paths] (absolute): they are no longer listed.
-  Future<void> keep(Iterable<String> paths) {
+  /// [validate] runs in the queue immediately before touching the review.
+  Future<void> keep(Iterable<String> paths, {void Function()? validate}) {
     final kept = [for (final path in paths) _key(path)];
     return _enqueue(() async {
+      if (kept.isEmpty && validate != null) return;
       for (final path in kept) {
         _unseen.remove(path);
         _entries.remove(path);
       }
       await _refresh();
       await _persist();
-    });
+    }, validate: validate);
   }
 
   Future<void> keepAll() => _enqueue(() async {
@@ -523,9 +536,11 @@ class ChangeReview extends ChangeNotifier {
   /// Puts the files at [paths] (absolute) back as they were before the
   /// agent changed them, keeping what changed since where it can (else the
   /// file stays, marked [FileChange.conflict]).
-  Future<void> undo(Iterable<String> paths) {
+  /// [validate] runs in the queue immediately before touching the review.
+  Future<void> undo(Iterable<String> paths, {void Function()? validate}) {
     final wanted = [for (final path in paths) _key(path)];
     return _enqueue(() async {
+      if (wanted.isEmpty && validate != null) return;
       for (final path in wanted) {
         final entry = _entries[path];
         if (entry == null || !entry.pending) continue;
@@ -541,7 +556,7 @@ class ChangeReview extends ChangeNotifier {
       }
       await _refresh();
       await _persist();
-    });
+    }, validate: validate);
   }
 
   Future<void> undoAll() => undo([

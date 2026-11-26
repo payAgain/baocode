@@ -11,6 +11,7 @@ import 'package:baocode/link/desktop_host_connection.dart';
 import 'package:baocode/link/desktop_host_page.dart';
 import 'package:baocode/link/desktop_remote_media.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -409,6 +410,9 @@ void main() {
   testWidgets('reconnects a group workspace without offering legacy pairing', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(700, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
     final connection = _Connection()..hostName = 'Development Host';
     final chats = _Chats()
       ..chats = [_Chat('project', 'Project chat', 'project')];
@@ -435,8 +439,13 @@ void main() {
           _Chat('new-bot', 'Helper', 'bot'),
         ];
       await _pumpPage(tester, _Connection()..peer = _Peer(), chats: chats);
-      expect(find.byTooltip('Needs input'), findsOneWidget);
-      expect(find.text('3'), findsOneWidget);
+      final semantics = tester.ensureSemantics();
+      try {
+        expect(find.bySemanticsLabel('Needs input'), findsOneWidget);
+        expect(find.text('3'), findsOneWidget);
+      } finally {
+        semantics.dispose();
+      }
     },
   );
   testWidgets('remote folders contain their sessions and keep empty projects', (
@@ -459,7 +468,7 @@ void main() {
         ),
       ]
       ..chats = [
-        _Chat('a', 'Install CLI', 'project'),
+        _Chat('a', 'Install CLI', 'project', pinned: true),
         _Chat('b', 'Configure domain', 'project'),
         _Chat('bot', 'Helper', 'bot'),
       ];
@@ -483,7 +492,20 @@ void main() {
     expect(chats.opens, isEmpty);
     await tester.tap(find.text('claude'));
     await tester.pump();
+    expect(find.byIcon(Icons.push_pin_outlined), findsOneWidget);
     final manage = find.byKey(const ValueKey(('manage-session', 'b')));
+    final manageIcon = find.descendant(of: manage, matching: find.byType(Icon));
+    final manageFocus = Focus.of(tester.element(manageIcon));
+    manageFocus.requestFocus();
+    await tester.pump();
+    expect(manageFocus.hasPrimaryFocus, isTrue);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(find.text('Rename'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(find.text('Rename'), findsNothing);
+    expect(manageFocus.hasPrimaryFocus, isTrue);
     await tester.tap(manage);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Delete'));
@@ -499,7 +521,13 @@ void main() {
       LinkMethods.archive,
       LinkMethods.delete,
     ]) {
-      await tester.tap(manage);
+      if (method == LinkMethods.pin) {
+        manageFocus.requestFocus();
+        await tester.pump();
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      } else {
+        await tester.tap(manage);
+      }
       await tester.pumpAndSettle();
       final label = {
         LinkMethods.pin: 'Pin',
@@ -507,7 +535,13 @@ void main() {
         LinkMethods.archive: 'Archive',
         LinkMethods.delete: 'Delete',
       }[method]!;
-      await tester.tap(find.text(label));
+      if (method == LinkMethods.pin) {
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+        await tester.pump();
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      } else {
+        await tester.tap(find.text(label));
+      }
       await tester.pumpAndSettle();
       if (method == LinkMethods.rename) {
         await tester.enterText(find.byType(TextFormField), 'New title');
@@ -527,7 +561,11 @@ void main() {
     await tester.tap(find.text('Configure domain'));
     await tester.pump();
     expect(chats.opens, ['b']);
-    await tester.tap(find.byKey(const ValueKey(('new-session', r'D:\orm'))));
+    final create = find.byKey(const ValueKey(('new-session', r'D:\orm')));
+    final createIcon = find.descendant(of: create, matching: find.byType(Icon));
+    Focus.of(tester.element(createIcon)).requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pumpAndSettle();
     expect(chats.created, [r'D:\orm']);
     expect(chats.selected?.id, 'fresh');
@@ -619,6 +657,9 @@ void main() {
   testWidgets('opens only the selected chat, renders updates, and closes it', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(700, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
     final connection = _Connection()..peer = _Peer();
     final chats = _Chats()
       ..chats = [
@@ -655,12 +696,11 @@ void main() {
     expect(back, 0);
     expect(find.text('Helper bot'), findsOneWidget);
     await tester.tap(find.text('Helper bot'));
-    await tester.pump();
-    final local = find.byKey(const ValueKey('local-computer'));
-    if (local.evaluate().isEmpty) {
-      await tester.tap(find.byKey(const ValueKey('host-toggle-sidebar')));
-      await tester.pump();
-    }
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('host-toggle-sidebar')));
+    await tester.pumpAndSettle();
+    final local = find.byKey(const ValueKey('local-computer')).hitTestable();
+    expect(local, findsOneWidget);
     await tester.tap(local);
     await tester.pump();
     expect(chats.closes, 2);
@@ -691,15 +731,20 @@ void main() {
     await tester.pump();
     expect(find.text('Helper bot'), findsNothing);
     expect(find.byTooltip('Back to host chats').hitTestable(), findsOneWidget);
+    final backSemantics = find.semantics.byPredicate(
+      (node) => node.getSemanticsData().tooltip == 'Back to host chats',
+    );
+    expect(backSemantics, findsOne);
     final directory = find.byKey(const ValueKey('host-toggle-sidebar'));
     final catalog = find.byKey(const ValueKey('host-catalog'));
     expect(directory.hitTestable(), findsOneWidget);
     expect(find.text('Session directory'), findsOneWidget);
     final titleBarTop = tester.getTopLeft(directory).dy;
     await tester.tap(directory);
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(catalog.hitTestable(), findsOneWidget);
-    expect(_composer, findsNothing);
+    expect(_composer.hitTestable(), findsNothing);
+    expect(backSemantics, findsNothing);
     expect(find.text('Return to current conversation'), findsOneWidget);
     expect(tester.getTopLeft(directory).dy, titleBarTop);
     expect(
@@ -773,9 +818,18 @@ void main() {
 
     connection.disconnect();
     await tester.pump();
-    expect(find.text('Group computer not connected'), findsOneWidget);
+    final catalog = find.byKey(const ValueKey('host-catalog'));
+    expect(
+      find.descendant(
+        of: catalog,
+        matching: find.text('Group computer not connected'),
+      ),
+      findsOneWidget,
+    );
     expect(_composer, findsNothing);
-    await tester.tap(find.text('Reconnect'));
+    await tester.tap(
+      find.descendant(of: catalog, matching: find.text('Reconnect')),
+    );
     await tester.pump();
     expect(_editor(tester).controller.text, 'A private draft');
 
@@ -792,6 +846,9 @@ void main() {
   testWidgets('catalog navigation retains independent chat drafts', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(700, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
     final connection = _Connection()..peer = _Peer();
     final chats = _Chats()
       ..chats = [
@@ -892,6 +949,9 @@ void main() {
   testWidgets('restores last opened chat from this host after a page restart', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(700, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
     final storage = _LastChats();
     final project = _Chat('same-id', 'Project chat', 'project');
     final bot = _Chat('same-id', 'Helper bot', 'bot');
@@ -941,6 +1001,9 @@ void main() {
   testWidgets('a late last chat read cannot override manual selection', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(700, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
     final read = Completer<DesktopHostChatKey?>();
     final storage = _LastChats()..pendingRead = read.future;
     final connection = _Connection()..peer = _Peer();
@@ -998,8 +1061,11 @@ Future<void> _pumpPage(
 }) async {
   final model = chats ?? _Chats();
   if (disposeModels) {
-    addTearDown(connection.dispose);
-    addTearDown(model.dispose);
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      model.dispose();
+      connection.dispose();
+    });
   }
   await tester.pumpWidget(
     MaterialApp(
@@ -1189,14 +1255,14 @@ class _Peer extends Fake implements LinkPeer {
 }
 
 class _Chat extends Fake implements DesktopHostChat {
-  _Chat(this.id, this.title, this.kind);
+  _Chat(this.id, this.title, this.kind, {this.pinned = false});
   @override
   LinkSessionStatus get status =>
       id == 'waiting' ? LinkSessionStatus.needsInput : LinkSessionStatus.idle;
   @override
   int get unread => id == 'new-bot' ? 3 : 0;
   @override
-  bool get pinned => false;
+  final bool pinned;
   @override
   bool get provisional => false;
   @override

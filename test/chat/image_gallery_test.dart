@@ -71,6 +71,45 @@ void main() {
     expect(find.byType(InteractiveViewer), findsNothing);
   });
 
+  testWidgets('a corrupt local image shows a fallback in the gallery', (
+    tester,
+  ) async {
+    final broken = ImageAttachment(
+      bytes: Uint8List.fromList([1, 2, 3]),
+      mediaType: 'image/png',
+    );
+    final readable = ImageAttachment(bytes: _png, mediaType: 'image/png');
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Center(child: ImageThumbnails(images: [broken, readable])),
+      ),
+    );
+    await tester.tap(
+      find.byWidgetPredicate(
+        (widget) => widget is ImageThumbnail && widget.image == broken,
+      ),
+    );
+    await tester.pumpAndSettle();
+    final preview = find.byType(InteractiveViewer);
+    final fallback = find.descendant(
+      of: preview,
+      matching: find.byIcon(Icons.broken_image_outlined),
+    );
+    // The engine decodes images on a background thread.
+    await tester.runAsync(() async {
+      for (var i = 0; i < 40 && fallback.evaluate().isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        await tester.pump();
+      }
+    });
+    expect(fallback, findsOneWidget);
+    expect(tester.takeException(), isNull);
+    expect(find.text('1 / 2'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('image-next')));
+    await tester.pumpAndSettle();
+    expect(find.text('2 / 2'), findsOneWidget);
+  });
+
   testWidgets('one image alone has no arrows', (tester) async {
     late BuildContext context;
     await tester.pumpWidget(

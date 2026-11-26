@@ -296,6 +296,8 @@ TerminalInstance _previewTerminal(WidgetTester tester) => tester
 /// What that terminal shows, once what was printed is parsed: its lines,
 /// wrapped ones joined.
 Future<String> _previewScreen(WidgetTester tester) async {
+  // Build the latest output snapshot before advancing the parser's timer.
+  await tester.pump();
   await tester.pump(const Duration(milliseconds: 20));
   final lines = _previewTerminal(tester).terminal.buffer.lines;
   final text = StringBuffer();
@@ -2125,7 +2127,10 @@ void main() {
       panel.openTerminal(session, 'one');
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
-      expect(await _previewScreen(tester), contains('first output'));
+      expect(
+        await _previewScreen(tester),
+        '\$ sleep 120 && echo one\nfirst output\nnew output',
+      );
       panel.hide();
       await tester.pump();
       expect(find.byType(SidePanelRail), findsOneWidget);

@@ -3,11 +3,9 @@ import 'dart:async';
 import 'package:bao_link/bao_link.dart';
 import 'package:bao_markdown/bao_markdown.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../chat/chat_keys.dart';
 import '../chat/composer/composer_presentation.dart';
-import '../chat/floating/floating_registry.dart';
 import '../chat/widgets/image_thumbnails.dart';
 import '../l10n/l10n.dart';
 import '../workspace/window_controls.dart';
@@ -74,6 +72,7 @@ class DesktopHostComposer extends StatefulWidget {
 class _DesktopHostComposerState extends State<DesktopHostComposer>
     with ChatKeyTarget {
   final _focus = FocusNode(debugLabel: 'Host composer');
+  final _scroll = ScrollController();
   late final MarkdownController _draft;
   int _savedVersion = 0;
   late TextSelection _savedSelection;
@@ -169,6 +168,7 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
   void dispose() {
     _draft.dispose();
     _focus.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -198,25 +198,13 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
       (_draft.text.trim().isNotEmpty || _images.isNotEmpty) &&
       (_target == null || _current(_target!));
 
-  KeyEventResult _handleKey(KeyEvent event) {
-    if (!_draft.isComposing && event is! KeyUpEvent) {
-      if (FloatingRegistry.handleKey(event) case final result?) return result;
-    }
-    final key = event.logicalKey;
-    final keyboard = HardwareKeyboard.instance;
-    if ((key != LogicalKeyboardKey.enter &&
-            key != LogicalKeyboardKey.numpadEnter) ||
-        event is KeyUpEvent ||
-        _draft.isComposing ||
-        keyboard.isShiftPressed ||
-        keyboard.isAltPressed ||
-        keyboard.isControlPressed ||
-        keyboard.isMetaPressed) {
-      return KeyEventResult.ignored;
-    }
-    if (event is KeyDownEvent) unawaited(_send());
-    return KeyEventResult.handled;
-  }
+  KeyEventResult _handleKey(KeyEvent event) => handleComposerKey(
+    event,
+    composing: _draft.isComposing,
+    dispatch: (event) => handleComposerEnter(event, _submit),
+  );
+
+  void _submit() => unawaited(_send());
 
   Future<void> _send() async {
     if (!_canSend) return;
@@ -461,127 +449,79 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: ListenableBuilder(
         listenable: _focus,
-        builder: (context, child) =>
-            ComposerSurface(focused: _focus.hasFocus, child: child!),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Keep this slot even without media so Flutter never replaces the
-            // editor (and its input connection) as the controls above it change.
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (online && choices != null) _mentionPicker(choices, zh),
-                if (_images.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                    child: ImageThumbnails(
-                      key: ValueKey(online ? target : null),
-                      memoryOnly: true,
-                      isPreviewCurrent: () =>
-                          target != null && _current(target),
-                      images: [
-                        for (final image in _images) image.snapshot.preview,
-                      ],
-                      onRemove: canChange
-                          ? (index) => setState(() {
-                              _images.removeAt(index);
-                              _saveDraft();
-                            })
-                          : null,
-                    ),
-                  ),
-              ],
-            ),
-            Padding(
-              padding: composerEditorPadding,
-              child: ClipRect(
-                child: ConstrainedBox(
-                  constraints: composerEditorConstraints(context),
-                  child: Semantics(
-                    label: widget.placeholder,
-                    textField: true,
-                    multiline: true,
-                    child: MarkdownEditor(
-                      controller: _draft,
-                      focusNode: _focus,
-                      shrinkWrap: true,
-                      pastePlainText: true,
-                      onPaste: target == null
-                          ? null
-                          : () => _pasteImages(target),
-                      placeholder: widget.placeholder,
-                      onKey: _handleKey,
-                      style: composerEditorStyle(context),
-                    ),
-                  ),
+        builder: (context, child) => ComposerLayout(
+          focused: _focus.hasFocus,
+          aboveEditor: [
+            if (online && choices != null) _mentionPicker(choices, zh),
+            if (_images.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                child: ImageThumbnails(
+                  key: ValueKey(online ? target : null),
+                  memoryOnly: true,
+                  isPreviewCurrent: () => target != null && _current(target),
+                  images: [for (final image in _images) image.snapshot.preview],
+                  onRemove: canChange
+                      ? (index) => setState(() {
+                          _images.removeAt(index);
+                          _saveDraft();
+                        })
+                      : null,
                 ),
               ),
+          ],
+          editor: child!,
+          toolbar: ComposerToolbar(
+            pickers: DesktopHostPickers(
+              controls: widget.controls,
+              focusNode: _focus,
             ),
-            Padding(
-              padding: composerToolbarPadding,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: DesktopHostPickers(
-                      controls: widget.controls,
-                      focusNode: _focus,
-                    ),
+            actions: [
+              if (online && WindowControls.canPickFiles) ...[
+                if (hasProject || target.$2 == 'bot')
+                  _mediaButton(
+                    'desktop-remote-upload',
+                    Icons.upload_file,
+                    zh ? '上传文件到主机' : 'Upload file to host',
+                    canChange ? () => _upload(target) : null,
                   ),
-                  const SizedBox(width: 8),
-                  if (online && WindowControls.canPickFiles) ...[
-                    if (hasProject || target.$2 == 'bot')
-                      _mediaButton(
-                        'desktop-remote-upload',
-                        Icons.upload_file,
-                        zh ? '上传文件到主机' : 'Upload file to host',
-                        canChange ? () => _upload(target) : null,
-                      ),
-                    _mediaButton(
-                      'desktop-remote-attach-image',
-                      Icons.add_photo_alternate_outlined,
-                      zh ? '添加图片' : 'Attach image',
-                      canChange && _images.length < remoteAttachmentCount
-                          ? () => _pickImage(target)
-                          : null,
-                    ),
-                  ],
-                  if (online && hasProject)
-                    _mediaButton(
-                      'desktop-remote-mention',
-                      Icons.alternate_email,
-                      zh ? '引用主机项目文件' : 'Mention a host project file',
-                      canChange ? () => _listMentions(target) : null,
-                    ),
-                  ?widget.deliveryMenu,
-                  ListenableBuilder(
-                    listenable: _draft,
-                    builder: (context, _) {
-                      final controls = widget.controls;
-                      if (controls == null || !controls.showStop) {
-                        return ComposerSendButton(
-                          tooltip: widget.sendLabel,
-                          onSend: _canSend ? _send : null,
-                        );
-                      }
-                      return IgnorePointer(
-                        ignoring: !controls.canStop,
-                        child: Opacity(
-                          opacity: controls.canStop ? 1 : .5,
-                          child: ComposerSendButton(
-                            tooltip: context.l10n.composerStop,
-                            onSend: null,
-                            onStop: () => unawaited(controls.stop()),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ],
-              ),
+                _mediaButton(
+                  'desktop-remote-attach-image',
+                  Icons.add_photo_alternate_outlined,
+                  zh ? '添加图片' : 'Attach image',
+                  canChange && _images.length < remoteAttachmentCount
+                      ? () => _pickImage(target)
+                      : null,
+                ),
+              ],
+              if (online && hasProject)
+                _mediaButton(
+                  'desktop-remote-mention',
+                  Icons.alternate_email,
+                  zh ? '引用主机项目文件' : 'Mention a host project file',
+                  canChange ? () => _listMentions(target) : null,
+                ),
+              ?widget.deliveryMenu,
+            ],
+            submit: ListenableBuilder(
+              listenable: _draft,
+              builder: (context, _) {
+                final controls = widget.controls;
+                final showStop = controls?.showStop == true;
+                return ComposerSendButton(
+                  tooltip: showStop
+                      ? context.l10n.composerStop
+                      : widget.sendLabel,
+                  onSend: !showStop && _canSend ? _submit : null,
+                  showStop: showStop,
+                  onStop: controls != null && controls.canStop
+                      ? () => unawaited(controls.stop())
+                      : null,
+                );
+              },
             ),
+          ),
+          status: [
             if (_mediaRequest != null)
               const LinearProgressIndicator(minHeight: 2),
             if (_mediaError case final error?)
@@ -596,6 +536,25 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
                 when controls.choiceFailed || controls.stopFailed)
               DesktopHostActionError(controls: controls),
           ],
+        ),
+        child: ComposerEditorViewport(
+          controller: _scroll,
+          child: Semantics(
+            label: widget.placeholder,
+            textField: true,
+            multiline: true,
+            child: MarkdownEditor(
+              controller: _draft,
+              focusNode: _focus,
+              scrollController: _scroll,
+              shrinkWrap: true,
+              pastePlainText: true,
+              onPaste: target == null ? null : () => _pasteImages(target),
+              placeholder: widget.placeholder,
+              onKey: _handleKey,
+              style: composerEditorStyle(context),
+            ),
+          ),
         ),
       ),
     );

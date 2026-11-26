@@ -11,12 +11,14 @@ import 'package:bao_link/bao_link.dart'
 
 import 'package:flutter/material.dart';
 
-import '../ide/ide_list.dart' show IdeListRow;
+import '../bots/desktop_bot_message_row.dart';
 import '../theme/codicons.dart';
 import '../chat/chat_column.dart';
 import '../chat/chat_width.dart';
 import '../l10n/l10n.dart';
-import '../sidebar/sidebar.dart' show relativeTime;
+import '../sidebar/conversation_navigation_layout.dart';
+import '../sidebar/sidebar_rows.dart';
+import '../workspace/workspace.dart' show ThreadStatus;
 import '../sidebar/sidebar_times.dart';
 import '../chat/widgets/conversation_card_header.dart';
 import '../chat/widgets/inline_rename_field.dart';
@@ -25,13 +27,12 @@ import '../workspace/islands.dart';
 import '../settings/pages/settings_widgets.dart' show SettingsText;
 import '../settings/user_settings.dart' show GlobalStorage;
 import '../theme/app_theme.dart' show AppColors;
-import '../chat/widgets/markdown_view.dart';
-import '../chat/widgets/user_message_bubble.dart';
 import 'computer_group_sidebar.dart';
 import 'desktop_host_chats.dart';
 import 'desktop_host_composer.dart';
 import 'desktop_host_connection.dart';
 import 'desktop_host_controls.dart';
+import 'desktop_host_message_row.dart';
 import 'desktop_host_project_history.dart';
 import 'link_host.dart';
 import 'desktop_remote_activity.dart';
@@ -39,7 +40,6 @@ import 'desktop_remote_session_actions.dart';
 import 'desktop_host_session_controls.dart';
 import 'desktop_remote_people.dart';
 import 'desktop_remote_media.dart';
-import 'desktop_remote_media_preview.dart';
 import 'desktop_remote_rail.dart';
 import 'desktop_remote_project_tools.dart';
 
@@ -146,9 +146,10 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     setState(() => _peopleDock = (peer: peer, editor: editor));
   }
 
+  static const _peopleDockMinWidth = 880.0;
+
   Widget _withPeopleDock({
     required double width,
-    required bool wide,
     required LinkPeer? peer,
     required Widget child,
   }) {
@@ -159,7 +160,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     };
     // Leave room for the conversation when the sidebar is also open.
     final panelWidth = width < 1050 ? 300.0 : 360.0;
-    final sideBySide = dock != null && wide;
+    final sideBySide = dock != null && width >= _peopleDockMinWidth;
     final compact = dock != null && !sideBySide;
     return Stack(
       fit: StackFit.expand,
@@ -564,18 +565,21 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
               final error = _localError ?? (_stored ? _connection.error : null);
               final host = _online ? _connection.peer?.remote : null;
               final selected = host == null ? null : _chats.selected;
-              final wide = constraints.maxWidth >= 880;
+              final wide =
+                  constraints.maxWidth >=
+                  ConversationNavigationLayout.narrowWidth;
               final showSidebar = wide && (!_sidebarHidden || selected == null);
-              final showCompactCatalog =
-                  !wide && (selected == null || _compactCatalog);
-              final catalog = showSidebar || showCompactCatalog
+              final catalogOnly = !wide && selected == null;
+              final showCompactCatalog = !wide && _compactCatalog;
+              final catalog = showSidebar || showCompactCatalog || catalogOnly
                   ? Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
                       child: _catalog(
                         text,
                         error,
                         showChatStatus: selected == null,
-                        compact: !wide,
+                        compactPeopleDock:
+                            constraints.maxWidth < _peopleDockMinWidth,
                       ),
                     )
                   : null;
@@ -626,34 +630,22 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                   : _conversation(text, host, selected, error, wide: wide);
               final body = _withPeopleDock(
                 width: constraints.maxWidth,
-                wide: wide,
                 peer: host == null ? null : _connection.peer,
-                child: Row(
-                  children: [
-                    if (showSidebar) ...[
-                      SizedBox(width: 280, child: catalog),
-                      const VerticalDivider(width: 1),
-                    ],
-                    Expanded(
-                      key: const ValueKey('host-content'),
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          Offstage(
-                            offstage: showCompactCatalog,
-                            child: ExcludeFocus(
-                              excluding: showCompactCatalog,
-                              child: _contentPane(
-                                conversation,
-                                session: selected != null,
-                              ),
-                            ),
+                child: ConversationNavigationLayout(
+                  sidebar: catalogOnly ? null : catalog,
+                  width: (constraints.maxWidth - 20).clamp(0.0, 260.0),
+                  open: wide ? showSidebar : showCompactCatalog && !catalogOnly,
+                  narrow: !wide,
+                  onClose: () => setState(() => _compactCatalog = false),
+                  child: catalogOnly
+                      ? catalog!
+                      : KeyedSubtree(
+                          key: const ValueKey('host-content'),
+                          child: _contentPane(
+                            conversation,
+                            session: selected != null,
                           ),
-                          if (showCompactCatalog) catalog!,
-                        ],
-                      ),
-                    ),
-                  ],
+                        ),
                 ),
               );
               final directory = TextButton.icon(
@@ -665,7 +657,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
                 icon: Icon(
-                  showSidebar || showCompactCatalog
+                  showSidebar || showCompactCatalog || catalogOnly
                       ? Codicons.layoutSidebarLeft
                       : Codicons.layoutSidebarLeftOff,
                   size: 16,
@@ -727,7 +719,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     _HostText text,
     String? error, {
     required bool showChatStatus,
-    required bool compact,
+    required bool compactPeopleDock,
   }) {
     final chatError = _localChatError ?? _chats.error;
     final groups = <String, List<DesktopHostChat>>{
@@ -774,7 +766,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
               },
               reviewVisible:
                   widget.reviewVisible &&
-                  !(compact &&
+                  !(compactPeopleDock &&
                       identical(_peopleDock?.peer, _connection.peer) &&
                       _peopleDock != null),
             ),
@@ -821,59 +813,44 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
             if (entry.key == 'project' && host != null)
               for (final folder in folders) ...[
                 SliverToBoxAdapter(
-                  child: _CatalogRow(
+                  child: DesktopRemoteProjectActions(
                     key: ValueKey(('folder', folder.id)),
-                    label: folder.name,
-                    leading: DesktopRemoteProjectIcon(
-                      peer: _connection.peer,
-                      project: folder,
-                      size: 16,
-                      isCurrent: _currentProject,
-                      color: AppColors.textFaint,
-                      fallback: _collapsedFolders.contains((host, folder.id))
-                          ? Codicons.folder
-                          : Codicons.folderOpened,
+                    peer: _connection.peer!,
+                    project: folder,
+                    hostName: _connection.hostName ?? text.host,
+                    isCurrent: _currentProject,
+                    enabled: !_busy && !_chatBusy,
+                    onError: (message) =>
+                        setState(() => _localChatError = message),
+                    builder: (items) => SidebarProjectRow(
+                      title: folder.name,
+                      collapsed: _collapsedFolders.contains((host, folder.id)),
+                      icon: DesktopRemoteProjectIcon(
+                        peer: _connection.peer,
+                        project: folder,
+                        size: 16,
+                        isCurrent: _currentProject,
+                        color: AppColors.textFaint,
+                        fallback: _collapsedFolders.contains((host, folder.id))
+                            ? Codicons.folder
+                            : Codicons.folderOpened,
+                      ),
+                      pinned: folder.pinned == true,
+                      alwaysShowActions: true,
+                      keyboardFocusableActions: true,
+                      createButtonKey: ValueKey(('new-session', folder.id)),
+                      createTooltip: text.newSession,
+                      onCreate: _busy || _chatBusy
+                          ? null
+                          : () => _createSession(folder),
+                      menuItems: items,
+                      onToggle: () => setState(() {
+                        final key = (host, folder.id);
+                        if (!_collapsedFolders.remove(key)) {
+                          _collapsedFolders.add(key);
+                        }
+                      }),
                     ),
-                    action: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        IconButton(
-                          key: ValueKey(('new-session', folder.id)),
-                          tooltip: text.newSession,
-                          constraints: const BoxConstraints.tightFor(
-                            width: 28,
-                            height: 28,
-                          ),
-                          padding: EdgeInsets.zero,
-                          icon: const Icon(Icons.add, size: 16),
-                          onPressed: _busy || _chatBusy
-                              ? null
-                              : () => _createSession(folder),
-                        ),
-                        if (_connection.peer case final peer?)
-                          DesktopRemoteProjectActions(
-                            peer: peer,
-                            project: folder,
-                            hostName: _connection.hostName ?? text.host,
-                            isCurrent: _currentProject,
-                            enabled: !_busy && !_chatBusy,
-                            onError: (message) =>
-                                setState(() => _localChatError = message),
-                          ),
-                      ],
-                    ),
-                    icon: _collapsedFolders.contains((host, folder.id))
-                        ? Codicons.folder
-                        : Codicons.folderOpened,
-                    trailing: _collapsedFolders.contains((host, folder.id))
-                        ? Codicons.chevronRight
-                        : Codicons.chevronDown,
-                    onTap: () => setState(() {
-                      final key = (host, folder.id);
-                      if (!_collapsedFolders.remove(key)) {
-                        _collapsedFolders.add(key);
-                      }
-                    }),
                   ),
                 ),
                 if (!_collapsedFolders.contains((host, folder.id)))
@@ -898,68 +875,49 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
       final chat = chats[index];
       final selected = _chats.selected;
       final peer = _connection.peer;
-      final strings = context.l10n;
-      return _CatalogRow(
-        key: ValueKey((chat.kind, chat.id)),
-        action: chat.kind != 'project' || peer == null || chat.provisional
-            ? null
-            : PopupMenuButton<String>(
-                key: ValueKey(('manage-session', chat.id)),
-                tooltip: _HostText(context).manage,
-                enabled: !_busy && !_chatBusy,
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 128),
-                icon: const Icon(Icons.more_horiz, size: 16),
-                style: IconButton.styleFrom(
-                  minimumSize: const Size(28, 28),
-                  fixedSize: const Size(28, 28),
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-                onSelected: (method) => _manageSession(peer, chat, method),
-                itemBuilder: (_) => [
-                  PopupMenuItem(
-                    value: LinkMethods.rename,
-                    child: Text(strings.commonRename),
-                  ),
-                  PopupMenuItem(
-                    value: LinkMethods.pin,
-                    child: Text(
-                      chat.pinned ? strings.sidebarUnpin : strings.sidebarPin,
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: LinkMethods.archive,
-                    child: Text(strings.sidebarArchive),
-                  ),
-                  PopupMenuItem(
-                    value: LinkMethods.delete,
-                    child: Text(strings.commonDelete),
-                  ),
-                ],
-              ),
-        selected: selected?.kind == chat.kind && selected?.id == chat.id,
-        onTap: _busy || _chatBusy ? null : () => _openChat(chat),
-        indent: chat.kind == 'project' ? 24 : 0,
-        icon: switch (chat.kind) {
-          'project' =>
-            chat.pinned ? Icons.push_pin_outlined : Codicons.commentDiscussion,
-          'bot' => Icons.smart_toy_outlined,
-          _ => Icons.groups_outlined,
-        },
-        activity: switch (chat.status) {
-          LinkSessionStatus.needsInput => Tooltip(
-            message: strings.sidebarNeedsInput,
-            child: const Icon(Icons.pending_actions, size: 14),
+      final manageable =
+          chat.kind == 'project' &&
+          peer != null &&
+          !chat.provisional &&
+          !_busy &&
+          !_chatBusy;
+      return ValueListenableBuilder<bool>(
+        valueListenable: SidebarTimes.shown,
+        builder: (context, showTime, _) => SidebarSessionRow(
+          key: ValueKey((chat.kind, chat.id)),
+          title: chat.title,
+          selected: selected?.kind == chat.kind && selected?.id == chat.id,
+          onTap: _busy || _chatBusy ? null : () => _openChat(chat),
+          extraIndent: chat.kind == 'project' ? 12 : 0,
+          status: switch (chat.status) {
+            LinkSessionStatus.needsInput => ThreadStatus.needsInput,
+            LinkSessionStatus.running => ThreadStatus.running,
+            _ when chat.unread > 0 => ThreadStatus.unread,
+            _ => ThreadStatus.idle,
+          },
+          unreadCount: chat.unread,
+          updatedAt: chat.updatedAt,
+          showTime: showTime,
+          showMenuButton: manageable,
+          showPinnedMarker: true,
+          menuButtonKey: ValueKey(('manage-session', chat.id)),
+          menuTooltip: _HostText(context).manage,
+          actions: SidebarSessionActions(
+            pinned: chat.pinned,
+            onRename: manageable
+                ? () => _manageSession(peer, chat, LinkMethods.rename)
+                : null,
+            onPin: manageable
+                ? () => _manageSession(peer, chat, LinkMethods.pin)
+                : null,
+            onArchive: manageable
+                ? () => _manageSession(peer, chat, LinkMethods.archive)
+                : null,
+            onDelete: manageable
+                ? () => _manageSession(peer, chat, LinkMethods.delete)
+                : null,
           ),
-          LinkSessionStatus.running => Tooltip(
-            message: strings.sidebarRunning,
-            child: const Icon(Icons.play_arrow, size: 14),
-          ),
-          _ => null,
-        },
-        unread: chat.unread,
-        label: chat.title,
-        updatedAt: chat.updatedAt,
+        ),
       );
     },
   );
@@ -1260,42 +1218,36 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                                 messages[messages.length - 1 - index];
                             final reference = message.groupReference;
                             final replyTarget = message.groupReplyTarget;
-                            return DesktopRemoteMessageImages(
+                            return DesktopHostMessageRow(
                               peer: peer,
                               chat: chat,
-                              images: message.images,
+                              message: message,
                               isCurrent: isCurrent,
-                              child: _MessageBubble(
-                                message: message,
-                                sender: message.mine
-                                    ? text.you
-                                    : message.sender,
-                                group: chat.kind == 'group',
-                                quote: reference == null
-                                    ? null
-                                    : _GroupQuoteBanner(
-                                        label: text.quotedMessage(
-                                          reference.sequence,
-                                          reference.target,
-                                        ),
-                                        preview: switch (reference.target) {
-                                          final target? => text.quotePreview(
-                                            target,
-                                          ),
-                                          null => '',
-                                        },
+                              sender: message.mine ? text.you : message.sender,
+                              quote: reference == null
+                                  ? null
+                                  : DesktopGroupQuoteBanner(
+                                      label: text.quotedMessage(
+                                        reference.sequence,
+                                        reference.target,
                                       ),
-                                replyTooltip: text.replyToMessage,
-                                onReply: canQuote && replyTarget != null
-                                    ? () => selectReply(replyTarget)
-                                    : null,
-                              ),
+                                      preview: switch (reference.target) {
+                                        final target? => text.quotePreview(
+                                          target,
+                                        ),
+                                        null => '',
+                                      },
+                                    ),
+                              replyTooltip: text.replyToMessage,
+                              onReply: canQuote && replyTarget != null
+                                  ? () => selectReply(replyTarget)
+                                  : null,
                             );
                           },
                         ),
                 ),
                 if (groupReply != null)
-                  _GroupQuoteBanner(
+                  DesktopGroupQuoteBanner(
                     label: text.replyingTo(groupReply),
                     preview: text.quotePreview(groupReply),
                     trailing: IconButton(
@@ -1444,197 +1396,6 @@ class _RemoteTitleState extends State<_RemoteTitle> {
             ),
     );
   }
-}
-
-class _CatalogRow extends StatelessWidget {
-  const _CatalogRow({
-    super.key,
-    required this.label,
-    required this.icon,
-    this.trailing,
-    this.action,
-    this.leading,
-    this.activity,
-    this.unread = 0,
-    this.updatedAt,
-    this.selected = false,
-    this.indent = 0,
-    this.onTap,
-  });
-  final String label;
-  final IconData icon;
-  final IconData? trailing;
-  final Widget? action;
-  final Widget? leading;
-  final Widget? activity;
-  final int unread;
-  final DateTime? updatedAt;
-  final bool selected;
-  final double indent;
-  final VoidCallback? onTap;
-
-  @override
-  Widget build(BuildContext context) => Semantics(
-    button: true,
-    selected: selected,
-    enabled: onTap != null,
-    child: IdeListRow(
-      height: 32,
-      onTap: onTap,
-      selected: selected,
-      tooltip: label,
-      builder: (context, hovered) => Padding(
-        padding: EdgeInsets.only(left: 8 + indent, right: 8),
-        child: Row(
-          children: [
-            leading ?? Icon(icon, size: 15, color: AppColors.textFaint),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 13, color: AppColors.textPrimary),
-              ),
-            ),
-            ?activity,
-            if (unread > 0)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Tooltip(
-                  message: context.l10n.sidebarUnread,
-                  child: Text(
-                    '$unread',
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: AppColors.textPrimary,
-                    ),
-                  ),
-                ),
-              ),
-            if (updatedAt != null)
-              ValueListenableBuilder<bool>(
-                valueListenable: SidebarTimes.shown,
-                builder: (context, shown, _) => shown
-                    ? Text(
-                        relativeTime(updatedAt!, DateTime.now(), context.l10n),
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: AppColors.textFaint,
-                        ),
-                      )
-                    : const SizedBox.shrink(),
-              ),
-            ?action,
-            if (trailing != null)
-              Icon(trailing, size: 13, color: AppColors.textFaint),
-          ],
-        ),
-      ),
-    ),
-  );
-}
-
-class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({
-    required this.message,
-    required this.sender,
-    required this.group,
-    required this.replyTooltip,
-    this.quote,
-    this.onReply,
-  });
-
-  final DesktopHostMessage message;
-  final String sender;
-  final bool group;
-  final String replyTooltip;
-  final Widget? quote;
-  final VoidCallback? onReply;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
-    child: SelectionArea(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (group && sender.isNotEmpty) ...[
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    sender,
-                    style: SettingsText.heading,
-                    textAlign: message.mine ? TextAlign.end : TextAlign.start,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                if (message.groupReplyTarget != null)
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    tooltip: replyTooltip,
-                    onPressed: onReply,
-                    icon: const Icon(Icons.reply, size: 16),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 4),
-          ],
-          ?quote,
-          if (message.mine)
-            UserMessageBubble(text: message.text, textOnly: true)
-          else
-            MarkdownView(message.text, textOnly: true),
-        ],
-      ),
-    ),
-  );
-}
-
-class _GroupQuoteBanner extends StatelessWidget {
-  const _GroupQuoteBanner({
-    required this.label,
-    required this.preview,
-    this.trailing,
-  });
-
-  final String label;
-  final String preview;
-  final Widget? trailing;
-
-  @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsetsDirectional.fromSTEB(12, 4, 8, 4),
-    child: Row(
-      children: [
-        const Icon(Icons.format_quote, size: 16),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                label,
-                style: SettingsText.heading,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              if (preview.isNotEmpty)
-                Text(
-                  preview,
-                  style: SettingsText.description,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-            ],
-          ),
-        ),
-        ?trailing,
-      ],
-    ),
-  );
 }
 
 class _Notice extends StatelessWidget {

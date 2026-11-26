@@ -46,6 +46,8 @@ class DesktopHostMessage {
     required this.sender,
     required this.mine,
     this.images = const [],
+    this.sentAt,
+    this.senderEmoji,
     this.groupReplyTarget,
     this.groupReference,
   });
@@ -54,6 +56,8 @@ class DesktopHostMessage {
   final String sender;
   final bool mine;
   final List<DesktopRemoteImage> images;
+  final DateTime? sentAt;
+  final String? senderEmoji;
   final DesktopHostGroupQuote? groupReplyTarget;
   final ({int sequence, DesktopHostGroupQuote? target})? groupReference;
 }
@@ -107,7 +111,7 @@ class DesktopHostChats extends ChangeNotifier {
   List<ProjectInfo> get projects => _projects;
   List<DesktopHostChat> _chats = const [];
   Map<String, String?> _botSessions = const {};
-  Map<String, String> _botNames = const {};
+  Map<String, LinkBot> _bots = const {};
   DesktopHostChat? _selected;
   _HostView? _view;
   DesktopHostChat? _unlistedDraft;
@@ -234,7 +238,7 @@ class DesktopHostChats extends ChangeNotifier {
     _projects = const [];
     _chats = const [];
     _botSessions = const {};
-    _botNames = const {};
+    _bots = const {};
     _sendErrors.clear();
   }
 
@@ -297,7 +301,7 @@ class DesktopHostChats extends ChangeNotifier {
     if (pushed) _stateEventSeen = true;
     final oldBotSessions = _botSessions;
     _botSessions = {for (final bot in state.bots) bot.id: bot.session};
-    _botNames = {for (final bot in state.bots) bot.id: bot.name};
+    _bots = {for (final bot in state.bots) bot.id: bot};
     final botIds = _botSessions.values.toSet();
     _projects = List.unmodifiable(state.projects);
     final projects = state.projects.map((project) => project.id).toSet();
@@ -884,7 +888,7 @@ class DesktopHostChats extends ChangeNotifier {
           () => DesktopHostGroupQuote._(
             view.groupIdentity,
             sequence: item.seq,
-            sender: item.mine ? 'You' : _botNames[item.from] ?? item.from,
+            sender: item.mine ? 'You' : _bots[item.from]?.name ?? item.from,
             mine: item.mine,
             preview: _quotePreview(
               partsOf(item).map((part) => part.text).join(' '),
@@ -895,6 +899,7 @@ class DesktopHostChats extends ChangeNotifier {
     for (final item in view.groupItems.values) {
       if (item.notice) continue;
       final target = summarize(item);
+      final avatar = _bots[item.from]?.avatar;
       final parts = partsOf(item);
       final images = DesktopRemoteImage.group(item.images);
       final rows = parts.length + (item.images.isNotEmpty ? 1 : 0);
@@ -909,6 +914,13 @@ class DesktopHostChats extends ChangeNotifier {
           sender: target.sender,
           mine: item.mine,
           images: attachment ? images : const [],
+          sentAt: index == 0 && item.at.millisecondsSinceEpoch != 0
+              ? item.at
+              : null,
+          senderEmoji:
+              avatar != null && avatar.isNotEmpty && !isAvatarImage(avatar)
+              ? avatar
+              : null,
           groupReplyTarget: index == 0 ? target : null,
           groupReference: ref != null && ref > 0 && ref < item.seq
               ? (
@@ -947,6 +959,7 @@ class DesktopHostChats extends ChangeNotifier {
     // A private bot page can start in the middle of a group turn. Only a
     // known turn origin or an explicit private delivery establishes routing.
     var showReply = !bot;
+    DateTime? turnAt;
     for (final item in view.sessionItems) {
       if (item is! Map<String, Object?>) continue;
       final images = item['images'];
@@ -970,7 +983,15 @@ class DesktopHostChats extends ChangeNotifier {
           final system =
               ChatCodec.botEvent(user) != null ||
               (text.isEmpty && _hiddenNotes.hasMatch(raw));
-          if (item['queued'] != true) showReply = !groupNote && !system;
+          final sentAt = switch (item['at']) {
+            final int at when at > 0 && at <= 8640000000000000 =>
+              DateTime.fromMillisecondsSinceEpoch(at),
+            _ => null,
+          };
+          if (item['queued'] != true) {
+            showReply = !groupNote && !system;
+            turnAt = showReply ? sentAt : null;
+          }
           if (group || system) continue;
           final from = item['agent'];
           // The visible words can survive a merged or queued private prompt,
@@ -980,6 +1001,7 @@ class DesktopHostChats extends ChangeNotifier {
             [text],
             from is String && from.isNotEmpty ? from : 'You',
             mine: from == null,
+            sentAt: sentAt,
             attachment: showImages && hasImage,
             images: showImages
                 ? DesktopRemoteImage.message(images: images, markdown: text)
@@ -994,6 +1016,7 @@ class DesktopHostChats extends ChangeNotifier {
               yield* _lines(
                 [_botMarkdown(words)],
                 sender,
+                sentAt: turnAt,
                 images: DesktopRemoteImage.message(markdown: words),
               );
             }
@@ -1096,11 +1119,17 @@ class DesktopHostChats extends ChangeNotifier {
     String sender, {
     bool mine = false,
     bool attachment = false,
+    DateTime? sentAt,
     List<DesktopRemoteImage> images = const [],
   }) sync* {
     for (final text in lines) {
       if (text.isNotEmpty) {
-        yield DesktopHostMessage(text: text, sender: sender, mine: mine);
+        yield DesktopHostMessage(
+          text: text,
+          sender: sender,
+          mine: mine,
+          sentAt: sentAt,
+        );
       }
     }
     if (attachment || images.isNotEmpty) {
@@ -1109,6 +1138,7 @@ class DesktopHostChats extends ChangeNotifier {
         sender: sender,
         mine: mine,
         images: List.unmodifiable(images),
+        sentAt: lines.any((text) => text.isNotEmpty) ? null : sentAt,
       );
     }
   }

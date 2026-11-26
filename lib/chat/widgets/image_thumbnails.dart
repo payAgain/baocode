@@ -33,7 +33,9 @@ class ImageThumbnails extends StatelessWidget {
   });
 
   final bool Function()? isPreviewCurrent;
-  final List<ImageAttachment> images;
+
+  /// Attachment slots in message order, with null for an unreadable file.
+  final List<ImageAttachment?> images;
   final ValueChanged<int>? onRemove;
   final double size;
 
@@ -42,20 +44,40 @@ class ImageThumbnails extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final galleryImages = onRemove == null ? images.nonNulls.toList() : null;
+    var galleryIndex = 0;
     return Wrap(
       spacing: 6,
       runSpacing: 6,
       children: [
-        for (final (i, image) in images.indexed)
-          ImageThumbnail(
-            // A new image at this position is a new thumbnail.
-            key: ObjectKey(image),
-            image: image,
-            size: size,
-            memoryOnly: memoryOnly,
-            isPreviewCurrent: isPreviewCurrent,
-            onRemove: onRemove == null ? null : () => onRemove!(i),
-          ),
+        for (final (i, slot) in images.indexed)
+          if (slot case final image?)
+            ImageThumbnail(
+              // A new image at this position is a new thumbnail.
+              key: ObjectKey(image),
+              image: image,
+              size: size,
+              memoryOnly: memoryOnly,
+              isPreviewCurrent: isPreviewCurrent,
+              gallery: galleryImages == null || galleryImages.length < 2
+                  ? null
+                  : (
+                      count: galleryImages.length,
+                      index: galleryIndex++,
+                      load: (index) => SynchronousFuture(galleryImages[index]),
+                    ),
+              onRemove: onRemove == null ? null : () => onRemove!(i),
+            )
+          else
+            SizedBox(
+              width: size,
+              height: size,
+              child: Icon(
+                Icons.broken_image_outlined,
+                size: 16,
+                color: AppColors.textFaint,
+              ),
+            ),
       ],
     );
   }
@@ -69,8 +91,11 @@ class ImageThumbnail extends StatefulWidget {
     this.onRemove,
     this.memoryOnly = false,
     this.isPreviewCurrent,
+    this.gallery,
   });
 
+  final ({int count, int index, Future<ImageAttachment?> Function(int) load})?
+  gallery;
   final ImageAttachment image;
   final double size;
   final VoidCallback? onRemove;
@@ -86,20 +111,43 @@ class _ImageThumbnailState extends State<ImageThumbnail> {
 
   void _show() {
     if (widget.isPreviewCurrent?.call() == false || _preview != null) return;
+    final image = widget.image;
+    final gallery = widget.gallery;
     if (!widget.memoryOnly) {
-      showImagePreview(context, widget.image);
+      if (gallery == null) {
+        showImagePreview(context, image);
+      } else {
+        showImageGallery(
+          context,
+          count: gallery.count,
+          load: gallery.load,
+          index: gallery.index,
+        );
+      }
       return;
     }
     final navigator = Navigator.of(context, rootNavigator: true);
-    final image = widget.image;
+    final isCurrent = widget.isPreviewCurrent;
     final route = DialogRoute<void>(
       context: context,
       themes: InheritedTheme.capture(from: context, to: navigator.context),
       barrierColor: Colors.black87,
       builder: (_) => _ImagePreview(
-        count: 1,
-        load: (_) => SynchronousFuture(image),
-        index: 0,
+        count: gallery?.count ?? 1,
+        load: (index) {
+          if (!mounted || isCurrent?.call() == false) {
+            return SynchronousFuture(null);
+          }
+          if (gallery == null || index == gallery.index) {
+            return SynchronousFuture(image);
+          }
+          return gallery
+              .load(index)
+              .then(
+                (next) => mounted && isCurrent?.call() != false ? next : null,
+              );
+        },
+        index: gallery?.index ?? 0,
         memoryOnly: true,
       ),
     );
@@ -503,12 +551,10 @@ class _ImagePreviewState extends State<_ImagePreview> {
                               child: Image(
                                 image: _previewProvider(image),
                                 fit: BoxFit.contain,
-                                errorBuilder: widget.memoryOnly
-                                    ? (_, _, _) => const Icon(
-                                        Icons.broken_image_outlined,
-                                        color: Colors.white54,
-                                      )
-                                    : null,
+                                errorBuilder: (_, _, _) => const Icon(
+                                  Icons.broken_image_outlined,
+                                  color: Colors.white54,
+                                ),
                               ),
                             ),
                           ),

@@ -9,6 +9,7 @@ import 'package:bao_link/bao_link.dart';
 import 'package:baocode/chat/chat_models.dart';
 import 'package:baocode/chat/widgets/conversation_card_header.dart';
 import 'package:baocode/ide/ide_code_diff.dart';
+import 'package:baocode/ide/ide_input.dart';
 import 'package:baocode/l10n/app_localizations.dart';
 import 'package:baocode/link/chat_codec.dart';
 import 'package:baocode/link/desktop_host_composer.dart';
@@ -205,8 +206,7 @@ void main() {
           find
               .byWidgetPredicate(
                 (widget) =>
-                    widget is TextField &&
-                    widget.decoration?.hintText == '提交信息',
+                    widget is IdeInputBox && widget.placeholder == '提交信息',
               )
               .hitTestable(),
           findsOneWidget,

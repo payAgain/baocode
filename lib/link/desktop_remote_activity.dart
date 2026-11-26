@@ -8,10 +8,12 @@ import 'package:path/path.dart' as p;
 import '../chat/chat_models.dart'
     show CommandStatus, FileChange, FileChangeKind;
 import '../chat/panels/activity_strip.dart';
+import '../chat/side_panel/side_panel_layout.dart';
 import '../chat/side_panel/side_panel_section_bar.dart';
 import '../ide/ide_code_diff.dart';
 import '../ide/ide_list.dart' show IdeListColors, IdeListRow;
 import '../ide/ide_menu.dart' show IdeMenuAction;
+import '../ide/terminal/terminal_output_view.dart';
 import '../kernel/kernel_types.dart' show KernelTask, KernelTaskKind;
 import '../l10n/l10n.dart';
 import '../settings/pages/settings_widgets.dart' show SettingsText;
@@ -79,6 +81,10 @@ class DesktopRemoteActivitySession {
 
   Map<String, Object?>? _lastState;
   bool _live = false;
+  bool get _batchReview => switch (_lastState?['actions']) {
+    {LinkMethods.reviewChanges: true} => true,
+    _ => false,
+  };
   Map<String, LinkTask> _tasks = const {};
   Map<String, _Change> _changes = const {};
 
@@ -147,6 +153,9 @@ enum _Section { files, tasks, changes, extensions }
 
 class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
   bool _open = false;
+  int _requests = 0;
+  double _panelWidth = SidePanelLayout.initialWidth;
+  final _panelFocus = FocusNode(debugLabel: 'desktop-remote-activity');
   late _Section _section = _defaultSection;
   _Section get _defaultSection =>
       widget.files == null ? _Section.tasks : _Section.files;
@@ -154,6 +163,8 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
   bool _visitedGit = false;
   final _reviewing = <String, _ReviewRequest>{};
   final _reviewErrors = <String, _ReviewError>{};
+  _BatchReview? _batch;
+  String? _batchNotice;
   _ReviewPreview? _reviewPreview;
   _TaskOutput? _output;
   Object? _confirmation;
@@ -196,6 +207,7 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
 
   @override
   void dispose() {
+    _panelFocus.dispose();
     _clearReviews();
     _clearOutput();
     super.dispose();
@@ -207,14 +219,16 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     output?.dispose();
   }
 
-  void _toggle() => setState(() {
-    _open = !_open;
-    if (!_open) {
-      _section = _defaultSection;
-      _confirmation = null;
-      _clearOutput();
-      _reviewPreview = null;
-    }
+  void _showPanel() => setState(() {
+    _open = true;
+    _requests++;
+  });
+
+  void _hidePanel() => setState(() {
+    _open = false;
+    _confirmation = null;
+    _clearOutput();
+    _reviewPreview = null;
   });
 
   void _selectSection(_Section section) => setState(() {
@@ -334,7 +348,10 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     }
   }
 
-  Widget? _activityStrip(DesktopRemoteActivitySession session) {
+  Widget? _activityStrip(
+    DesktopRemoteActivitySession session, {
+    required bool panelShown,
+  }) {
     final tasks = session._tasks;
     final advertised = session._changes;
     final single = advertised.length == 1 ? advertised.values.single : null;
@@ -370,7 +387,8 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
           conflict: change.conflict,
         ),
     ];
-    if (!ActivityStrip.hasContent(running, changes)) return null;
+    final hasContent = ActivityStrip.hasContent(running, changes);
+    if (!hasContent && _batch == null && _batchNotice == null) return null;
 
     final text = _ActivityText(context);
     String? blocked(_Change change) =>
@@ -382,8 +400,6 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
           _review(session, change, keep: keep, fromStrip: true, header: header),
         );
 
-    // The host only guards one path at a time, and each operation can
-    // invalidate other rows' revisions. Only offer All for a single file.
     final keepSingle = single != null && actionable(single, keep: true)
         ? single
         : null;
@@ -394,77 +410,103 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ActivityStrip(
-          key: ObjectKey(session),
-          tasks: running,
-          changes: changes,
-          paths: p.posix,
-          showLineCounts: advertised.values.every(
-            (change) =>
-                change.binary || change.added != null && change.removed != null,
-          ),
-          detailOf: (task) => task.summary,
-          onStopTask: (task) => unawaited(_stop(session, tasks[task.id]!)),
-          onOpenFile: (file) {
-            if (advertised[file.path] case final change?) {
-              unawaited(_previewChange(session, change, fromStrip: true));
-            }
-          },
-          onKeep: keepSingle == null
-              ? null
-              : () => review(keepSingle, keep: true, header: true),
-          onUndo: undoSingle == null
-              ? null
-              : () => review(undoSingle, keep: false, header: true),
-          fileRowActions: (context, file) {
-            final change = advertised[file.path]!;
-            if (blocked(change) case final reason?) {
-              return [
-                Tooltip(
-                  message: reason,
-                  child: Icon(
-                    Codicons.info,
-                    size: 14,
-                    color: AppColors.textMuted,
+        if (hasContent)
+          ActivityStrip(
+            key: ObjectKey(session),
+            tasks: running,
+            changes: changes,
+            paths: p.posix,
+            showLineCounts: advertised.values.every(
+              (change) =>
+                  change.binary ||
+                  change.added != null && change.removed != null,
+            ),
+            detailOf: (task) => task.summary,
+            onStopTask: (task) => unawaited(_stop(session, tasks[task.id]!)),
+            onOpenFile: (file) {
+              if (advertised[file.path] case final change?) {
+                unawaited(_previewChange(session, change, fromStrip: true));
+              }
+            },
+            onKeep: _canBatch(session, keep: true)
+                ? () => unawaited(_reviewAll(session, keep: true))
+                : keepSingle == null
+                ? null
+                : () => review(keepSingle, keep: true, header: true),
+            onUndo: _canBatch(session, keep: false)
+                ? () => unawaited(_reviewAll(session, keep: false))
+                : undoSingle == null
+                ? null
+                : () => review(undoSingle, keep: false, header: true),
+            fileRowActions: (context, file) {
+              final change = advertised[file.path]!;
+              if (blocked(change) case final reason?) {
+                return [
+                  Tooltip(
+                    message: reason,
+                    child: Icon(
+                      Codicons.info,
+                      size: 14,
+                      color: AppColors.textMuted,
+                    ),
                   ),
+                ];
+              }
+              return [
+                if (_canUndo(change, guarded: true))
+                  _ActivityIconButton(
+                    icon: Codicons.discard,
+                    tooltip: text.undo,
+                    size: IdeListColors.rowHeight,
+                    onPressed: () => review(change, keep: false),
+                  ),
+                _ActivityIconButton(
+                  icon: Codicons.check,
+                  tooltip: text.keep,
+                  size: IdeListColors.rowHeight,
+                  onPressed: () => review(change, keep: true),
                 ),
               ];
-            }
-            return [
-              if (_canUndo(change, guarded: true))
-                _ActivityIconButton(
-                  icon: Codicons.discard,
-                  tooltip: text.undo,
-                  size: IdeListColors.rowHeight,
-                  onPressed: () => review(change, keep: false),
-                ),
-              _ActivityIconButton(
-                icon: Codicons.check,
-                tooltip: text.keep,
-                size: IdeListColors.rowHeight,
-                onPressed: () => review(change, keep: true),
+            },
+            fileActions: (file) {
+              final change = advertised[file.path]!;
+              return [
+                [
+                  if (actionable(change, keep: false))
+                    IdeMenuAction(
+                      text.undo,
+                      onSelected: () => review(change, keep: false),
+                    ),
+                  if (actionable(change, keep: true))
+                    IdeMenuAction(
+                      text.keep,
+                      onSelected: () => review(change, keep: true),
+                    ),
+                ],
+              ];
+            },
+          ),
+        if (_batch != null ||
+            _batchNotice != null ||
+            changes.length > 1 &&
+                (!session._batchReview ||
+                    changes.length > LinkLimits.reviewChanges))
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Semantics(
+              liveRegion: true,
+              child: Text(
+                _batch != null
+                    ? text.awaitingHost
+                    : _batchNotice ??
+                          (session._batchReview
+                              ? text.batchLimit
+                              : text.legacyBatchReview),
+                style: _activityDetail,
               ),
-            ];
-          },
-          fileActions: (file) {
-            final change = advertised[file.path]!;
-            return [
-              [
-                if (actionable(change, keep: false))
-                  IdeMenuAction(
-                    text.undo,
-                    onSelected: () => review(change, keep: false),
-                  ),
-                if (actionable(change, keep: true))
-                  IdeMenuAction(
-                    text.keep,
-                    onSelected: () => review(change, keep: true),
-                  ),
-              ],
-            ];
-          },
-        ),
-        if ((!_open || _section != _Section.changes) &&
+            ),
+          ),
+        if ((!panelShown || _section != _Section.changes) &&
             (_reviewing.isNotEmpty ||
                 _reviewErrors.isNotEmpty ||
                 session._live && changes.isNotEmpty))
@@ -489,195 +531,140 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     final text = _ActivityText(context);
     final session = widget.session;
     final sessionAvailable = session?._available == true;
-    final activityStrip = sessionAvailable ? _activityStrip(session!) : null;
     final hasFiles = widget.files != null;
     final available = hasFiles || sessionAvailable;
     final label = hasFiles ? text.projectSidebar : text.activity;
-    final activityButton = available
-        ? IconButton(
-            key: const ValueKey('desktop-remote-project-sidebar-toggle'),
-            tooltip: label,
-            visualDensity: VisualDensity.compact,
-            icon: Icon(
-              _open
-                  ? Codicons.layoutSidebarRight
-                  : Codicons.layoutSidebarRightOff,
-              size: 16,
-            ),
-            isSelected: _open,
-            onPressed: _toggle,
-          )
-        : null;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final visible = _open && available;
-        final docked = visible && constraints.maxWidth >= 600;
-        final compact = visible && !docked;
-        final preview = switch (_reviewPreview) {
-          final preview?
-              when sessionAvailable &&
-                  (preview.fromStrip ||
-                      visible && _section == _Section.changes) =>
-            preview,
-          _ => null,
-        };
-        final hideChat = compact || preview != null;
-        final wideGit =
-            hasFiles &&
-            _section == _Section.changes &&
-            constraints.maxWidth >= 1200;
-        final panelWidth = docked
-            ? wideGit
-                  ? math.min(760.0, constraints.maxWidth * .52)
-                  : math.min(400.0, constraints.maxWidth * .37)
-            : 0.0;
+    final preview = switch (_reviewPreview) {
+      final preview?
+          when sessionAvailable &&
+              (preview.fromStrip || _open && _section == _Section.changes) =>
+        preview,
+      _ => null,
+    };
+    return SidePanelLayout(
+      wanted: _open && available,
+      requests: _requests,
+      width: _panelWidth,
+      onWidthChanged: (width) => setState(() => _panelWidth = width),
+      onClose: _hidePanel,
+      focusNode: _panelFocus,
+      atLeft: Directionality.of(context) == TextDirection.rtl,
+      // Keep tabs intact when the panel temporarily gives way, but reload
+      // host snapshots when the user explicitly closes and reopens it.
+      keepPanelMounted: _open,
+      hideOverlayForMain: preview != null,
+      mainBuilder: (context, layout) {
+        final activityButton = available
+            ? IconButton(
+                key: const ValueKey('desktop-remote-project-sidebar-toggle'),
+                tooltip: label,
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                  layout.shown
+                      ? Codicons.layoutSidebarRight
+                      : Codicons.layoutSidebarRightOff,
+                  size: 16,
+                ),
+                isSelected: layout.shown,
+                onPressed: layout.shown ? _hidePanel : _showPanel,
+              )
+            : null;
         return Stack(
           fit: StackFit.expand,
           children: [
-            PositionedDirectional(
-              start: 0,
-              end: docked ? panelWidth + 1 : 0,
-              top: 0,
-              bottom: 0,
-              child: Offstage(
-                offstage: hideChat,
-                child: ExcludeFocus(
-                  excluding: hideChat,
-                  child: TickerMode(
-                    enabled: !hideChat,
-                    child: widget.builder(
-                      context,
-                      activityButton,
-                      activityStrip,
-                    ),
+            Offstage(
+              offstage: preview != null,
+              child: ExcludeFocus(
+                excluding: preview != null || layout.overlay,
+                child: TickerMode(
+                  enabled: preview == null,
+                  child: widget.builder(
+                    context,
+                    activityButton,
+                    sessionAvailable
+                        ? _activityStrip(session!, panelShown: layout.shown)
+                        : null,
                   ),
                 ),
               ),
             ),
-            if (visible)
-              PositionedDirectional(
-                start: docked ? null : 0,
-                end: 0,
-                top: 0,
-                bottom: 0,
-                width: docked ? panelWidth + 1 : null,
-                child: Offstage(
-                  offstage: compact && preview != null,
-                  child: ExcludeFocus(
-                    excluding: compact && preview != null,
-                    child: Row(
-                      children: [
-                        if (docked)
-                          VerticalDivider(
-                            width: 1,
-                            color: AppColors.partBorder,
-                          ),
-                        Expanded(
-                          child: Material(
-                            key: const ValueKey(
-                              'desktop-remote-project-sidebar',
-                            ),
-                            color: AppColors.background,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                _ActivityBar(
-                                  label: label,
-                                  heading: true,
-                                  trailing: _ActivityIconButton(
-                                    tooltip: hasFiles
-                                        ? text.closeProjectSidebar
-                                        : text.close,
-                                    icon: compact
-                                        ? Codicons.arrowLeft
-                                        : Codicons.close,
-                                    onPressed: _toggle,
-                                  ),
-                                ),
-                                _sections(text, sessionAvailable),
-                                Expanded(
-                                  child: Stack(
-                                    fit: StackFit.expand,
-                                    children: [
-                                      if (hasFiles)
-                                        Offstage(
-                                          offstage: _section != _Section.files,
-                                          child: ExcludeFocus(
-                                            excluding:
-                                                _section != _Section.files,
-                                            child: widget.files!,
-                                          ),
-                                        ),
-                                      if (hasFiles &&
-                                          _visitedGit &&
-                                          sessionAvailable)
-                                        Offstage(
-                                          offstage:
-                                              _section != _Section.changes,
-                                          child: ExcludeFocus(
-                                            excluding:
-                                                _section != _Section.changes,
-                                            child: DesktopRemoteGitView(
-                                              key: ValueKey((
-                                                session!.peer,
-                                                session.projectId,
-                                              )),
-                                              client: DesktopRemoteGitClient(
-                                                session.peer,
-                                              ),
-                                              project: session.projectId,
-                                              review: _changes(text, session),
-                                            ),
-                                          ),
-                                        ),
-                                      if (sessionAvailable &&
-                                          _section != _Section.files &&
-                                          !(hasFiles &&
-                                              _section == _Section.changes))
-                                        switch (_section) {
-                                          _Section.tasks when _output != null =>
-                                            _outputPane(text, _output!),
-                                          _Section.tasks => _tasks(
-                                            text,
-                                            session!,
-                                          ),
-                                          _Section.changes => _changes(
-                                            text,
-                                            session!,
-                                          ),
-                                          _Section.extensions =>
-                                            _extensionsPane(text),
-                                          _Section.files =>
-                                            const SizedBox.shrink(),
-                                        },
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
             if (preview != null)
-              PositionedDirectional(
-                start: 0,
-                end: docked ? panelWidth + 1 : 0,
-                top: 0,
-                bottom: 0,
-                child: _reviewPane(
-                  text,
-                  session!,
-                  preview,
-                  compact: constraints.maxWidth < 600,
-                ),
-              ),
+              _reviewPane(text, session!, preview, compact: layout.short),
           ],
         );
       },
+      panelBuilder: (_) => _panelContents(text, label, sessionAvailable),
+    );
+  }
+
+  Widget _panelContents(
+    _ActivityText text,
+    String label,
+    bool sessionAvailable,
+  ) {
+    final session = sessionAvailable ? widget.session : null;
+    final files = widget.files;
+    return Material(
+      key: const ValueKey('desktop-remote-project-sidebar'),
+      color: AppColors.background,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _ActivityBar(
+            label: label,
+            heading: true,
+            trailing: _ActivityIconButton(
+              tooltip: files != null ? text.closeProjectSidebar : text.close,
+              icon: Codicons.close,
+              onPressed: _hidePanel,
+            ),
+          ),
+          _sections(text, sessionAvailable),
+          Expanded(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (files != null)
+                  Offstage(
+                    key: const ValueKey(_Section.files),
+                    offstage: _section != _Section.files,
+                    child: ExcludeFocus(
+                      excluding: _section != _Section.files,
+                      child: files,
+                    ),
+                  ),
+                if (files != null && _visitedGit && session != null)
+                  Offstage(
+                    key: const ValueKey(_Section.changes),
+                    offstage: _section != _Section.changes,
+                    child: ExcludeFocus(
+                      excluding: _section != _Section.changes,
+                      child: DesktopRemoteGitView(
+                        key: ValueKey((session.peer, session.projectId)),
+                        client: DesktopRemoteGitClient(session.peer),
+                        project: session.projectId,
+                        review: _changes(text, session),
+                      ),
+                    ),
+                  ),
+                if (session != null &&
+                    _section != _Section.files &&
+                    !(files != null && _section == _Section.changes))
+                  switch (_section) {
+                    _Section.tasks when _output != null => _outputPane(
+                      text,
+                      _output!,
+                    ),
+                    _Section.tasks => _tasks(text, session),
+                    _Section.changes => _changes(text, session),
+                    _Section.extensions => _extensionsPane(text),
+                    _Section.files => const SizedBox.shrink(),
+                  },
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -803,10 +790,9 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
                   icon: Codicons.terminal,
                   label: text.noOutput,
                 ),
-                _ => SingleChildScrollView(
+                _ => TerminalOutputView(
                   key: ObjectKey(output),
-                  padding: const EdgeInsets.all(12),
-                  child: _ActivityCode(text: output.tail),
+                  text: output.tail,
                 ),
               },
             ),

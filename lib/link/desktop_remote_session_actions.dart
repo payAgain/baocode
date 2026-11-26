@@ -114,7 +114,15 @@ class DesktopRemoteSessionActionsState
     InteractionAnswer? directAnswer,
   }) {
     bool valid() =>
-        _interactionKey(_snapshot) == revision && _answered != revision;
+        !_unsupported.contains(LinkMethods.answer) &&
+        _interactionKey(_snapshot) == revision &&
+        _answered != revision;
+    final raw = snapshot.state['interaction'];
+    final previewUnavailable =
+        request is ApprovalRequest &&
+        request.preview == null &&
+        raw is Map &&
+        raw['preview'] != null;
     unawaited(
       _run(snapshot, LinkMethods.answer, valid, (peer, id) async {
         final answer =
@@ -122,19 +130,25 @@ class DesktopRemoteSessionActionsState
             switch (request) {
               final ApprovalRequest approval => await _ask<InteractionAnswer>(
                 snapshot,
-                valid,
-                (context) => _ApprovalDialog(request: approval),
+                () => _available(snapshot) && valid(),
+                (context) => _ApprovalDialog(
+                  request: approval,
+                  previewUnavailable: previewUnavailable,
+                ),
               ),
               QuestionRequest() => null,
             };
         if (answer == null || !_available(snapshot) || !valid()) return;
-        final payload = switch (answer) {
-          QuestionAnswer(:final picks, :final skipped) => <String, Object?>{
-            't': 'question',
-            if (skipped) 'skipped': true else 'picks': picks,
-          },
-          ApprovalAnswer(:final decision, :final message)
-              when decision != ApprovalDecision.allowAlways =>
+        final payload = switch ((request, answer)) {
+          (QuestionRequest(), QuestionAnswer(:final picks, :final skipped)) =>
+            <String, Object?>{
+              't': 'question',
+              if (skipped) 'skipped': true else 'picks': picks,
+            },
+          (ApprovalRequest(), ApprovalAnswer(:final decision, :final message))
+              when (decision == ApprovalDecision.allowOnce &&
+                      !previewUnavailable) ||
+                  decision == ApprovalDecision.deny =>
             <String, Object?>{
               't': 'approval',
               'decision': decision.name,
@@ -670,8 +684,12 @@ String? _quotaSummary(BuildContext context, Map<String, Object?> quota) {
 }
 
 class _ApprovalDialog extends StatelessWidget {
-  const _ApprovalDialog({required this.request});
+  const _ApprovalDialog({
+    required this.request,
+    required this.previewUnavailable,
+  });
   final ApprovalRequest request;
+  final bool previewUnavailable;
 
   @override
   Widget build(BuildContext context) => AlertDialog(
@@ -682,13 +700,27 @@ class _ApprovalDialog extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (request.title != request.toolName) Text(request.toolName),
+            if (request.title.isNotEmpty && request.title != request.toolName)
+              Text(request.toolName),
             if (request.reason case final reason? when reason.isNotEmpty)
               SelectableText(reason),
-            if (request.preview case TextPreview(:final text))
+            if (previewUnavailable)
+              Text(
+                _text(
+                  context,
+                  'The host preview is unavailable. You can only deny this request.',
+                  '无法显示主机预览。你只能拒绝此请求。',
+                ),
+              ),
+            if (request.preview case final preview?)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
-                child: SelectableText(text),
+                child: SelectionArea(
+                  child: ApprovalPreviewView(
+                    preview: preview,
+                    showDiffLineNumbers: true,
+                  ),
+                ),
               ),
           ],
         ),
@@ -702,10 +734,12 @@ class _ApprovalDialog extends StatelessWidget {
         child: Text(_text(context, 'Deny', '拒绝')),
       ),
       OutlinedButton(
-        onPressed: () => Navigator.pop(
-          context,
-          const ApprovalAnswer(ApprovalDecision.allowOnce),
-        ),
+        onPressed: previewUnavailable
+            ? null
+            : () => Navigator.pop(
+                context,
+                const ApprovalAnswer(ApprovalDecision.allowOnce),
+              ),
         child: Text(_text(context, 'Allow once', '仅允许一次')),
       ),
     ],

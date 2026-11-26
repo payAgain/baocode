@@ -60,7 +60,6 @@ import '../../usage/usage_ledger.dart';
 import '../chat_session.dart';
 import '../widgets/code_citation.dart' show CodeColorizer;
 import '../widgets/plan_start.dart';
-import '../chat_column.dart';
 import '../composer/composer_files.dart';
 import '../composer/file_drag.dart';
 import 'file_link.dart';
@@ -68,18 +67,12 @@ import 'file_open.dart';
 import 'file_preview.dart';
 import 'git_changes.dart';
 import 'side_panel_controller.dart';
+import 'side_panel_layout.dart';
 import 'side_panel_section_bar.dart';
 import '../../theme/svg_icons.dart';
 import '../../remote/remote_location.dart';
 import '../../remote/ports_view.dart';
 import 'chat_layout_picker.dart';
-
-/// [child] (the conversations) and, at its right (its left, as [panel] is
-/// [AgentSidePanel.atLeft]) while [panel] shows, the side panel [builder]
-/// builds: beside it, its edge toward them dragged to make it wider or
-/// narrower (a double click gives back its width), narrower
-/// where the conversations would have less than [minChat]; over it, where
-/// they would beside it at its least.
 
 /// This machine's files, for what is shown as a file (one service: the
 /// preview reads its file anew when it changes).
@@ -89,7 +82,13 @@ final IdeFileService _localFiles = IdeFileService(p.current);
 /// window's) shows its terminals: there alone.
 final _pageHosts = TerminalHosts();
 
-class AgentSidePanelArea extends StatefulWidget {
+/// [child] (the conversations) and, at its right (its left, as [panel] is
+/// [AgentSidePanel.atLeft]) while [panel] shows, the side panel [builder]
+/// builds: beside it, its edge toward them dragged to make it wider or
+/// narrower (a double click gives back its width), narrower
+/// where the conversations would have less than [minChat]; over it, where
+/// they would beside it at its least.
+class AgentSidePanelArea extends StatelessWidget {
   const AgentSidePanelArea({
     super.key,
     required this.panel,
@@ -144,15 +143,15 @@ class AgentSidePanelArea extends StatefulWidget {
   final Widget child;
 
   /// The least the conversations keep beside it.
-  static const minChat = 360.0;
+  static const minChat = SidePanelLayout.minChat;
 
   /// The gap between it and the conversations' cards, which takes the drag.
-  static const sashWidth = Islands.gap;
+  static const sashWidth = SidePanelLayout.sashWidth;
 
   /// How long the room is short before it goes over the conversations,
   /// while it is coming ([roomComing]) or the window opens: longer than
   /// the window's sidebar takes to give way.
-  static const overlayDelay = Duration(milliseconds: 260);
+  static const overlayDelay = SidePanelLayout.overlayDelay;
 
   /// How far in from the right [rail] is, and from the conversation's
   /// card's top: its content's inset, clear of the history's scrollbar.
@@ -163,353 +162,41 @@ class AgentSidePanelArea extends StatefulWidget {
   static const railInset = railRight + SidePanelRail.width + 8;
 
   @override
-  State<AgentSidePanelArea> createState() => _AgentSidePanelAreaState();
-}
-
-class _AgentSidePanelAreaState extends State<AgentSidePanelArea> {
-  bool _dragging = false;
-  ({double x, double width})? _dragStart;
-
-  /// Whether it is over the conversations: asked for while the room is
-  /// short for it beside them, once short for longer than [overlayDelay].
-  /// Short a while only (the window's sidebar giving way to it, which takes
-  /// its animation; a window opening), it stays beside them, narrower, not
-  /// covering the window for a moment.
-  bool _overlay = false;
-
-  /// Whether it gave way to the conversations: shown beside them, the room
-  /// went short (the window or the pane made narrower, a window opening
-  /// narrow), and it was not asked for since. Out of their way, as hidden,
-  /// until the room is back (beside them again) or it is asked for (over
-  /// them). See [AgentSidePanel.gaveWay].
-  bool _gaveWay = false;
-
-  /// Whether it was asked for since the room went short: over the
-  /// conversations then, not out of their way.
-  bool _askedShort = false;
-
-  /// [AgentSidePanel.asks] (its pane's) as last seen.
-  late int _asksSeen = _asks;
-
-  int get _asks => switch (widget.conversation) {
-    final conversation? => _panel.asksIn(conversation),
-    null => _panel.asks,
-  };
-
-  /// Runs while the room is short: settled once it ends.
-  Timer? _short;
-
-  /// Runs a while from when it was built: a window opening gets its size
-  /// meanwhile.
-  Timer? _young;
-
-  /// [short]: whether it is wanted, and the room short for it beside the
-  /// conversations.
-  void _roomShort(bool short) {
-    final asks = _asks;
-    final asked = asks != _asksSeen;
-    _asksSeen = asks;
-    if (!short) {
-      _short?.cancel();
-      _short = null;
-      _overlay = false;
-      _askedShort = false;
-      _setGaveWay(false);
-      return;
-    }
-    if (asked) _askedShort = true;
-    if (_overlay) return;
-    if (_gaveWay) {
-      // Asked for again: over them, as asked.
-      if (_askedShort) {
-        _setGaveWay(false);
-        _overlay = true;
-      }
-      return;
-    }
-    if (_short != null) return;
-    // Short for good: settled at once, not beside them for a moment.
-    if (!widget.roomComing && _young == null) return _settle();
-    _short = Timer(AgentSidePanelArea.overlayDelay, () {
-      _short = null;
-      if (mounted) setState(_settle);
-    });
-  }
-
-  /// The room short for good: over the conversations where it was asked
-  /// for meanwhile, else out of their way.
-  void _settle() {
-    if (_askedShort) {
-      _overlay = true;
-    } else {
-      _setGaveWay(true);
-    }
-  }
-
-  void _setGaveWay(bool gaveWay) {
-    if (gaveWay == _gaveWay) return;
-    _gaveWay = gaveWay;
-    _tellGaveWay();
-  }
-
-  /// [_gaveWay] to the panel, for its toggles: after the frame, as it is
-  /// laid out.
-  void _tellGaveWay() {
-    final panel = _panel;
-    final conversation = widget.conversation;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      panel.setGaveWay(conversation, mounted && _gaveWay);
-    });
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _young = Timer(AgentSidePanelArea.overlayDelay, () => _young = null);
-  }
-
-  @override
-  void dispose() {
-    if (_gaveWay) _tellGaveWay();
-    _short?.cancel();
-    _young?.cancel();
-    _rail.dispose();
-    super.dispose();
-  }
-
-  /// The rail, for what is under it (see [ChatColumnInset.rail]).
-  final ChatRail _rail = ChatRail();
-
-  AgentSidePanel get _panel => widget.panel;
-
-  /// Whether it shows: the pane's, or the window's.
-  bool get _shownHere => switch (widget.conversation) {
-    final conversation? => _panel.shownIn(conversation),
-    null => _panel.shown,
-  };
-
-  FocusNode get _focusNode => switch (widget.conversation) {
-    final conversation? => _panel.focusNodeOf(conversation),
-    null => _panel.focusNode,
-  };
-
-  void _hide() => switch (widget.conversation) {
-    final conversation? => _panel.setShownIn(conversation, false),
-    null => _panel.hide(),
-  };
-
-  /// The widest it shows in [room]: beside the conversations, what they
-  /// leave at their least; over them, all but a strip of them.
-  double _most(double room) => _overlay
-      ? math.max(0.0, room - 48)
-      : math.max(
-          0.0,
-          room - AgentSidePanelArea.minChat - AgentSidePanelArea.sashWidth,
-        );
-
-  /// How wide it shows in [room]: as wide as it was made, as far as there
-  /// is room for.
-  double _shownWidth(double room) => math.min(_panel.width, _most(room));
-
-  @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: _panel,
-    builder: (context, _) => LayoutBuilder(
-      builder: (context, constraints) {
-        final room = constraints.maxWidth;
-        final wanted = _shownHere && !widget.hidden;
-        // Where it cannot be beside the conversations at its least, out of
-        // their way, or over them as asked for; else beside them, narrower
-        // than it would be where they need the room.
-        _roomShort(
-          wanted && room - AgentSidePanel.minWidth < AgentSidePanelArea.minChat,
-        );
-        final shown = wanted && !_gaveWay;
-        final overlay = _overlay;
-        final atLeft = _panel.atLeft;
-        final beside = shown && !overlay;
-        final rail = !shown && widget.rail != null;
-        final width = _shownWidth(room);
-        // Each child keyed: the conversations and the panel are never
-        // built anew as the rail, the scrim or the drag's cursor come and
-        // go (the panel built anew mid-drag would drop the drag, and
-        // leave the cursor's cover over the window).
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            Positioned(
-              key: const ValueKey('chat'),
-              top: 0,
-              bottom: 0,
-              // Up to the gap between the two, where the sash is.
-              left: beside && atLeft ? width + AgentSidePanelArea.sashWidth : 0,
-              right: beside && !atLeft
-                  ? width + AgentSidePanelArea.sashWidth
-                  : 0,
-              child: ChatColumnInset(
-                right: rail && !atLeft ? AgentSidePanelArea.railInset : 0,
-                left: rail && atLeft ? AgentSidePanelArea.railInset : 0,
-                rail: rail ? _rail : null,
-                child: widget.child,
-              ),
-            ),
-            if (rail)
-              Positioned(
-                key: const ValueKey('rail'),
-                left: atLeft ? AgentSidePanelArea.railRight : null,
-                right: atLeft ? null : AgentSidePanelArea.railRight,
-                top: widget.railTop ?? AgentSidePanelArea.defaultRailTop,
-                child: ChatRailReport(rail: _rail, child: widget.rail!),
-              ),
-            if (shown) ...[
-              if (overlay)
-                Positioned.fill(
-                  key: const ValueKey('scrim'),
-                  child: GestureDetector(
-                    onTap: _hide,
-                    child: const ColoredBox(color: Color(0x33000000)),
-                  ),
-                ),
-              Positioned(
-                key: const ValueKey('panel'),
-                top: 0,
-                // Over the terminals' card, which has the conversation's
-                // row under it: down to the card's foot, as it is.
-                bottom: overlay || IslandFootHosted.of(context)
-                    ? 0
-                    : widget.bottom,
-                left: atLeft ? 0 : null,
-                right: atLeft ? null : 0,
-                width: width + AgentSidePanelArea.sashWidth,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    // Over the conversations, on the window's color opaque,
-                    // its gap too.
-                    color: overlay ? AppColors.background : null,
-                    boxShadow: overlay
-                        ? [
-                            BoxShadow(
-                              color: themeColors['widget.shadow'],
-                              blurRadius: 24,
-                            ),
-                          ]
-                        : null,
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    // The sash on the side of the conversations.
-                    textDirection: atLeft
-                        ? TextDirection.rtl
-                        : TextDirection.ltr,
-                    children: [
-                      _sash(atLeft: atLeft),
-                      Expanded(
-                        // Never laid out narrower than its least: squeezed
-                        // a while (the sidebar giving way), what has no
-                        // room is cut off, as the sidebar's own is.
-                        child: ClipRect(
-                          child: OverflowBox(
-                            alignment: Alignment.centerLeft,
-                            minWidth: math.max(width, AgentSidePanel.minWidth),
-                            maxWidth: math.max(width, AgentSidePanel.minWidth),
-                            child: _content(context),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              // The resize cursor wherever the pointer goes while dragging;
-              // a press there (a drag whose end was lost) ends it.
-              if (_dragging)
-                Positioned.fill(
-                  key: const ValueKey('drag-cursor'),
-                  child: Listener(
-                    behavior: HitTestBehavior.translucent,
-                    onPointerDown: (_) => _endDrag(),
-                    child: const MouseRegion(
-                      cursor: SystemMouseCursors.resizeColumn,
-                    ),
-                  ),
-                ),
-            ],
-          ],
-        );
-      },
-    ),
-  );
-
-  /// What it shows, beside its sash.
-  Widget _content(BuildContext context) =>
-      // A click anywhere in it puts the focus there (on what takes it, else
-      // on the panel), for its keys.
-      Listener(
-        onPointerDown: (_) {
-          if (!_focusNode.hasFocus) {
-            _focusNode.requestFocus();
-          }
-        },
-        child: Focus(
-          focusNode: _focusNode,
-          // On the window's color, its card on it (see
-          // [AgentSidePanelView]).
-          child: widget.builder(context),
-        ),
+    listenable: panel,
+    builder: (context, _) {
+      final conversation = this.conversation;
+      return SidePanelLayout(
+        wanted:
+            !hidden &&
+            (conversation == null ? panel.shown : panel.shownIn(conversation)),
+        requests: conversation == null
+            ? panel.asks
+            : panel.asksIn(conversation),
+        width: panel.width,
+        minWidth: AgentSidePanel.minWidth,
+        defaultWidth: AgentSidePanel.defaultWidth,
+        maxWidth: AgentSidePanel.maxWidth,
+        onWidthChanged: (width) => panel.width = width,
+        onResizeEnd: panel.save,
+        onClose: conversation == null
+            ? panel.hide
+            : () => panel.setShownIn(conversation, false),
+        onGaveWayChanged: (value) => panel.setGaveWay(conversation, value),
+        focusNode: conversation == null
+            ? panel.focusNode
+            : panel.focusNodeOf(conversation),
+        atLeft: panel.atLeft,
+        roomComing: roomComing,
+        bottom: bottom,
+        rail: rail,
+        railTop: railTop ?? defaultRailTop,
+        railInset: railInset,
+        mainBuilder: (_, _) => child,
+        panelBuilder: builder,
       );
-
-  /// The strip on the panel's edge beside the conversations: its left,
-  /// or its right [atLeft].
-  Widget _sash({required bool atLeft}) => MouseRegion(
-    cursor: SystemMouseCursors.resizeColumn,
-    child: GestureDetector(
-      key: const ValueKey('side-panel-sash'),
-      behavior: HitTestBehavior.opaque,
-      dragStartBehavior: DragStartBehavior.down,
-      // From the width it shows, not the one it was made: narrower where
-      // the room is short, the sash would wait for the pointer to cover the
-      // difference before it moved.
-      onHorizontalDragStart: (details) => setState(() {
-        _dragging = true;
-        _dragStart = (
-          x: details.globalPosition.dx,
-          width: _shownWidth(context.size?.width ?? double.infinity),
-        );
-      }),
-      onHorizontalDragUpdate: (details) {
-        final start = _dragStart;
-        if (start == null) return;
-        final room = context.size?.width ?? double.infinity;
-        final moved = details.globalPosition.dx - start.x;
-        // No wider than it shows: past that the sash waits, and follows
-        // again once the pointer is back.
-        _panel.width = math.min(
-          atLeft ? start.width + moved : start.width - moved,
-          math.max(AgentSidePanel.minWidth, _most(room)),
-        );
-      },
-      onHorizontalDragEnd: (_) => _endDrag(),
-      onHorizontalDragCancel: _endDrag,
-      onDoubleTap: () {
-        _panel.width = AgentSidePanel.defaultWidth;
-        _panel.save();
-      },
-      // The gap alone at rest; dragged, the IDE's sash in it.
-      child: SizedBox(
-        width: AgentSidePanelArea.sashWidth,
-        child: Islands.sashLine(dragging: _dragging, axis: Axis.horizontal),
-      ),
-    ),
+    },
   );
-
-  void _endDrag() {
-    if (!mounted) return;
-    setState(() {
-      _dragging = false;
-      _dragStart = null;
-    });
-    _panel.save();
-  }
 }
 
 /// The side panel for [session]'s conversation: its pages (the project's

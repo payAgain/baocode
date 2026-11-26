@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../chat/floating/floating_layer.dart';
 import '../chat/floating/floating_placement.dart';
@@ -67,6 +68,7 @@ class SidebarMenu extends StatefulWidget {
 
 class SidebarMenuState extends State<SidebarMenu> {
   final Object _tapRegion = Object();
+  FocusNode? _returnFocus;
   bool _open = false;
 
   /// Where to open, in the child's coordinates; null for under it.
@@ -88,6 +90,7 @@ class SidebarMenuState extends State<SidebarMenu> {
       return;
     }
     final box = context.findRenderObject() as RenderBox?;
+    if (!_open) _returnFocus = FocusManager.instance.primaryFocus;
     setState(() {
       _open = true;
       _at = globalPosition == null || box == null
@@ -102,7 +105,14 @@ class SidebarMenuState extends State<SidebarMenu> {
   void close() {
     if (!_open) return;
     setState(() => _open = false);
+    _returnFocus = null;
     FloatingRegistry.closePopover(this);
+  }
+
+  void _dismissFromKeyboard() {
+    final before = _returnFocus;
+    close();
+    if (before?.context != null) before!.requestFocus();
   }
 
   void _select(SidebarMenuItem item) {
@@ -134,45 +144,75 @@ class SidebarMenuState extends State<SidebarMenu> {
 
   Widget _buildMenu(BuildContext context) {
     final items = widget.items();
+    final first = items.indexWhere((item) => !item.divider);
     final colors = themeColors;
-    return Container(
-      width: widget.width,
-      padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(
-        color: colors['menu.background'],
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: colors['menu.border']),
-        boxShadow: [
-          BoxShadow(
-            color: colors['widget.shadow'],
-            blurRadius: 24,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (final item in items)
-            if (item.divider)
-              Container(
-                height: 1,
-                margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
-                color: colors['menu.separatorBackground'],
-              )
-            else
-              _MenuRow(item: item, onTap: () => _select(item)),
-        ],
+    return FocusScope(
+      includeSemantics: false,
+      onKeyEvent: (node, event) {
+        if (event is! KeyDownEvent) return KeyEventResult.ignored;
+        switch (event.logicalKey) {
+          case LogicalKeyboardKey.escape:
+            _dismissFromKeyboard();
+          case LogicalKeyboardKey.arrowDown:
+            node.nextFocus();
+          case LogicalKeyboardKey.arrowUp:
+            node.previousFocus();
+          default:
+            return KeyEventResult.ignored;
+        }
+        return KeyEventResult.handled;
+      },
+      child: Container(
+        width: widget.width,
+        padding: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: colors['menu.background'],
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: colors['menu.border']),
+          boxShadow: [
+            BoxShadow(
+              color: colors['widget.shadow'],
+              blurRadius: 24,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (final (index, item) in items.indexed)
+              if (item.divider)
+                Container(
+                  height: 1,
+                  margin: const EdgeInsets.symmetric(
+                    vertical: 4,
+                    horizontal: 4,
+                  ),
+                  color: colors['menu.separatorBackground'],
+                )
+              else
+                _MenuRow(
+                  item: item,
+                  autofocus: index == first,
+                  onTap: () => _select(item),
+                ),
+          ],
+        ),
       ),
     );
   }
 }
 
 class _MenuRow extends StatefulWidget {
-  const _MenuRow({required this.item, required this.onTap});
+  const _MenuRow({
+    required this.item,
+    required this.autofocus,
+    required this.onTap,
+  });
 
   final SidebarMenuItem item;
+  final bool autofocus;
   final VoidCallback onTap;
 
   @override
@@ -181,6 +221,7 @@ class _MenuRow extends StatefulWidget {
 
 class _MenuRowState extends State<_MenuRow> {
   bool _hovered = false;
+  bool _focused = false;
 
   @override
   Widget build(BuildContext context) {
@@ -189,63 +230,81 @@ class _MenuRowState extends State<_MenuRow> {
     final colors = themeColors;
     final color = item.destructive
         ? colors['errorForeground']
-        : colors[_hovered ? 'menu.selectionForeground' : 'menu.foreground'];
-    final outline = _hovered ? colors.get('menu.selectionBorder') : null;
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: widget.onTap,
-        child: Container(
-          height: 28,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          decoration: BoxDecoration(
-            color: _hovered
-                ? colors['menu.selectionBackground']
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(5),
-          ),
-          foregroundDecoration: outline == null
-              ? null
-              : BoxDecoration(
-                  border: Border.all(color: outline),
-                  borderRadius: BorderRadius.circular(5),
+        : colors[(_hovered || _focused)
+              ? 'menu.selectionForeground'
+              : 'menu.foreground'];
+    final active = _hovered || _focused;
+    final outline = active ? colors.get('menu.selectionBorder') : null;
+    return FocusableActionDetector(
+      autofocus: widget.autofocus,
+      onShowFocusHighlight: (focused) => setState(() => _focused = focused),
+      actions: {
+        ActivateIntent: CallbackAction<ActivateIntent>(
+          onInvoke: (_) {
+            widget.onTap();
+            return null;
+          },
+        ),
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: Container(
+            height: 28,
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            decoration: BoxDecoration(
+              color: active
+                  ? colors['menu.selectionBackground']
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(5),
+            ),
+            foregroundDecoration: outline == null
+                ? null
+                : BoxDecoration(
+                    border: Border.all(color: outline),
+                    borderRadius: BorderRadius.circular(5),
+                  ),
+            child: Row(
+              children: [
+                if (item.leading case final leading?) ...[
+                  SizedBox.square(dimension: 14, child: Center(child: leading)),
+                  const SizedBox(width: 8),
+                ] else if (item.icon case final icon?) ...[
+                  Icon(
+                    icon,
+                    size: 14,
+                    color: item.destructive ? color : AppColors.textMuted,
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                Expanded(
+                  child: Text(
+                    item.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: color, fontSize: 12.5),
+                  ),
                 ),
-          child: Row(
-            children: [
-              if (item.leading case final leading?) ...[
-                SizedBox.square(dimension: 14, child: Center(child: leading)),
-                const SizedBox(width: 8),
-              ] else if (item.icon case final icon?) ...[
-                Icon(
-                  icon,
-                  size: 14,
-                  color: item.destructive ? color : AppColors.textMuted,
-                ),
-                const SizedBox(width: 8),
+                if (item.detail case final detail?) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    detail,
+                    style: TextStyle(
+                      color: AppColors.textFaint,
+                      fontSize: 11.5,
+                    ),
+                  ),
+                ],
+                if (item.checked) ...[
+                  const SizedBox(width: 6),
+                  Icon(Icons.check_rounded, size: 14, color: color),
+                ],
               ],
-              Expanded(
-                child: Text(
-                  item.label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: color, fontSize: 12.5),
-                ),
-              ),
-              if (item.detail case final detail?) ...[
-                const SizedBox(width: 8),
-                Text(
-                  detail,
-                  style: TextStyle(color: AppColors.textFaint, fontSize: 11.5),
-                ),
-              ],
-              if (item.checked) ...[
-                const SizedBox(width: 6),
-                Icon(Icons.check_rounded, size: 14, color: color),
-              ],
-            ],
+            ),
           ),
         ),
       ),

@@ -43,6 +43,7 @@ import 'git_review.dart';
 import 'git_repository.dart';
 import 'git_service.dart';
 import 'ide_git_list_tree_switch.dart';
+import 'ide_git_presentation.dart';
 import 'ide_git_log_view.dart' show IdeGitDetailsFold, IdeGitDiffFile;
 import '../../workspace/islands.dart';
 import 'ide_git_merge_dialog.dart';
@@ -1693,64 +1694,15 @@ class IdeGitCommitPanelState extends State<IdeGitCommitPanel>
   /// JetBrains' Commit and Stash tabs; under the Git log's table, Fold at
   /// their right. [folded]: all there is of it, a press on it unfolding it.
   Widget _tabs(BuildContext context, {bool folded = false}) {
-    final l10n = context.l10n;
     final fold = _fold;
-    Widget tab(String label, bool stash) => _PanelTab(
-      label: label,
-      selected: _stashTab == stash,
-      onTap: () {
+    return IdeGitCommitTabs(
+      stashSelected: _stashTab,
+      folded: folded,
+      onToggleFold: fold?.toggle,
+      onSelect: (stash) {
         setState(() => _stashTab = stash);
         if (folded) fold?.toggle();
       },
-    );
-    // A segmented control, as the panel's views'; not islands, tabs over a
-    // line.
-    final islands = Islands.on(context);
-    final row = Container(
-      height: folded
-          ? IdeGitCommitPanel.foldedHeight
-          : islands
-          ? 10 + IslandSegment.height + 4
-          : 28,
-      padding: !islands
-          ? const EdgeInsets.symmetric(horizontal: 6)
-          : folded
-          ? const EdgeInsets.symmetric(horizontal: Islands.inset)
-          : const EdgeInsets.fromLTRB(Islands.inset, 10, Islands.inset, 4),
-      decoration: islands
-          ? null
-          : BoxDecoration(
-              border: Border(
-                bottom: BorderSide(
-                  color: themeColors.get('panel.border') ?? Colors.transparent,
-                ),
-              ),
-            ),
-      child: Row(
-        crossAxisAlignment: islands
-            ? CrossAxisAlignment.center
-            : CrossAxisAlignment.stretch,
-        children: [
-          tab(l10n.gitCommitTab, false),
-          if (islands) const SizedBox(width: 2),
-          tab(l10n.gitStashTab, true),
-          if (fold != null) ...[
-            const Spacer(),
-            Center(
-              child: _FoldButton(folded: folded, onTap: fold.toggle),
-            ),
-          ],
-        ],
-      ),
-    );
-    if (!folded) return row;
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: fold?.toggle,
-        child: row,
-      ),
     );
   }
 
@@ -2199,24 +2151,16 @@ class IdeGitCommitPanelState extends State<IdeGitCommitPanel>
     final relative = paths.relative(resource.path, from: git.service.root);
     final directory = paths.dirname(relative);
     final status = resource.status;
-    return Row(
-      children: [
-        if (status == IdeGitStatus.ignored &&
-            _ignoredFolders.contains(resource.path))
-          FolderIcon(resource.path, expanded: false)
-        else
-          FileIcon(resource.path),
-        const SizedBox(width: 6),
-        Expanded(
-          child: IdeResourceLabel(
-            name: paths.basename(resource.path),
-            // JetBrains' colors: the name in its status's.
-            nameColor: status.color,
-            description: byDirectory || directory == '.' ? null : directory,
-            strikeThrough: status.strikeThrough,
-          ),
-        ),
-      ],
+    return IdeGitFileLabel(
+      icon:
+          status == IdeGitStatus.ignored &&
+              _ignoredFolders.contains(resource.path)
+          ? FolderIcon(resource.path, expanded: false)
+          : FileIcon(resource.path),
+      name: paths.basename(resource.path),
+      nameColor: status.color,
+      description: byDirectory || directory == '.' ? null : directory,
+      strikeThrough: status.strikeThrough,
     );
   }
 
@@ -2594,206 +2538,165 @@ class IdeGitCommitPanelState extends State<IdeGitCommitPanel>
     final checked = [for (final git in _repositories) ..._toCommit(git)].length;
     final busy = _committing || _repositories.any((git) => git.busy);
     final branch = git?.state?.head.branch;
-    return Padding(
-      padding: EdgeInsets.fromLTRB(_inset, 6, _inset, _inset),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              _Check(
-                value: _session.amend,
-                onTap: () => unawaited(_setAmend(!_session.amend)),
-              ),
-              const SizedBox(width: 4),
-              GestureDetector(
-                onTap: () => unawaited(_setAmend(!_session.amend)),
-                child: Text(
-                  l10n.gitCommitAmend,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: IdeListColors.foreground,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 2),
-              Builder(
-                builder: (context) => IdeActionButton(
-                  icon: Codicons.settingsGear,
-                  tooltip: l10n.gitCommitOptions,
-                  size: 20,
-                  iconSize: 14,
-                  onPressed: () {
-                    final box = context.findRenderObject() as RenderBox;
-                    unawaited(
-                      _commitOptions(
-                        box.localToGlobal(box.size.bottomLeft(Offset.zero)),
-                      ),
-                    );
-                  },
-                ),
-              ),
-              // What the options change, as a reminder.
-              if ([
-                    if (_session.author case final author?)
-                      l10n.gitCommitAuthorIs(author),
-                    if (_session.signOff) l10n.gitCommitSignedOff,
-                    if (!_session.runHooks) l10n.gitCommitNoHooks,
-                  ].join(' · ')
-                  case final options when options.isNotEmpty)
-                Flexible(
-                  flex: 3,
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: 4),
-                    child: Text(
-                      options,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: IdeListColors.description,
-                      ),
-                    ),
-                  ),
-                ),
-              const Spacer(),
-              if (branch != null)
-                Flexible(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Codicons.gitBranch,
-                        size: 13,
-                        color: IdeListColors.description,
-                      ),
-                      const SizedBox(width: 3),
-                      Flexible(
-                        child: Text(
-                          branch,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: IdeListColors.description,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-          ),
-          if (_reviewBox(context) case final box?) ...[
-            const SizedBox(height: 6),
-            box,
-          ],
-          const SizedBox(height: 6),
-          Expanded(
-            child: LayoutBuilder(
-              builder: (context, constraints) => IdeInputBox(
-                key: _messageKey,
-                controller: _session.message,
-                focusNode: _inputFocus,
-                semanticsLabel: l10n.gitCommitMessage,
-                placeholder: l10n.gitCommitMessage,
-                // As many lines as fit.
-                minLines: lines(constraints.maxHeight),
-                maxLines: lines(constraints.maxHeight),
-                lineHeight: 20,
-                padding: EdgeInsets.symmetric(
-                  horizontal: _islands ? 10 : 6,
-                  vertical: 4,
-                ),
-                radius: _radius,
-                validation: _shownValidation,
-                floatingValidation: true,
-                shortcuts: {
-                  const SingleActivator(
-                    LogicalKeyboardKey.keyM,
-                    control: true,
-                  ): () =>
-                      unawaited(_messageHistory()),
-                  const SingleActivator(
-                    LogicalKeyboardKey.enter,
-                    control: true,
-                  ): () =>
-                      unawaited(_commit()),
-                  const SingleActivator(
-                    LogicalKeyboardKey.enter,
-                    meta: true,
-                  ): () =>
-                      unawaited(_commit()),
-                },
-                toggles: [
-                  if (widget.commitMessage != null)
-                    IdeActionButton(
-                      icon: _session.reviewing == null
-                          ? Codicons.checklist
-                          : Codicons.debugStop,
-                      tooltip: _session.reviewing == null
-                          ? l10n.gitReviewWithAi
-                          : l10n.gitReviewStop,
-                      size: 20,
-                      onPressed: () => unawaited(_review()),
-                    ),
-                  IdeActionButton(
-                    icon: Codicons.history,
-                    tooltip: l10n.gitCommitMessageHistory,
-                    size: 20,
-                    onPressed: () => unawaited(_messageHistory()),
-                  ),
-                ],
+    return IdeGitCommitForm(
+      expandMessage: true,
+      controls: [
+        Row(
+          children: [
+            _Check(
+              value: _session.amend,
+              onTap: () => unawaited(_setAmend(!_session.amend)),
+            ),
+            const SizedBox(width: 4),
+            GestureDetector(
+              onTap: () => unawaited(_setAmend(!_session.amend)),
+              child: Text(
+                l10n.gitCommitAmend,
+                style: TextStyle(fontSize: 12, color: IdeListColors.foreground),
               ),
             ),
-          ),
-          const SizedBox(height: 8),
-          // Generate Commit Message as its icon alone where its label
-          // leaves the others no room.
-          GiveWayRow(
-            children: [
-              if (widget.commitMessage != null) ...[
-                GiveWay(
-                  _generateButton(context, labeled: true),
-                  priority: 0,
-                  compact: _generateButton(context, labeled: false),
-                ),
-                const GiveWay(SizedBox(width: 8)),
-              ],
-              GiveWay(
-                IdeButton(
-                  label: l10n.gitCommitButton,
-                  padding: _buttonPad,
-                  radius: _radius,
-                  onPressed: busy ? null : () => unawaited(_commit()),
-                ),
+            const SizedBox(width: 2),
+            Builder(
+              builder: (context) => IdeActionButton(
+                icon: Codicons.settingsGear,
+                tooltip: l10n.gitCommitOptions,
+                size: 20,
+                iconSize: 14,
+                onPressed: () {
+                  final box = context.findRenderObject() as RenderBox;
+                  unawaited(
+                    _commitOptions(
+                      box.localToGlobal(box.size.bottomLeft(Offset.zero)),
+                    ),
+                  );
+                },
               ),
-              const GiveWay(SizedBox(width: 8)),
-              GiveWay(
-                IdeButton(
-                  label: l10n.gitCommitAndPush,
-                  secondary: true,
-                  padding: _buttonPad,
-                  radius: _radius,
-                  onPressed: busy ? null : () => unawaited(_commit(push: true)),
-                ),
-              ),
-              const GiveWay(SizedBox(width: 8)),
-              GiveWay.fill(
-                Text(
-                  total == 0 ? '' : l10n.gitCommitSelected(checked, total),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.end,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: IdeListColors.description,
+            ),
+            // What the options change, as a reminder.
+            if ([
+                  if (_session.author case final author?)
+                    l10n.gitCommitAuthorIs(author),
+                  if (_session.signOff) l10n.gitCommitSignedOff,
+                  if (!_session.runHooks) l10n.gitCommitNoHooks,
+                ].join(' · ')
+                case final options when options.isNotEmpty)
+              Flexible(
+                flex: 3,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Text(
+                    options,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: IdeListColors.description,
+                    ),
                   ),
                 ),
               ),
-            ],
-          ),
+            const Spacer(),
+            if (branch != null)
+              Flexible(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Codicons.gitBranch,
+                      size: 13,
+                      color: IdeListColors.description,
+                    ),
+                    const SizedBox(width: 3),
+                    Flexible(
+                      child: Text(
+                        branch,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: IdeListColors.description,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+        if (_reviewBox(context) case final box?) ...[
+          const SizedBox(height: 6),
+          box,
         ],
+      ],
+      message: LayoutBuilder(
+        builder: (context, constraints) => IdeInputBox(
+          key: _messageKey,
+          controller: _session.message,
+          focusNode: _inputFocus,
+          semanticsLabel: l10n.gitCommitMessage,
+          placeholder: l10n.gitCommitMessage,
+          // As many lines as fit.
+          minLines: lines(constraints.maxHeight),
+          maxLines: lines(constraints.maxHeight),
+          lineHeight: 20,
+          padding: EdgeInsets.symmetric(
+            horizontal: _islands ? 10 : 6,
+            vertical: 4,
+          ),
+          radius: _radius,
+          validation: _shownValidation,
+          floatingValidation: true,
+          shortcuts: {
+            const SingleActivator(LogicalKeyboardKey.keyM, control: true): () =>
+                unawaited(_messageHistory()),
+            const SingleActivator(
+              LogicalKeyboardKey.enter,
+              control: true,
+            ): () =>
+                unawaited(_commit()),
+            const SingleActivator(LogicalKeyboardKey.enter, meta: true): () =>
+                unawaited(_commit()),
+          },
+          toggles: [
+            if (widget.commitMessage != null)
+              IdeActionButton(
+                icon: _session.reviewing == null
+                    ? Codicons.checklist
+                    : Codicons.debugStop,
+                tooltip: _session.reviewing == null
+                    ? l10n.gitReviewWithAi
+                    : l10n.gitReviewStop,
+                size: 20,
+                onPressed: () => unawaited(_review()),
+              ),
+            IdeActionButton(
+              icon: Codicons.history,
+              tooltip: l10n.gitCommitMessageHistory,
+              size: 20,
+              onPressed: () => unawaited(_messageHistory()),
+            ),
+          ],
+        ),
+      ),
+      // Generate Commit Message as its icon alone where its label
+      // leaves the others no room.
+      actions: IdeGitCommitActions(
+        onCommit: busy ? null : () => unawaited(_commit()),
+        onPush: busy ? null : () => unawaited(_commit(push: true)),
+        leading: widget.commitMessage == null
+            ? null
+            : GiveWay(
+                _generateButton(context, labeled: true),
+                priority: 0,
+                compact: _generateButton(context, labeled: false),
+              ),
+        trailing: Text(
+          total == 0 ? '' : l10n.gitCommitSelected(checked, total),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.end,
+          style: TextStyle(fontSize: 12, color: IdeListColors.description),
+        ),
       ),
     );
   }
@@ -3022,6 +2925,90 @@ class _DividerState extends State<_Divider> {
 
 /// A tab of the panel's: Commit, Stash.
 /// Fold, or Unfold: the panel to its tabs' row, or back.
+/// Commit / Stash navigation. Repositories and operations stay with the caller.
+class IdeGitCommitTabs extends StatelessWidget {
+  const IdeGitCommitTabs({
+    super.key,
+    required this.stashSelected,
+    required this.onSelect,
+    this.folded = false,
+    this.onToggleFold,
+  });
+
+  final bool stashSelected;
+  final ValueChanged<bool> onSelect;
+  final bool folded;
+  final VoidCallback? onToggleFold;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final islands = Islands.on(context);
+    Widget tab(String label, bool stash) {
+      void select() => onSelect(stash);
+      return Semantics(
+        button: true,
+        selected: stashSelected == stash,
+        child: IdeGitKeyboardAction(
+          onActivate: select,
+          child: _PanelTab(
+            label: label,
+            selected: stashSelected == stash,
+            onTap: select,
+          ),
+        ),
+      );
+    }
+
+    final row = Container(
+      height: folded
+          ? IdeGitCommitPanel.foldedHeight
+          : islands
+          ? 10 + IslandSegment.height + 4
+          : 28,
+      padding: !islands
+          ? const EdgeInsets.symmetric(horizontal: 6)
+          : folded
+          ? const EdgeInsets.symmetric(horizontal: Islands.inset)
+          : const EdgeInsets.fromLTRB(Islands.inset, 10, Islands.inset, 4),
+      decoration: islands
+          ? null
+          : BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: themeColors.get('panel.border') ?? Colors.transparent,
+                ),
+              ),
+            ),
+      child: Row(
+        crossAxisAlignment: islands
+            ? CrossAxisAlignment.center
+            : CrossAxisAlignment.stretch,
+        children: [
+          tab(l10n.gitCommitTab, false),
+          if (islands) const SizedBox(width: 2),
+          tab(l10n.gitStashTab, true),
+          if (onToggleFold case final toggle?) ...[
+            const Spacer(),
+            Center(
+              child: _FoldButton(folded: folded, onTap: toggle),
+            ),
+          ],
+        ],
+      ),
+    );
+    if (!folded) return row;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onToggleFold,
+        child: row,
+      ),
+    );
+  }
+}
+
 class _FoldButton extends StatefulWidget {
   const _FoldButton({required this.folded, required this.onTap});
 

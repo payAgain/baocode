@@ -372,6 +372,18 @@ void main() {
         expect(tester.getSize(editor).width, lessThan(initialWidth));
         expect(tester.state<MarkdownEditorState>(editor), same(editorState));
         expect(editor.hitTestable(), findsOneWidget);
+
+        final wideSize = tester.view.physicalSize;
+        tester.view.physicalSize = const Size(820, 740);
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<DesktopRemotePeopleManager>(panel).compact,
+          isTrue,
+        );
+        expect(editor.hitTestable(), findsNothing);
+        tester.view.physicalSize = wideSize;
+        await tester.pumpAndSettle();
+        expect(tester.state<MarkdownEditorState>(editor), same(editorState));
         await typeChat('Updated chat draft');
         await _enter(tester, 'Name', 'Bot from settings');
         await _tap(tester, 'Save');

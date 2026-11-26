@@ -1,3 +1,4 @@
+import '../chat/chat_models.dart' show DiffLine, DiffLineType;
 import '../kernel/kernel_types.dart';
 
 /// The host's rendered update and wire-indexed item window for one follow.
@@ -66,34 +67,38 @@ InteractionRequest? decodeRemoteInteraction(Object? raw) {
         title: title,
         toolName: tool,
         reason: _string(raw['reason']),
-        preview: switch (raw['preview']) {
-          {'t': 'command', 'command': final String cmd} => TextPreview(
-            [
-              if (raw['preview'] case {'description': final String description})
-                description,
-              cmd,
-            ].join('\n'),
-          ),
-          {'t': 'text', 'text': final String text} => TextPreview(text),
-          {'t': 'diff', 'path': final String path, 'lines': final List lines} =>
-            TextPreview(
-              [
-                path,
-                for (final line in lines)
-                  if (line case [
-                    final int _,
-                    final int number,
-                    final String text,
-                  ])
-                    '$number  $text',
-              ].join('\n'),
-            ),
-          _ => null,
-        },
+        preview: _decodeApprovalPreview(raw['preview']),
       );
     default:
       return null;
   }
+}
+
+ApprovalPreview? _decodeApprovalPreview(Object? raw) => switch (raw) {
+  {'t': 'command', 'command': final String command} => CommandPreview(
+    command,
+    description: switch (raw) {
+      {'description': final String description} => description,
+      _ => null,
+    },
+  ),
+  {'t': 'text', 'text': final String text} => TextPreview(text),
+  {'t': 'diff', 'path': final String path, 'lines': final List lines} =>
+    _decodeApprovalDiff(path, lines),
+  _ => null,
+};
+
+DiffPreview? _decodeApprovalDiff(String path, List<Object?> lines) {
+  final decoded = <DiffLine>[];
+  for (final line in lines) {
+    if (line case [final int type, final int number, final String text]
+        when type >= 0 && type < DiffLineType.values.length) {
+      decoded.add(DiffLine(DiffLineType.values[type], number, text));
+    } else {
+      return null;
+    }
+  }
+  return DiffPreview(path, decoded);
 }
 
 String _string(Object? value) => value is String ? value : '';

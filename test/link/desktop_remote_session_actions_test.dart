@@ -21,7 +21,9 @@ void main() {
     host.update('first', interaction: _approval('request-1'));
     await tester.pumpAndSettle();
     await _tap(tester, 'Review host request');
-    expect(find.text('fixture command'), findsOneWidget);
+    expect(find.byType(ApprovalPreviewView), findsOneWidget);
+    expect(find.text(r'$ fixture command', findRichText: true), findsOneWidget);
+    expect(find.text('Fixture command description'), findsOneWidget);
     expect(find.text('Fixture blanket approval'), findsNothing);
     expect(host.actions, isEmpty);
     await _tap(tester, 'Cancel');
@@ -41,6 +43,85 @@ void main() {
     host.update('first');
     await tester.pumpAndSettle();
     expect(find.text('Review host request'), findsNothing);
+    await host.close(tester);
+  });
+
+  testWidgets('host diff approval renders structured changes through the end', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester);
+    await host.select(tester, 'first');
+    host.update(
+      'first',
+      interaction: {
+        ..._approval('diff'),
+        'preview': {
+          't': 'diff',
+          'path': '/fixture/proposed.txt',
+          'lines': [
+            [1, 1, 'removed text'],
+            for (var i = 1; i <= 85; i++) [0, i, 'added line $i'],
+          ],
+        },
+      },
+    );
+    await tester.pumpAndSettle();
+    await _tap(tester, 'Review host request');
+    expect(find.byType(ApprovalPreviewView), findsOneWidget);
+    expect(find.text('/fixture/proposed.txt'), findsOneWidget);
+    expect(find.text('1  - removed text'), findsOneWidget);
+    expect(find.text('1  + added line 1'), findsOneWidget);
+    final diff = find.descendant(
+      of: find.byType(ApprovalPreviewView),
+      matching: find.byType(Scrollable),
+    );
+    await tester.scrollUntilVisible(
+      find.text('85  + added line 85'),
+      100,
+      scrollable: diff,
+    );
+    expect(find.text('85  + added line 85').hitTestable(), findsOneWidget);
+    await _tap(tester, 'Cancel');
+    expect(host.actions, isEmpty);
+    await host.close(tester);
+  });
+
+  testWidgets('an unrenderable host preview cannot be approved', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester);
+    await host.select(tester, 'first');
+    host.update(
+      'first',
+      interaction: {
+        ..._approval('malformed'),
+        'preview': {
+          't': 'diff',
+          'path': '/fixture/proposed.txt',
+          'lines': [
+            [999, 1, 'unknown operation'],
+          ],
+        },
+      },
+    );
+    await tester.pumpAndSettle();
+    await _tap(tester, 'Review host request');
+    expect(
+      tester
+          .widget<OutlinedButton>(
+            find.widgetWithText(OutlinedButton, 'Allow once'),
+          )
+          .onPressed,
+      isNull,
+    );
+    expect(host.actions, isEmpty);
+    await _tap(tester, 'Deny');
+    expect(host.actions.single.$1, LinkMethods.answer);
+    expect(host.actions.single.$2, {
+      'session': 'first',
+      'request': 'malformed',
+      'answer': {'t': 'approval', 'decision': 'deny'},
+    });
     await host.close(tester);
   });
 
@@ -473,7 +554,11 @@ Map<String, Object?> _approval(String id) => {
   'tool': 'Fixture tool',
   'reason': 'Fixture reason',
   'always': 'Fixture blanket approval',
-  'preview': {'t': 'command', 'command': 'fixture command'},
+  'preview': {
+    't': 'command',
+    'command': 'fixture command',
+    'description': 'Fixture command description',
+  },
 };
 
 Future<void> _tap(WidgetTester tester, String label) async {

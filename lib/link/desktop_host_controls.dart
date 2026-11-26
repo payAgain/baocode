@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../chat/chat_session.dart' show ModelSettingChoice;
 import '../chat/composer/composer_picker.dart';
-import '../chat/composer/pickers_row.dart';
+import '../chat/composer/composer_presentation.dart';
 import '../chat/floating/floating_layer.dart';
 import '../chat/floating/floating_placement.dart';
 import '../chat/floating/floating_registry.dart';
@@ -47,43 +47,37 @@ class DesktopHostPickers extends StatelessWidget {
         if (choices[wire] case final choice?)
           _setting(controls, choice, kind, icon),
     ];
-    return LayoutBuilder(
-      builder: (context, constraints) => SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: PickersRow(
-          key: ObjectKey(choices),
-          maxWidth: constraints.maxWidth,
-          children: [
-            if (choices['mode'] case final choice?) ...[
-              _picker(
-                controls,
-                choice,
-                l10n.composerSetMode,
-                Codicons.commentDiscussion,
-              ),
-              const SizedBox(width: 2),
-            ],
-            if (choices['permission'] case final choice?) ...[
-              _picker(
-                controls,
-                choice,
-                _zh(context) ? '权限' : 'Permissions',
-                Codicons.shield,
-              ),
-              const SizedBox(width: 2),
-            ],
-            if (choices['model'] case final choice?)
-              _picker(
-                controls,
-                choice,
-                l10n.composerPickModel,
-                Codicons.sparkle,
-                settings: settings,
-                search: l10n.modelsSearch,
-              ),
-          ],
-        ),
-      ),
+    return ComposerPickerStrip(
+      rowKey: ObjectKey(choices),
+      children: [
+        if (choices['mode'] case final choice?) ...[
+          _picker(
+            controls,
+            choice,
+            l10n.composerSetMode,
+            Codicons.commentDiscussion,
+          ),
+          const SizedBox(width: 2),
+        ],
+        if (choices['permission'] case final choice?) ...[
+          _picker(
+            controls,
+            choice,
+            _zh(context) ? '权限' : 'Permissions',
+            Codicons.shield,
+          ),
+          const SizedBox(width: 2),
+        ],
+        if (choices['model'] case final choice?)
+          _picker(
+            controls,
+            choice,
+            l10n.composerPickModel,
+            Codicons.sparkle,
+            settings: settings,
+            search: l10n.modelsSearch,
+          ),
+      ],
     );
   }
 
@@ -199,18 +193,11 @@ class DesktopHostSessionFooter extends StatelessWidget {
     if (project == null && usage == null) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.fromLTRB(6, 0, 6, 4),
-      child: Row(
-        children: [
-          Expanded(
-            child: project == null
-                ? const SizedBox.shrink()
-                : _HostProject(project, branchAccess),
-          ),
-          if (usage != null)
-            Flexible(
-              child: _HostContextMeter(key: ObjectKey(controls), usage: usage),
-            ),
-        ],
+      child: ComposerStatusRow(
+        leading: project == null ? null : _HostProject(project, branchAccess),
+        trailing: usage == null
+            ? null
+            : _HostContextMeter(key: ObjectKey(controls), usage: usage),
       ),
     );
   }
@@ -493,6 +480,7 @@ class _HostContextMeterState extends State<_HostContextMeter> {
   @override
   Widget build(BuildContext context) => Align(
     alignment: AlignmentDirectional.centerEnd,
+    widthFactor: 1,
     // Use the native panel, with only the usage fields in the wire schema.
     child: FloatingLayer(
       visible: _open,

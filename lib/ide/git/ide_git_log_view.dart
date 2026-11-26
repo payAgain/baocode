@@ -54,6 +54,7 @@ import 'git_partial.dart';
 import 'git_repository.dart';
 import 'git_service.dart';
 import 'ide_git_list_tree_switch.dart';
+import 'ide_git_presentation.dart';
 import 'ide_git_rebase_dialog.dart';
 import 'ide_git_ref_labels.dart';
 import 'ide_scm_view.dart';
@@ -770,7 +771,14 @@ class IdeGitLogView extends StatefulWidget {
   /// The least the table keeps beside the details.
   static const minLogWidth = 280.0;
 
-  static const rowHeight = 26.0;
+  static const rowHeight = ideGitHistoryRowHeight;
+
+  static bool detailsBeside(double width) =>
+      switch (IdeDiffOptions.instance.detailsLayout) {
+        IdeGitDetailsLayout.beside => true,
+        IdeGitDetailsLayout.below => false,
+        IdeGitDetailsLayout.auto => width >= wideWidth,
+      };
 
   @override
   State<IdeGitLogView> createState() => IdeGitLogViewState();
@@ -1052,20 +1060,12 @@ class IdeGitLogViewState extends State<IdeGitLogView> {
           _log.detailsWidth,
           _detailsRoom(constraints.maxWidth, tree),
         );
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(child: log),
-            IdeGitSash(
-              vertical: false,
-              color: Colors.transparent,
-              size: width,
-              after: true,
-              gap: true,
-              onResize: (width) => _log.resizeDetails(width: width),
-            ),
-            SizedBox(width: width, child: details),
-          ],
+        return IdeGitIslandSplit(
+          beside: true,
+          extent: width,
+          onResize: (width) => _log.resizeDetails(width: width),
+          log: log,
+          details: details,
         );
       }
       final folded = _detailsFolded(git, state);
@@ -1077,26 +1077,14 @@ class IdeGitLogViewState extends State<IdeGitLogView> {
               _log.detailsHeight ?? math.max(constraints.maxHeight / 2, 340),
               constraints.maxHeight * .75,
             );
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(child: log),
-          if (folded)
-            const SizedBox(height: Islands.gap)
-          else
-            IdeGitSash(
-              vertical: true,
-              color: Colors.transparent,
-              size: height,
-              after: true,
-              gap: true,
-              onResize: (height) => _log.resizeDetails(height: height),
-            ),
-          SizedBox(
-            height: height,
-            child: IdeGitDetailsFold(log: _log, folded: folded, child: details),
-          ),
-        ],
+      return IdeGitIslandSplit(
+        beside: false,
+        extent: height,
+        onResize: folded
+            ? null
+            : (height) => _log.resizeDetails(height: height),
+        log: log,
+        details: IdeGitDetailsFold(log: _log, folded: folded, child: details),
       );
     },
   );
@@ -1194,11 +1182,7 @@ class IdeGitLogViewState extends State<IdeGitLogView> {
   /// is wanted and leaves the log room.
   /// Whether the details go beside the table: as picked, else where the
   /// page is [IdeGitLogView.wideWidth] wide.
-  bool _beside(double width) => switch (IdeDiffOptions.instance.detailsLayout) {
-    IdeGitDetailsLayout.beside => true,
-    IdeGitDetailsLayout.below => false,
-    IdeGitDetailsLayout.auto => width >= IdeGitLogView.wideWidth,
-  };
+  bool _beside(double width) => IdeGitLogView.detailsBeside(width);
 
   /// The most the details take beside the table on a page [width] wide:
   /// all but [IdeGitLogView.minLogWidth] (and the branch tree), never under
@@ -2332,7 +2316,6 @@ class IdeGitLogViewState extends State<IdeGitLogView> {
     required _Columns columns,
   }) {
     final commit = row.commit;
-    final colors = themeColors;
     final synthetic =
         commit.id == ideIncomingChangesId || commit.id == ideOutgoingChangesId;
     final merge = commit.parentIds.length > 1;
@@ -2370,41 +2353,20 @@ class IdeGitLogViewState extends State<IdeGitLogView> {
             },
       builder: (context, hovered) {
         // What is behind the circles: the row's color over the page's.
-        final background = Color.alphaBlend(
-          selected
-              ? (focused
-                    ? IdeListColors.activeSelection
-                    : IdeListColors.inactiveSelection)
-              : hovered
-              ? IdeListColors.hover
-              : Colors.transparent,
-          _background,
+        final background = IdeGitHistoryGraph.rowBackground(
+          background: _background,
+          selected: selected,
+          focused: focused,
+          hovered: hovered,
         );
         return Row(
           children: [
-            ClipRect(
-              child: SizedBox(
-                width: graphWidth,
-                height: IdeGitLogView.rowHeight,
-                child: narrowed
-                    ? CustomPaint(painter: _DotPainter(colors[row.circleColor]))
-                    : OverflowBox(
-                        alignment: Alignment.centerLeft,
-                        maxWidth: double.infinity,
-                        child: CustomPaint(
-                          size: Size(
-                            ideGraphWidth(row),
-                            IdeGitLogView.rowHeight,
-                          ),
-                          painter: IdeGraphPainter(
-                            row,
-                            background: background,
-                            hovered: hovered,
-                            height: IdeGitLogView.rowHeight,
-                          ),
-                        ),
-                      ),
-              ),
+            IdeGitHistoryGraph(
+              row: row,
+              width: graphWidth,
+              background: background,
+              hovered: hovered,
+              narrowed: narrowed,
             ),
             Expanded(
               child: Padding(
@@ -3873,17 +3835,16 @@ class _CommitDetails extends StatelessWidget {
       builder: (context, _) => Row(
         children: [
           SizedBox(width: 4 + indent + (log.filesAsTree ? 18 : 0)),
-          FileIcon(file.path),
-          const SizedBox(width: 6),
           Expanded(
-            child: IdeResourceLabel(
+            child: IdeGitFileLabel(
+              icon: FileIcon(file.path),
               name: paths.basename(file.path),
               description: log.filesAsTree || directory == '.'
                   ? null
                   : directory,
               strikeThrough: status.strikeThrough,
-              letter: file.status,
-              letterColor: status.color,
+              status: file.status,
+              statusColor: status.color,
             ),
           ),
           if (stat != null) ...[
@@ -4876,23 +4837,6 @@ class _WorkingTreePainter extends CustomPainter {
       oldDelegate.color != color;
 }
 
-/// A commit's circle where the log is filtered, its lanes not joining up.
-class _DotPainter extends CustomPainter {
-  const _DotPainter(this.color);
-
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) => canvas.drawCircle(
-    Offset(ideGraphLaneWidth, size.height / 2),
-    4,
-    Paint()..color = color,
-  );
-
-  @override
-  bool shouldRepaint(_DotPainter oldDelegate) => oldDelegate.color != color;
-}
-
 /// Shown at the end of the table: older commits load.
 class _LoadMore extends StatefulWidget {
   const _LoadMore({super.key, required this.onShown});
@@ -4914,6 +4858,51 @@ class _LoadMoreState extends State<_LoadMore> {
 
   @override
   Widget build(BuildContext context) => const Center(child: _Spinner(size: 14));
+}
+
+/// The log and details cards with a draggable gap between them.
+class IdeGitIslandSplit extends StatelessWidget {
+  const IdeGitIslandSplit({
+    super.key,
+    required this.beside,
+    required this.extent,
+    required this.log,
+    required this.details,
+    this.onResize,
+  });
+
+  final bool beside;
+  final double extent;
+  final Widget log;
+  final Widget details;
+  final ValueChanged<double>? onResize;
+
+  @override
+  Widget build(BuildContext context) => Flex(
+    direction: beside ? Axis.horizontal : Axis.vertical,
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Expanded(child: log),
+      if (extent > 0) ...[
+        if (onResize case final resize?)
+          IdeGitSash(
+            vertical: !beside,
+            color: Colors.transparent,
+            size: extent,
+            after: true,
+            gap: true,
+            onResize: resize,
+          )
+        else
+          const SizedBox.square(dimension: Islands.gap),
+        SizedBox(
+          width: beside ? extent : null,
+          height: beside ? null : extent,
+          child: details,
+        ),
+      ],
+    ],
+  );
 }
 
 /// The line between the table and the details, dragged to size them:

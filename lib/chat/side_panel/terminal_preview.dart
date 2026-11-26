@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
@@ -8,9 +6,7 @@ import '../../ide/file_service.dart';
 import '../../ide/ide_hover.dart';
 import '../../ide/terminal/links/terminal_link_resolver.dart';
 import '../../ide/terminal/links/terminal_links.dart';
-import '../../ide/terminal/pty.dart';
-import '../../ide/terminal/terminal_colors.dart' show editorTerminalColorTheme;
-import '../../ide/terminal/terminal_instance.dart';
+import '../../ide/terminal/terminal_output_view.dart';
 import '../../ide/terminal/terminal_view.dart';
 import '../../kernel/kernel_types.dart';
 import '../../l10n/l10n.dart';
@@ -61,22 +57,6 @@ class TerminalPreview extends StatefulWidget {
 }
 
 class _TerminalPreviewState extends State<TerminalPreview> {
-  final _pty = _OutputPty();
-  late final TerminalInstance _terminal = TerminalInstance(
-    id: 0,
-    root: widget.root,
-    backend: TerminalBackend(
-      launch: (root, {columns = 80, rows = 24, shell, environment}) async =>
-          PtyLaunch(executable: '', workingDirectory: root),
-      start: (_) async => _pty,
-      linkStat: widget.linkStat,
-    ),
-    colorTheme: editorTerminalColorTheme,
-  );
-
-  /// What the screen was last given ([_screenText]), to print only what
-  /// was added to it.
-  String? _screen;
   Timer? _ticker;
   String _text = '';
   Object? _error;
@@ -89,18 +69,7 @@ class _TerminalPreviewState extends State<TerminalPreview> {
   @override
   void initState() {
     super.initState();
-    // Output files end lines with `\n` alone: no terminal discipline made
-    // them `\r\n`. Logs are kept longer than a shell's screen.
-    _terminal.xterm.options
-      ..convertEol = true
-      ..scrollback = 10000;
     _sync();
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _print();
   }
 
   @override
@@ -119,7 +88,6 @@ class _TerminalPreviewState extends State<TerminalPreview> {
         oldWidget.files != widget.files) {
       _sync();
     }
-    _print();
   }
 
   /// The screen: the command, then its output; else why there is none.
@@ -135,30 +103,6 @@ class _TerminalPreviewState extends State<TerminalPreview> {
         '\x1b[2;3m${_running ? l10n.sidePanelWaitingOutput : l10n.sidePanelOutputUnavailable}\x1b[0m',
     ].join();
   }
-
-  /// Prints what [_screenText] added; anything else it printed again, from
-  /// a reset terminal (in band, after what is still to be parsed).
-  void _print() {
-    final screen = _screenText;
-    final shown = _screen;
-    if (screen == shown) return;
-    _screen = screen;
-    if (shown != null && screen.startsWith(shown)) {
-      _pty.print(screen.substring(shown.length));
-      return;
-    }
-    // Bound the work, keeping the end (from a line's start), as the
-    // scrollback would.
-    var text = screen;
-    if (text.length > _printLimit) {
-      final cut = text.indexOf('\n', text.length - _printLimit);
-      text = text.substring(cut < 0 ? text.length - _printLimit : cut + 1);
-    }
-    // A log has no cursor to show.
-    _pty.print('${shown == null ? '' : '\x1bc'}\x1b[?25l$text');
-  }
-
-  static const _printLimit = 200000;
 
   void _sync() {
     _ticker?.cancel();
@@ -188,7 +132,6 @@ class _TerminalPreviewState extends State<TerminalPreview> {
           _text = output;
           _error = null;
         });
-        _print();
       }
     } catch (error) {
       if (mounted && generation == _generation) {
@@ -209,7 +152,6 @@ class _TerminalPreviewState extends State<TerminalPreview> {
   void dispose() {
     _generation++;
     _ticker?.cancel();
-    _terminal.dispose();
     super.dispose();
   }
 
@@ -279,8 +221,10 @@ class _TerminalPreviewState extends State<TerminalPreview> {
             ),
           ),
         Expanded(
-          child: TerminalView(
-            _terminal,
+          child: TerminalOutputView.local(
+            text: _screenText,
+            root: widget.root,
+            linkStat: widget.linkStat,
             skipShell: widget.skipShell,
             onKill: _running ? widget.onStop : null,
             onOpenLink: widget.onOpenLink,
@@ -290,34 +234,4 @@ class _TerminalPreviewState extends State<TerminalPreview> {
       ],
     );
   }
-}
-
-/// A background command's output as a terminal's process prints: what the
-/// preview [print]s of its file. Nothing typed reaches the command.
-class _OutputPty extends Pty {
-  final _output = StreamController<Uint8List>();
-
-  void print(String text) {
-    if (text.isNotEmpty && !_output.isClosed) _output.add(utf8.encode(text));
-  }
-
-  @override
-  int get pid => 0;
-
-  @override
-  Stream<Uint8List> get output => _output.stream;
-
-  @override
-  void write(Uint8List data) {}
-
-  @override
-  void resize(int columns, int rows) {}
-
-  @override
-  void kill([PtySignal signal = PtySignal.hangup]) =>
-      unawaited(_output.close());
-
-  /// It never exits: the task's status says how the command did.
-  @override
-  Future<int> get exitCode => Completer<int>().future;
 }

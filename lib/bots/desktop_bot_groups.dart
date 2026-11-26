@@ -1,12 +1,17 @@
-import 'package:bao_link/bao_link.dart' show LinkGroupMessage;
+import 'package:bao_link/bao_link.dart' show LinkGroupMessage, isAvatarImage;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../chat/chat_models.dart' show ImageAttachment;
+import '../chat/widgets/image_thumbnails.dart';
 import '../l10n/l10n.dart';
 import '../link/chat_codec.dart';
 import '../theme/app_theme.dart';
 import 'bot_group_prompt.dart';
+import 'bot_groups.dart' show BotGroups;
 import 'bots.dart';
+import 'desktop_bot_editor_ui.dart';
+import 'desktop_bot_message_row.dart';
 
 /// Desktop access to the same groups and message log that the phone uses.
 class DesktopBotGroups extends StatefulWidget {
@@ -320,6 +325,9 @@ class _GroupChatState extends State<_GroupChat> {
                           bots: bots,
                           group: group,
                           message: messages[messages.length - index - 1],
+                          lookupQuote: (seq) => messages
+                              .where((item) => item.seq == seq && !item.notice)
+                              .firstOrNull,
                         ),
                       ),
                     ),
@@ -382,10 +390,31 @@ class _GroupMessage extends StatelessWidget {
     required this.bots,
     required this.group,
     required this.message,
+    required this.lookupQuote,
   });
   final Bots bots;
   final BotGroup group;
   final LinkGroupMessage message;
+  final LinkGroupMessage? Function(int) lookupQuote;
+
+  String _sender(BuildContext context, LinkGroupMessage item) => item.mine
+      ? _labels(context, 'You', '你')
+      : _memberName(bots, group, item.from);
+
+  Widget? _quote(BuildContext context, int? ref) {
+    if (ref == null || ref <= 0 || ref >= message.seq) return null;
+    final item = lookupQuote(ref);
+    final label = _labels(context, 'Reply to #$ref', '回复 #$ref');
+    return DesktopGroupQuoteBanner(
+      label: item == null ? label : '$label · ${_sender(context, item)}',
+      preview: item == null
+          ? ''
+          : BotGroups.quotedText(
+              item,
+              picture: _labels(context, '[Image]', '[图片]'),
+            ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -401,77 +430,49 @@ class _GroupMessage extends StatelessWidget {
       );
     }
     final parts = message.mine
-        ? [(ChatCodec.botSayTag, message.text)]
+        ? [(tag: ChatCodec.botSayTag, text: message.text, ref: message.ref)]
         : [
-            for (final (tag, text) in ChatCodec.botParts(
+            for (final (:tag, :text, :ref) in ChatCodec.botPartsOf(
               ChatCodec.withoutBotEvents(message.text),
             ))
               if (tag == ChatCodec.botSayTag || tag == ChatCodec.botNarrateTag)
                 if (ChatCodec.withoutVoiceCues(text) case final shown
                     when shown.isNotEmpty)
-                  (tag, shown),
+                  (tag: tag, text: shown, ref: ref ?? message.ref),
           ];
     if (parts.isEmpty && message.images.isEmpty) return const SizedBox.shrink();
-    final alignment = message.mine
-        ? AlignmentDirectional.centerEnd
-        : AlignmentDirectional.centerStart;
-    final name = message.mine
-        ? _labels(context, 'You', '你')
-        : _memberName(bots, group, message.from);
-    return Align(
-      alignment: alignment,
-      child: FractionallySizedBox(
-        alignment: alignment,
-        widthFactor: 0.88,
-        child: Align(
-          alignment: alignment,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: message.mine ? AppColors.bubbleFill : Colors.transparent,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    name,
-                    style: styles.labelMedium?.copyWith(
-                      color: AppColors.textMuted,
-                    ),
-                  ),
-                  for (final (tag, text) in parts)
-                    if (text.isNotEmpty)
-                      Text(
-                        text,
-                        style: styles.bodyMedium?.copyWith(
-                          color: tag == ChatCodec.botNarrateTag
-                              ? AppColors.textMuted
-                              : AppColors.text,
-                          fontStyle: tag == ChatCodec.botNarrateTag
-                              ? FontStyle.italic
-                              : null,
-                        ),
-                      ),
-                  for (final name in message.images)
-                    if (bots.groups.image(group.id, name) case final image?)
-                      Image.memory(
-                        image.bytes,
-                        fit: BoxFit.contain,
-                        height: 180,
-                        errorBuilder: (context, error, stack) =>
-                            const Icon(Icons.broken_image_outlined),
-                      )
-                    else
-                      const Icon(Icons.broken_image_outlined),
-                ],
-              ),
-            ),
+    final name = _sender(context, message);
+    final avatar = message.mine ? null : bots.byId(message.from)?.avatar;
+    final images = [
+      for (final name in message.images)
+        switch (bots.groups.image(group.id, name)) {
+          final image? => ImageAttachment(
+            bytes: image.bytes,
+            mediaType: image.type,
+            name: name,
           ),
-        ),
-      ),
+          null => null,
+        },
+    ];
+    return DesktopBotMessageRow(
+      mine: message.mine,
+      sender: name,
+      avatar: avatar == null || avatar.isEmpty || isAvatarImage(avatar)
+          ? null
+          : DesktopBotMessageAvatar(sender: name, emoji: avatar),
+      sentAt: message.at.millisecondsSinceEpoch == 0 ? null : message.at,
+      quote: parts.isEmpty ? _quote(context, message.ref) : null,
+      content: [
+        for (final (:tag, :text, :ref) in parts) ...[
+          ?_quote(context, ref),
+          if (text.isNotEmpty)
+            DesktopBotMessageText(
+              text,
+              narration: tag == ChatCodec.botNarrateTag,
+            ),
+        ],
+      ],
+      media: images.isEmpty ? null : ImageThumbnails(images: images),
     );
   }
 }
@@ -530,19 +531,15 @@ class _GroupEditorState extends State<_GroupEditor> {
           children: [
             TextField(
               controller: _name,
-              decoration: InputDecoration(
-                labelText: _labels(context, 'Group name', '群名称'),
-              ),
+              decoration: botEditorInput(_labels(context, 'Group name', '群名称')),
             ),
             const SizedBox(height: 16),
             Text(_labels(context, 'Members', '群成员')),
             for (final bot in widget.bots.bots)
-              CheckboxListTile(
+              BotEditorMemberTile(
                 key: ValueKey(bot.id),
-                contentPadding: EdgeInsets.zero,
-                controlAffinity: ListTileControlAffinity.leading,
-                title: Text(bot.name),
-                value: _members.contains(bot.id),
+                member: (id: bot.id, name: bot.name),
+                selected: _members.contains(bot.id),
                 onChanged: (selected) => setState(() {
                   if (selected == true) {
                     _members.add(bot.id);
@@ -553,26 +550,18 @@ class _GroupEditorState extends State<_GroupEditor> {
                 }),
               ),
             const SizedBox(height: 12),
-            Text(_labels(context, 'Default lead', '默认主理人')),
-            DropdownButton<({String? id})>(
-              key: const ValueKey('group-lead-picker'),
-              isExpanded: true,
-              value: (id: _selectedLead),
-              items: [
-                DropdownMenuItem(
-                  value: (id: null),
-                  child: Text(_labels(context, 'No default lead', '不设默认主理人')),
-                ),
+            BotEditorLeadPicker(
+              pickerKey: const ValueKey('group-lead-picker'),
+              label: _labels(context, 'Default lead', '默认主理人'),
+              defaultLabel: _labels(context, 'No default lead', '不设默认主理人'),
+              members: [
                 for (final bot in widget.bots.bots)
-                  if (_members.contains(bot.id))
-                    DropdownMenuItem(
-                      value: (id: bot.id),
-                      child: Text(bot.name, overflow: TextOverflow.ellipsis),
-                    ),
+                  if (_members.contains(bot.id)) (id: bot.id, name: bot.name),
               ],
+              lead: _selectedLead,
               onChanged: _members.any((id) => widget.bots.byId(id) != null)
                   ? (choice) => setState(() {
-                      _lead = choice?.id;
+                      _lead = choice;
                       _clearLead = _lead == null;
                     })
                   : null,

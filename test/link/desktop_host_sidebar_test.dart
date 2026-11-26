@@ -15,6 +15,7 @@ import 'package:baocode/search/search_palette.dart';
 import 'package:baocode/settings/app_locale.dart';
 import 'package:baocode/settings/app_settings.dart';
 import 'package:baocode/settings/user_settings.dart';
+import 'package:baocode/sidebar/conversation_navigation_layout.dart';
 import 'package:baocode/sidebar/sidebar.dart';
 import 'package:baocode/tips/feature_tips_controller.dart';
 import 'package:baocode/window/app_windows.dart';
@@ -46,6 +47,12 @@ void main() {
     final workspace = viewer.workspace;
     await openWorkbench(tester, viewer);
     await tester.pump();
+    final navigation = find.byType(ConversationNavigationLayout);
+    expect(navigation, findsOneWidget);
+    expect(
+      tester.widget<ConversationNavigationLayout>(navigation).narrow,
+      isFalse,
+    );
     final entry = find.descendant(
       of: find.byType(Sidebar),
       matching: find.text('My computers'),
@@ -58,6 +65,7 @@ void main() {
     await tapMember(tester, owner);
     final page = find.byType(DesktopHostPage);
     expect(page, findsOneWidget);
+    expect(find.descendant(of: page, matching: navigation), findsOneWidget);
     expect(tester.getSize(page).width, 1440);
     final column = find.descendant(of: page, matching: find.byType(ChatColumn));
     expect(column, findsOneWidget);

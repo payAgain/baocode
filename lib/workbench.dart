@@ -121,12 +121,13 @@ import 'settings/pages/models_page.dart';
 import 'settings/pages/upstream_import_dialog.dart';
 import 'settings/settings_dialog.dart';
 import 'settings/shell_command_actions.dart';
+import 'sidebar/conversation_navigation_layout.dart';
 import 'sidebar/sidebar.dart';
 import 'theme/code_font.dart';
 import 'theme/codicons.dart';
 import 'icons/project_icon_view.dart';
 import 'theme/app_theme.dart';
-import 'theme/workbench_theme.dart' show WorkbenchThemeService, themeColors;
+import 'theme/workbench_theme.dart' show WorkbenchThemeService;
 import 'tips/feature_tip.dart';
 import 'tips/feature_tips_controller.dart';
 import 'tips/feature_tips_view.dart';
@@ -258,7 +259,7 @@ class Workbench extends StatefulWidget {
   final Widget Function(BuildContext, IdeWorkspace)? ideEditorBuilder;
 
   /// Below this width the sidebar becomes a drawer.
-  static const narrowWidth = 720.0;
+  static const narrowWidth = ConversationNavigationLayout.narrowWidth;
   static const minSidebarWidth = 200.0;
   static const maxSidebarWidth = 420.0;
 
@@ -3427,100 +3428,21 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   }
 
   /// The sidebar docked beside [body] (by default the chat's panes).
-  Widget _buildWide({Widget? body}) {
-    // Built once for the widths a drag goes through (see [_width]).
-    final sidebar = _buildSidebar(onWindow: true);
-    final panes = body ?? _buildPanes(showToggle: !_sidebarDocked);
-    final right = _sidebarAtRight;
-    final row = ValueListenableBuilder(
-      valueListenable: _width,
-      builder: (context, _, _) => Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        // At the window's right, the sidebar after the cards.
-        textDirection: right ? TextDirection.rtl : TextDirection.ltr,
-        children: [
-          AnimatedContainer(
-            duration: _dragging ? Duration.zero : _duration,
-            curve: Curves.easeOutCubic,
-            width: _sidebarDocked ? _shownWidth : 0,
-            child: ClipRect(
-              child: OverflowBox(
-                // Its edge by the cards seen first, as it comes in.
-                alignment: right ? Alignment.centerLeft : Alignment.centerRight,
-                minWidth: _shownWidth,
-                maxWidth: _shownWidth,
-                child: Directionality(
-                  textDirection: Directionality.of(context),
-                  child: sidebar,
-                ),
-              ),
-            ),
-          ),
-          // The cards a gap in from the window's edges; against the
-          // sidebar, not on a card of its own, with none (its scroll bar
-          // by their side). The handle over their edge, clear of the
-          // scroll bar.
-          Expanded(
-            child: Directionality(
-              textDirection: Directionality.of(context),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Positioned.fill(
-                    child: AnimatedPadding(
-                      duration: _dragging ? Duration.zero : _duration,
-                      curve: Curves.easeOutCubic,
-                      padding: EdgeInsets.only(
-                        left: right || _sidebarDocked ? 0 : Islands.gap,
-                        right: !right || _sidebarDocked ? 0 : Islands.gap,
-                      ),
-                      child: _islandsInset(panes, left: right, right: !right),
-                    ),
-                  ),
-                  if (_sidebarDocked)
-                    Positioned(
-                      left: right ? null : 0,
-                      right: right ? 0 : null,
-                      top: 0,
-                      bottom: 0,
-                      child: _buildResizeHandle(island: true),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-    // One backdrop for the sidebar and the cards' gaps: two, meeting at a
-    // fractional x (a dragged width), would each half cover the pixel
-    // there, and the material would show through the seam.
-    return ColoredBox(
-      color: AppColors.sidebarSurface,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [row, if (_dragging) _resizeCursorLayer],
-      ),
-    );
-  }
-
-  /// The conversations' cards, a gap in from the window's sides ([left]
-  /// unless something else is there); their title bars over them, at the
-  /// top. At the bottom, the row under their cards (their branch, see
-  /// [Islands.belowHeight]) down to the window's edge, as the IDE's status
-  /// bar is; a card with none under it keeps a gap there ([_footless]).
-  static Widget _islandsInset(
-    Widget child, {
-    bool left = true,
-    bool right = true,
-  }) => Padding(
-    padding: EdgeInsets.fromLTRB(
-      left ? Islands.gap : 0,
-      0,
-      right ? Islands.gap : 0,
-      0,
+  Widget _buildWide({Widget? body}) => ValueListenableBuilder(
+    valueListenable: _width,
+    child: body ?? _buildPanes(showToggle: !_sidebarDocked),
+    builder: (context, _, panes) => ConversationNavigationLayout(
+      sidebar: _buildSidebar(onWindow: true),
+      width: _shownWidth,
+      open: _sidebarDocked,
+      narrow: false,
+      atRight: _sidebarAtRight,
+      duration: _dragging ? Duration.zero : _duration,
+      handle: _sidebarDocked ? _buildResizeHandle(island: true) : null,
+      onClose: _closeDrawer,
+      cursorLayer: _dragging ? _resizeCursorLayer : null,
+      child: panes!,
     ),
-    child: child,
   );
 
   /// A card in the conversations' place with no row under it (Customize,
@@ -3531,101 +3453,34 @@ class _WorkbenchState extends State<Workbench> implements WindowDelegate {
   );
 
   /// The sidebar as a drawer over [body] (by default the chat's panes).
-  Widget _buildNarrow({Widget? body}) {
-    // The same sidebar and border as when docked, at the same width.
-    const handleWidth = _WorkbenchState._handleWidth;
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        Positioned.fill(
-          child: ColoredBox(
-            color: AppColors.sidebarSurface,
-            child: _islandsInset(body ?? _buildPanes(showToggle: true)),
-          ),
-        ),
-        // Scrim: a click outside closes the drawer.
-        Positioned.fill(
-          child: IgnorePointer(
-            ignoring: !_drawerOpen,
-            child: GestureDetector(
-              onTap: _closeDrawer,
-              child: AnimatedOpacity(
-                opacity: _drawerOpen ? 1 : 0,
-                duration: _duration,
-                // Black, not the theme's: as upstream's modal backdrops.
-                child: const ColoredBox(color: Color(0x66000000)),
-              ),
-            ),
-          ),
-        ),
-        // Only the slide animates; the width follows the drag or the window
-        // at once (animating it too would leave the sidebar overflowing its
-        // box while the window grows).
-        ValueListenableBuilder(
-          valueListenable: _width,
-          builder: (context, _, sidebar) => TweenAnimationBuilder<double>(
-            tween: Tween(end: _drawerOpen ? 1 : 0),
-            duration: _duration,
-            curve: Curves.easeOutCubic,
-            onEnd: () {
-              if (_drawerClosing) setState(() => _drawerClosing = false);
-            },
-            // From the window's side the sidebar is at (see [ChatLayout]).
-            builder: (context, shown, child) => Positioned(
-              top: 0,
-              bottom: 0,
-              left: _sidebarAtRight
-                  ? null
-                  : -(_shownWidth + handleWidth + 24) * (1 - shown),
-              right: _sidebarAtRight
-                  ? -(_shownWidth + handleWidth + 24) * (1 - shown)
-                  : null,
-              width: _shownWidth + handleWidth,
-              child: child!,
-            ),
-            child: sidebar == null
-                ? const SizedBox.shrink()
-                : Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (_sidebarAtRight) _buildResizeHandle(),
-                      SizedBox(width: _shownWidth, child: sidebar),
-                      if (!_sidebarAtRight) _buildResizeHandle(),
-                    ],
-                  ),
-          ),
-          // Built once for the widths a drag goes through (see [_width]).
-          child: _drawerOpen || _drawerClosing
-              ? DecoratedBox(
-                  decoration: BoxDecoration(
-                    boxShadow: [
-                      BoxShadow(
-                        color: themeColors['widget.shadow'],
-                        blurRadius: 24,
-                      ),
-                    ],
-                  ),
-                  // Over the chat, not the material: the tint alone would
-                  // show the chat through.
-                  child: _opaque(_buildSidebar(onOpened: _closeDrawer)),
-                )
-              : null,
-        ),
-        if (_dragging) _resizeCursorLayer,
-      ],
-    );
-  }
+  Widget _buildNarrow({Widget? body}) => ValueListenableBuilder(
+    valueListenable: _width,
+    child: body ?? _buildPanes(showToggle: true),
+    builder: (context, _, panes) => ConversationNavigationLayout(
+      sidebar: _drawerOpen || _drawerClosing
+          ? _buildSidebar(onOpened: _closeDrawer)
+          : null,
+      width: _shownWidth,
+      open: _drawerOpen,
+      narrow: true,
+      atRight: _sidebarAtRight,
+      duration: _duration,
+      handle: _buildResizeHandle(),
+      drawerHandleWidth: _handleWidth,
+      onClose: _closeDrawer,
+      onDrawerSettled: () {
+        if (_drawerClosing) setState(() => _drawerClosing = false);
+      },
+      cursorLayer: _dragging ? _resizeCursorLayer : null,
+      child: panes!,
+    ),
+  );
 
   /// While resizing, the pointer may be far from the border: the resize
   /// cursor everywhere, and no hover effects under it.
   static const _resizeCursorLayer = MouseRegion(
     cursor: SystemMouseCursors.resizeColumn,
   );
-
-  /// On the window's own color: over the system's material (see
-  /// [AppColors.windowCanvas]), opaque.
-  static Widget _opaque(Widget child) =>
-      ColoredBox(color: AppColors.background, child: child);
 
   /// [thread] in this agent's window, in place of its agent.
   void _showInWindow(AgentThread thread) {

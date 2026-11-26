@@ -1,11 +1,15 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:bao_link/bao_link.dart';
 import 'package:baocode/bots/bot.dart';
 import 'package:baocode/bots/bot_folders.dart';
 import 'package:baocode/bots/bots.dart';
 import 'package:baocode/bots/desktop_bot_groups.dart';
+import 'package:baocode/bots/desktop_bot_message_row.dart';
+import 'package:baocode/chat/chat_models.dart' show ImageAttachment;
 import 'package:baocode/chat/chat_session.dart';
+import 'package:baocode/chat/widgets/image_thumbnails.dart';
 import 'package:baocode/kernel/agent_kernel.dart';
 import 'package:baocode/kernel/claude_code/claude_code_kernel.dart';
 import 'package:baocode/link/workspace_bridge.dart';
@@ -39,6 +43,10 @@ void main() {
     await tester.pump();
     final early = find.text('Earlier planning update');
     final late = find.text('Later planning update');
+    expect(
+      find.ancestor(of: late, matching: find.byType(DesktopBotMessageRow)),
+      findsOneWidget,
+    );
     expect(early, findsOneWidget);
     expect(late, findsOneWidget);
     expect(tester.getTopLeft(early).dy, lessThan(tester.getTopLeft(late).dy));
@@ -55,6 +63,93 @@ void main() {
     await tester.pump();
     await tester.tap(find.byTooltip('Back'));
     expect(fixture.back, 1);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('shared group rows show a timestamp and existing quote', (
+    tester,
+  ) async {
+    final fixture = _Fixture();
+    await fixture.start();
+    final groups = fixture.bots.groups;
+    final room = groups.save(name: 'Planning', members: [fixture.mia.id]);
+    final original = groups.say(room.id, fixture.mia.id, 'Original update');
+    groups.tell = (_, _, _) {};
+    groups.send(room.id, text: 'Following up', ref: original.seq);
+    try {
+      await tester.pumpWidget(fixture.page());
+      await tester.tap(find.text('Planning'));
+      await tester.pump();
+      final row = find.ancestor(
+        of: find.text('Following up'),
+        matching: find.byType(DesktopBotMessageRow),
+      );
+      expect(tester.widget<DesktopBotMessageRow>(row).sentAt, isNotNull);
+      final quote = find.descendant(
+        of: row,
+        matching: find.byType(DesktopGroupQuoteBanner),
+      );
+      expect(
+        tester.widget<DesktopGroupQuoteBanner>(quote).label,
+        'Reply to #${original.seq} · Mia',
+      );
+      expect(
+        tester.widget<DesktopGroupQuoteBanner>(quote).preview,
+        'Original update',
+      );
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      fixture.dispose();
+      await tester.pump();
+    }
+  });
+
+  testWidgets('missing group images stay in order outside the gallery', (
+    tester,
+  ) async {
+    final fixture = _Fixture();
+    addTearDown(fixture.dispose);
+    await fixture.start();
+    final groups = fixture.bots.groups;
+    final room = groups.save(name: 'Planning', members: [fixture.mia.id]);
+    final bytes = base64Decode(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8uoAAAAASUVORK5CYII=',
+    );
+    final message = groups.say(
+      room.id,
+      fixture.mia.id,
+      '',
+      images: [
+        for (var i = 0; i < 3; i++)
+          ImageAttachment(bytes: bytes, mediaType: 'image/png'),
+      ],
+    );
+    final folders = fixture.bots.folders as MemoryBotFolders;
+    folders.files.removeWhere(
+      (path, _) => path.endsWith('/images/${message.images[1]}'),
+    );
+
+    await tester.pumpWidget(fixture.page());
+    await tester.tap(find.text('Planning'));
+    await tester.pumpAndSettle();
+    Finder thumbnail(String name) => find.byWidgetPredicate(
+      (widget) => widget is ImageThumbnail && widget.image.name == name,
+    );
+    final first = thumbnail(message.images[0]);
+    final missing = find.byIcon(Icons.broken_image_outlined);
+    final last = thumbnail(message.images[2]);
+    expect(tester.getCenter(first).dx, lessThan(tester.getCenter(missing).dx));
+    expect(tester.getCenter(missing).dx, lessThan(tester.getCenter(last).dx));
+    await tester.tap(missing);
+    await tester.pumpAndSettle();
+    expect(find.byType(InteractiveViewer), findsNothing);
+
+    await tester.tap(last);
+    await tester.pumpAndSettle();
+    expect(find.text('2 / 2'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('image-previous')));
+    await tester.pumpAndSettle();
+    expect(find.text('1 / 2'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 

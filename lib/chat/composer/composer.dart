@@ -36,7 +36,6 @@ import 'composer_mock_data.dart';
 import 'composer_picker.dart';
 import 'composer_polish.dart';
 import 'composer_presentation.dart';
-import 'pickers_row.dart';
 import 'session_model_picker.dart';
 import 'kernel_option_text.dart';
 import 'file_drop.dart';
@@ -855,7 +854,7 @@ class ChatComposerState extends State<ChatComposer>
   _ShownOfText _shownOfText() => (
     menu: (_trigger != null, _menuX, _menuKind, _matches, _highlighted),
     pool: _pool,
-    canSend: _canSend,
+    canSend: _canSend && !_isComposing,
     polishable: ComposerPolishSetting.current() && _hasWords(),
   );
 
@@ -1106,13 +1105,12 @@ class ChatComposerState extends State<ChatComposer>
 
   KeyEventResult _handleKey(KeyEvent event) {
     if (event is! KeyUpEvent) _lag.begin('key');
-    if (event is KeyUpEvent || _isComposing) return KeyEventResult.ignored;
-    // Run by the window's keybindings (it sees keys first).
-    if (ChatKeys.isHandled(event)) return KeyEventResult.handled;
-    // An open picker menu (or tooltip) takes arrows, Enter and Esc first.
-    if (FloatingRegistry.handleKey(event) case final result?) return result;
-    // Then the keybindings: Enter sends, the menu's keys…
-    return ChatKeys.dispatch(event) ?? KeyEventResult.ignored;
+    return handleComposerKey(
+      event,
+      composing: _isComposing,
+      alreadyHandled: ChatKeys.isHandled,
+      dispatch: ChatKeys.dispatch,
+    );
   }
 
   bool get _caretAtStart {
@@ -1523,7 +1521,7 @@ class ChatComposerState extends State<ChatComposer>
   }
 
   void _submit() {
-    if (widget.canSubmit?.call() == false) return;
+    if (_isComposing || widget.canSubmit?.call() == false) return;
     // Empty while a turn runs, messages queued behind it: the first of them
     // taken up now, as its Send Now.
     if (widget.onSubmit == null && widget.session.isStreaming && !_canSend) {
@@ -1697,17 +1695,11 @@ class ChatComposerState extends State<ChatComposer>
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
       onTap: _focusNode.requestFocus,
-      child: ComposerSurface(
+      child: ComposerLayout(
         key: _boxKey,
         focused: focused,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            ComposerImages(images: _pool, child: _editor!),
-            _buildToolbar(),
-          ],
-        ),
+        editor: ComposerImages(images: _pool, child: _editor!),
+        toolbar: _buildToolbar(),
       ),
     );
   }
@@ -1724,46 +1716,23 @@ class ChatComposerState extends State<ChatComposer>
     );
   }
 
-  Widget _buildEditor(BuildContext context) {
-    // Slim overlay scrollbar for when the text exceeds the max height.
-    return ScrollbarTheme(
-      data: ScrollbarTheme.of(context).copyWith(
-        thickness: const WidgetStatePropertyAll(4),
-        crossAxisMargin: 3,
-      ),
-      child: Scrollbar(
-        controller: _scrollController,
-        // Desktop scroll behavior would add a second, default scrollbar to
-        // the editor's scroll view.
-        child: ScrollConfiguration(
-          behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-          child: _buildEditorBody(context),
+  Widget _buildEditor(BuildContext context) => ComposerEditorViewport(
+    controller: _scrollController,
+    child: ComposerCaret(
+      editorKey: _editorKey,
+      child: Listener(
+        onPointerDown: _handleClickDown,
+        onPointerUp: _handleClickUp,
+        onPointerCancel: (_) => _clickDownAt = null,
+        child: Listener(
+          onPointerDown: _handleMenuPointerDown,
+          onPointerUp: _handleMenuPointerUp,
+          onPointerCancel: (_) => _menuPressAt = null,
+          child: _buildMarkdownEditor(context),
         ),
       ),
-    );
-  }
-
-  Widget _buildEditorBody(BuildContext context) {
-    return Padding(
-      padding: composerEditorPadding,
-      child: ClipRect(
-        child: ComposerCaret(
-          editorKey: _editorKey,
-          child: Listener(
-            onPointerDown: _handleClickDown,
-            onPointerUp: _handleClickUp,
-            onPointerCancel: (_) => _clickDownAt = null,
-            child: Listener(
-              onPointerDown: _handleMenuPointerDown,
-              onPointerUp: _handleMenuPointerUp,
-              onPointerCancel: (_) => _menuPressAt = null,
-              child: _buildMarkdownEditor(context),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+    ),
+  );
 
   // --- Context menu -------------------------------------------------------
   //
@@ -1898,28 +1867,23 @@ class ChatComposerState extends State<ChatComposer>
     _clickWindow = Timer(kDoubleTapTimeout, () => _clickWindow = null);
   }
 
-  Widget _buildMarkdownEditor(BuildContext context) {
-    return ConstrainedBox(
-      constraints: composerEditorConstraints(context),
-      child: MarkdownEditor(
-        key: _editorKey,
-        controller: _controller,
-        focusNode: _focusNode,
-        scrollController: _scrollController,
-        shrinkWrap: true,
-        embeds: const ComposerChips(),
-        placeholder: context.l10n.composerPlaceholder,
-        onKey: _handleKey,
-        onPaste: _paste,
-        onPasteCopy: (markdown) => renumberPastes(
-          markdown,
-          from: _nextPastedNumber(),
-          quotesFrom: _nextPastedNumber(quoted: true),
-        ),
-        style: composerEditorStyle(context),
-      ),
-    );
-  }
+  Widget _buildMarkdownEditor(BuildContext context) => MarkdownEditor(
+    key: _editorKey,
+    controller: _controller,
+    focusNode: _focusNode,
+    scrollController: _scrollController,
+    shrinkWrap: true,
+    embeds: const ComposerChips(),
+    placeholder: context.l10n.composerPlaceholder,
+    onKey: _handleKey,
+    onPaste: _paste,
+    onPasteCopy: (markdown) => renumberPastes(
+      markdown,
+      from: _nextPastedNumber(),
+      quotesFrom: _nextPastedNumber(quoted: true),
+    ),
+    style: composerEditorStyle(context),
+  );
 
   Widget _buildToolbar() {
     final session = widget.session;
@@ -1939,107 +1903,86 @@ class ChatComposerState extends State<ChatComposer>
       KernelChoiceKind.permission,
       option,
     );
-    return Padding(
-      padding: composerToolbarPadding,
-      child: Row(
+    return ComposerToolbar(
+      pickers: ComposerPickerStrip(
         children: [
-          // Takes the room left, so the actions sit at the far end; the
-          // model's label cut short to fit, scrolls when even that does not.
-          Expanded(
-            child: LayoutBuilder(
-              builder: (context, constraints) => SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: PickersRow(
-                  maxWidth: constraints.maxWidth,
-                  children: [
-                    if (kernel != null) ...[
-                      ComposerPicker(
-                        options: kernel.options,
-                        selected: kernel.selected,
-                        tapRegionGroupId: widget.tapRegionGroupId,
-                        focusNode: _focusNode,
-                        onSelected: kernel.onSelected,
-                      ),
-                      const SizedBox(width: 2),
-                    ],
-                    if (mode != null) ...[
-                      ComposerPicker(
-                        key: _modePickerKey,
-                        options: mode.options,
-                        selected: mode.selected,
-                        emphasized: true,
-                        tooltip: _hovers.mode,
-                        tapRegionGroupId: widget.tapRegionGroupId,
-                        focusNode: _focusNode,
-                        onSelected: mode.onSelected,
-                      ),
-                      const SizedBox(width: 2),
-                    ],
-                    if (permission != null) ...[
-                      ComposerPicker(
-                        options: [
-                          for (final option in permission.options)
-                            localized(option),
-                        ],
-                        selected: localized(permission.selected),
-                        // `context` is the session's here.
-                        title: l10n.composerApprovalTitle(session.kernel.label),
-                        menuWidth: 290,
-                        tapRegionGroupId: widget.tapRegionGroupId,
-                        focusNode: _focusNode,
-                        onSelected: permission.onSelected,
-                      ),
-                      const SizedBox(width: 2),
-                    ],
-                    // With none to pick, one to set up.
-                    if (showSessionControls &&
-                        (model != null || session.health.noModel))
-                      SessionModelPicker(
-                        session: session,
-                        pickerKey: _modelPickerKey,
-                        tooltip: _hovers.model,
-                        tapRegionGroupId: widget.tapRegionGroupId,
-                        focusNode: _focusNode,
-                      ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          if (ComposerPolishSetting.current()) ...[
-            _PolishButton(
-              busy: _polishing,
-              enabled: _polishing || _shownBuilt!.polishable,
-              onTap: () => unawaited(_polish()),
+          if (kernel != null) ...[
+            ComposerPicker(
+              options: kernel.options,
+              selected: kernel.selected,
+              tapRegionGroupId: widget.tapRegionGroupId,
+              focusNode: _focusNode,
+              onSelected: kernel.onSelected,
             ),
             const SizedBox(width: 2),
           ],
-          if ((widget.onToggleContextPanel, context) case (
-            final onToggle?,
-            final usage?,
-          )) ...[
-            ContextMeter(
-              usage: usage,
-              active: widget.contextPanelOpen,
-              // Toggle Context Panel's, which has none by default.
-              tooltip: _hovers.ring,
-              onTap: onToggle,
+          if (mode != null) ...[
+            ComposerPicker(
+              key: _modePickerKey,
+              options: mode.options,
+              selected: mode.selected,
+              emphasized: true,
+              tooltip: _hovers.mode,
+              tapRegionGroupId: widget.tapRegionGroupId,
+              focusNode: _focusNode,
+              onSelected: mode.onSelected,
             ),
             const SizedBox(width: 2),
           ],
-          const SizedBox(width: 2),
-          _SendButton(
-            streaming: _showsStop,
-            enabled: _canSend && widget.canSubmit?.call() != false,
-            onSend: _submit,
-            onStop: () {
-              if (widget.canStop?.call() != false) {
-                stopTurn(this.context, session);
-              }
-            },
-          ),
+          if (permission != null) ...[
+            ComposerPicker(
+              options: [
+                for (final option in permission.options) localized(option),
+              ],
+              selected: localized(permission.selected),
+              title: l10n.composerApprovalTitle(session.kernel.label),
+              menuWidth: 290,
+              tapRegionGroupId: widget.tapRegionGroupId,
+              focusNode: _focusNode,
+              onSelected: permission.onSelected,
+            ),
+            const SizedBox(width: 2),
+          ],
+          // With none to pick, one to set up.
+          if (showSessionControls && (model != null || session.health.noModel))
+            SessionModelPicker(
+              session: session,
+              pickerKey: _modelPickerKey,
+              tooltip: _hovers.model,
+              tapRegionGroupId: widget.tapRegionGroupId,
+              focusNode: _focusNode,
+            ),
         ],
+      ),
+      actions: [
+        if (ComposerPolishSetting.current()) ...[
+          _PolishButton(
+            busy: _polishing,
+            enabled: _polishing || _shownBuilt!.polishable,
+            onTap: () => unawaited(_polish()),
+          ),
+          const SizedBox(width: 2),
+        ],
+        if ((widget.onToggleContextPanel, context) case (
+          final onToggle?,
+          final usage?,
+        )) ...[
+          ContextMeter(
+            usage: usage,
+            active: widget.contextPanelOpen,
+            tooltip: _hovers.ring,
+            onTap: onToggle,
+          ),
+          const SizedBox(width: 2),
+        ],
+      ],
+      submit: _SendButton(
+        streaming: _showsStop,
+        enabled: _shownBuilt!.canSend && widget.canSubmit?.call() != false,
+        onSend: _submit,
+        onStop: () {
+          if (widget.canStop?.call() != false) stopTurn(this.context, session);
+        },
       ),
     );
   }
@@ -2125,6 +2068,7 @@ class _SendButton extends StatelessWidget {
               input,
             ),
       onSend: enabled ? onSend : null,
+      showStop: streaming,
       onStop: streaming ? onStop : null,
     );
   }

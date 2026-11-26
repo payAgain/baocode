@@ -135,7 +135,7 @@ class _InteractionPanelState extends State<InteractionPanel>
     ApprovalRequest(:final reason, :final preview, :final alwaysAllowLabel) => [
       _Step(
         prompt: reason ?? '',
-        detail: _ApprovalPreview(preview),
+        detail: ApprovalPreviewView(preview: preview, diffLineLimit: 80),
         rows: [
           _Row(l10n.interactionAllowOnce),
           if (alwaysAllowLabel != null) _Row(alwaysAllowLabel),
@@ -827,11 +827,22 @@ class _Marker extends StatelessWidget {
   }
 }
 
-/// What a tool would do: the command, the edit, or its input.
-class _ApprovalPreview extends StatelessWidget {
-  const _ApprovalPreview(this.preview);
+/// What a tool would do: the command, the edit, or its input. The preview
+/// is display-only: paths and command text never become interactive links.
+class ApprovalPreviewView extends StatelessWidget {
+  const ApprovalPreviewView({
+    super.key,
+    required this.preview,
+    this.diffLineLimit,
+    this.showDiffLineNumbers = false,
+  });
 
   final ApprovalPreview? preview;
+
+  /// Inline panels may show an excerpt; confirmation dialogs can scroll all
+  /// the details without omitting any part of the host's proposed change.
+  final int? diffLineLimit;
+  final bool showDiffLineNumbers;
 
   static TextStyle get _mono => AppFonts.uiCodeStyle(12).copyWith(height: 1.5);
 
@@ -880,37 +891,46 @@ class _ApprovalPreview extends StatelessWidget {
             ),
           ),
           _Box(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                for (final line in lines.take(80))
-                  Container(
-                    color: switch (line.type) {
-                      DiffLineType.added => AppColors.addedBackground,
-                      DiffLineType.removed => AppColors.removedBackground,
-                      DiffLineType.context => null,
-                    },
-                    child: Text(
-                      '${switch (line.type) {
-                        DiffLineType.added => '+',
-                        DiffLineType.removed => '-',
-                        DiffLineType.context => ' ',
-                      }} ${line.text}',
-                      style: _mono.copyWith(
-                        color: switch (line.type) {
-                          DiffLineType.added => AppColors.added,
-                          DiffLineType.removed => AppColors.removed,
-                          DiffLineType.context => AppColors.text,
-                        },
-                      ),
+            scroll: false,
+            child: ListView.builder(
+              padding: _Box.padding,
+              primary: false,
+              shrinkWrap: true,
+              itemCount: diffLineLimit == null || lines.length <= diffLineLimit!
+                  ? lines.length
+                  : diffLineLimit! + 1,
+              itemBuilder: (context, index) {
+                final limit = diffLineLimit;
+                if (limit != null && index == limit) {
+                  return Text(
+                    context.l10n.interactionMoreLines(lines.length - limit),
+                    style: _mono.copyWith(color: AppColors.textFaint),
+                  );
+                }
+                final line = lines[index];
+                return Container(
+                  color: switch (line.type) {
+                    DiffLineType.added => AppColors.addedBackground,
+                    DiffLineType.removed => AppColors.removedBackground,
+                    DiffLineType.context => null,
+                  },
+                  child: Text(
+                    '${showDiffLineNumbers ? '${line.lineNumber}  ' : ''}'
+                    '${switch (line.type) {
+                      DiffLineType.added => '+',
+                      DiffLineType.removed => '-',
+                      DiffLineType.context => ' ',
+                    }} ${line.text}',
+                    style: _mono.copyWith(
+                      color: switch (line.type) {
+                        DiffLineType.added => AppColors.added,
+                        DiffLineType.removed => AppColors.removed,
+                        DiffLineType.context => AppColors.text,
+                      },
                     ),
                   ),
-                if (lines.length > 80)
-                  Text(
-                    context.l10n.interactionMoreLines(lines.length - 80),
-                    style: _mono.copyWith(color: AppColors.textFaint),
-                  ),
-              ],
+                );
+              },
             ),
           ),
         ],
@@ -923,9 +943,11 @@ class _ApprovalPreview extends StatelessWidget {
 }
 
 class _Box extends StatelessWidget {
-  const _Box({required this.child});
+  const _Box({required this.child, this.scroll = true});
 
+  static const padding = EdgeInsets.symmetric(horizontal: 10, vertical: 8);
   final Widget child;
+  final bool scroll;
 
   @override
   Widget build(BuildContext context) {
@@ -936,10 +958,9 @@ class _Box extends StatelessWidget {
         borderRadius: BorderRadius.circular(6),
         border: Border.all(color: AppColors.partBorder),
       ),
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        child: child,
-      ),
+      child: scroll
+          ? SingleChildScrollView(padding: padding, child: child)
+          : child,
     );
   }
 }

@@ -15,7 +15,24 @@ typedef _Change = ({
 
 enum _ReviewError { unconfirmed, stale, unsupported, conflict, busy, failed }
 
+_ReviewError _reviewFailure(LinkRemoteException error) => switch (error.code) {
+  'stale' || LinkErrors.notFound => _ReviewError.stale,
+  LinkErrors.unsupported || LinkErrors.unknown => _ReviewError.unsupported,
+  'conflict' => _ReviewError.conflict,
+  LinkErrors.busy => _ReviewError.busy,
+  _ => _ReviewError.failed,
+};
+
 class _ReviewRequest {
+  Timer? deadline;
+}
+
+class _BatchReview {
+  _BatchReview(this.changes);
+
+  final Map<String, _Change> changes;
+  Set<String>? resolved;
+  String? result;
   Timer? deadline;
 }
 
@@ -78,6 +95,9 @@ extension _ChangeReview on _DesktopRemoteActivityState {
     }
     _reviewing.clear();
     _reviewErrors.clear();
+    _batch?.deadline?.cancel();
+    _batch = null;
+    _batchNotice = null;
     _reviewPreview = null;
   }
 
@@ -89,6 +109,17 @@ extension _ChangeReview on _DesktopRemoteActivityState {
       return true;
     });
     _reviewErrors.removeWhere((path, _) => !changes.containsKey(path));
+    if (_batch case final batch?) {
+      final resolved = batch.resolved;
+      if (resolved != null &&
+          resolved.every(
+            (path) => changes[path]?.revision != batch.changes[path]!.revision,
+          )) {
+        batch.deadline?.cancel();
+        _batch = null;
+        _batchNotice = batch.result;
+      }
+    }
     if (_reviewPreview case final preview?
         when changes[preview.change.path] != preview.change) {
       _reviewPreview = null;
@@ -105,7 +136,9 @@ extension _ChangeReview on _DesktopRemoteActivityState {
     required bool guarded,
   }) {
     if (!_projectRelative(change.path)) return text.outsideProject;
-    if (_reviewing.containsKey(change.path)) return text.awaitingHost;
+    if (_batch != null || _reviewing.containsKey(change.path)) {
+      return text.awaitingHost;
+    }
     if (session._live) return text.generating;
     if (guarded && change.revision == null) return text.legacyReview;
     return null;
@@ -114,6 +147,127 @@ extension _ChangeReview on _DesktopRemoteActivityState {
   bool _canUndo(_Change change, {required bool guarded}) => guarded
       ? !change.untracked && change.undoable == true
       : change.undoable != false;
+
+  bool _canBatch(DesktopRemoteActivitySession session, {required bool keep}) {
+    final changes = session._changes;
+    return session._batchReview &&
+        !session._live &&
+        _batch == null &&
+        _reviewing.isEmpty &&
+        changes.length > 1 &&
+        changes.length <= LinkLimits.reviewChanges &&
+        changes.values.every((change) => change.revision != null) &&
+        changes.values.any((change) => _batchTarget(change, keep: keep));
+  }
+
+  bool _batchTarget(_Change change, {required bool keep}) =>
+      _projectRelative(change.path) &&
+      (keep || _canUndo(change, guarded: true));
+
+  Future<void> _reviewAll(
+    DesktopRemoteActivitySession session, {
+    required bool keep,
+  }) async {
+    if (!_current(session) || !_canBatch(session, keep: keep)) return;
+    final changes = session._changes;
+    final text = _ActivityText(context);
+    final action = keep ? context.l10n.stripKeepAll : context.l10n.stripUndoAll;
+    final count = changes.values
+        .where((change) => _batchTarget(change, keep: keep))
+        .length;
+    if (!await _confirm(
+      session,
+      action: action,
+      description: text.batchDescription(widget.hostName, keep: keep),
+      target: text.batchCount(count, changes.length - count),
+    )) {
+      return;
+    }
+    if (!_canBatch(session, keep: keep) ||
+        session._changes.length != changes.length ||
+        changes.entries.any(
+          (entry) => session._changes[entry.key] != entry.value,
+        )) {
+      _changeState(() => _batchNotice = text.reviewError(_ReviewError.stale));
+      return;
+    }
+
+    final batch = _BatchReview(changes);
+    _changeState(() {
+      _batch = batch;
+      _batchNotice = null;
+      _reviewErrors.clear();
+    });
+    bool current() => _current(session) && identical(_batch, batch);
+    void fail(_ReviewError error) {
+      if (!mounted ||
+          !identical(widget.session, session) ||
+          !identical(_batch, batch)) {
+        return;
+      }
+      _changeState(() {
+        batch.deadline?.cancel();
+        _batch = null;
+        _batchNotice = error == _ReviewError.unsupported
+            ? text.legacyBatchReview
+            : text.reviewError(error);
+      });
+    }
+
+    try {
+      final reply = await session.peer.call(LinkMethods.reviewChanges, {
+        'session': session.session,
+        'action': keep ? 'keep' : 'undo',
+        'changes': [
+          for (final change in changes.values)
+            {'path': change.path, 'revision': change.revision},
+        ],
+      });
+      if (!current()) return;
+      final remaining = changes.keys.toSet();
+      Set<String> consume(Object? value) {
+        if (value is! List) {
+          throw const FormatException('Invalid review result');
+        }
+        return {
+          for (final path in value)
+            if (path is String && remaining.remove(path))
+              path
+            else
+              throw const FormatException('Invalid review path'),
+        };
+      }
+
+      if (reply is! Map) throw const FormatException('Invalid review result');
+      final resolved = consume(reply['resolved']);
+      final conflicts = consume(reply['conflicts']);
+      final skipped = consume(reply['skipped']);
+      final pending = consume(reply['pending']);
+      if (remaining.isNotEmpty) {
+        throw const FormatException('Incomplete review result');
+      }
+      _changeState(() {
+        batch.resolved = resolved;
+        batch.result = text.batchResult(
+          resolved.length,
+          conflicts.length,
+          skipped.length,
+          pending.length,
+        );
+        batch.deadline = Timer(
+          const Duration(seconds: 10),
+          () => fail(_ReviewError.unconfirmed),
+        );
+        _syncReviews();
+      });
+    } on TimeoutException {
+      fail(_ReviewError.unconfirmed);
+    } on LinkRemoteException catch (error) {
+      fail(_reviewFailure(error));
+    } on Object {
+      fail(_ReviewError.failed);
+    }
+  }
 
   Future<void> _review(
     DesktopRemoteActivitySession session,
@@ -203,14 +357,7 @@ extension _ChangeReview on _DesktopRemoteActivityState {
     } on TimeoutException {
       fail(_ReviewError.unconfirmed);
     } on LinkRemoteException catch (error) {
-      fail(switch (error.code) {
-        'stale' || LinkErrors.notFound => _ReviewError.stale,
-        LinkErrors.unsupported ||
-        LinkErrors.unknown => _ReviewError.unsupported,
-        'conflict' => _ReviewError.conflict,
-        LinkErrors.busy => _ReviewError.busy,
-        _ => _ReviewError.failed,
-      });
+      fail(_reviewFailure(error));
     } on Object {
       fail(_ReviewError.failed);
     }
@@ -331,7 +478,10 @@ extension _ChangeReview on _DesktopRemoteActivityState {
           leading: _ActivityIconButton(
             tooltip: preview.fromStrip ? text.closeDiff : text.backToChanges,
             icon: compact ? Codicons.arrowLeft : Codicons.close,
-            onPressed: () => _changeState(() => _reviewPreview = null),
+            onPressed: () => _changeState(() {
+              _reviewPreview = null;
+              if (!preview.fromStrip && _open) _requests++;
+            }),
           ),
           label: preview.change.path,
           trailing: Row(
@@ -557,6 +707,38 @@ extension _ReviewText on _ActivityText {
   String undoDescription(String host) => _zh
       ? '撤销 $host 上此会话对此文件的更改？此操作会修改主机上的文件。'
       : 'Undo this session’s changes to this file on $host? This modifies the file on the host.';
+
+  String get legacyBatchReview => _zh
+      ? '此主机版本不支持批量审阅，可逐个处理文件。'
+      : 'This host does not support batch review. Review files individually.';
+  String get batchLimit => _zh
+      ? '文件数超过批量审阅上限，可逐个处理文件。'
+      : 'Too many files for batch review. Review files individually.';
+  String batchDescription(String host, {required bool keep}) => switch ((
+    _zh,
+    keep,
+  )) {
+    (true, true) => '保留 $host 上此会话的更改？文件内容不变。',
+    (true, false) => '撤销 $host 上此会话的更改？此操作会修改主机上的文件，冲突文件会保留。',
+    (false, true) =>
+      'Keep this session’s changes on $host? File contents will not change.',
+    (false, false) =>
+      'Undo this session’s changes on $host? This modifies files on the host and leaves conflicts pending.',
+  };
+  String batchCount(int count, int skipped) => _zh
+      ? '$count 个文件待处理${skipped == 0 ? '' : '，跳过 $skipped 个'}'
+      : '$count files to review${skipped == 0 ? '' : ', $skipped skipped'}';
+  String batchResult(int resolved, int conflicts, int skipped, int pending) => [
+    _zh
+        ? '已处理 $resolved 个文件'
+        : 'Resolved $resolved ${resolved == 1 ? 'file' : 'files'}',
+    if (conflicts > 0)
+      _zh
+          ? '$conflicts 个冲突'
+          : '$conflicts ${conflicts == 1 ? 'conflict' : 'conflicts'}',
+    if (skipped > 0) _zh ? '跳过 $skipped 个' : '$skipped skipped',
+    if (pending > 0) _zh ? '$pending 个仍待处理' : '$pending still pending',
+  ].join(' · ');
 
   String get binary => _zh ? '二进制' : 'Binary';
   String get untracked => _zh ? '未跟踪' : 'Untracked';

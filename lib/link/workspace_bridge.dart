@@ -966,6 +966,12 @@ class WorkspaceBridge {
       case LinkMethods.keep:
       case LinkMethods.undo:
         return _resolveChanges(params, keep: method == LinkMethods.keep);
+      case LinkMethods.reviewChanges:
+        final thread = _thread(params['session']);
+        return _withChangeResolution(
+          thread.session,
+          () => _reviewChanges(thread, params),
+        );
       case LinkMethods.stopTask:
         final session = _thread(params['session']).session;
         if (params['agent'] case final String agent) {
@@ -1716,9 +1722,12 @@ class WorkspaceBridge {
   FileChange _reviewedChange(
     AgentThread thread,
     String path,
-    Object? revision,
-  ) {
-    final change = _selectedChange(thread, path, guarded: true);
+    Object? revision, {
+    Map<String, FileChange>? published,
+  }) {
+    final change = published == null
+        ? _selectedChange(thread, path, guarded: true)
+        : published[path] ?? (throw _staleChange);
     final follow = _follows[idOf(thread)];
     if (revision is! String ||
         follow == null ||
@@ -1734,9 +1743,18 @@ class WorkspaceBridge {
   Future<Object?> _resolveChanges(
     Map<String, Object?> params, {
     required bool keep,
-  }) async {
+  }) {
     final thread = _thread(params['session']);
-    final session = thread.session;
+    return _withChangeResolution(
+      thread.session,
+      () => _resolveChangesFor(thread, params, keep: keep),
+    );
+  }
+
+  Future<T> _withChangeResolution<T>(
+    ChatSession session,
+    Future<T> Function() resolve,
+  ) async {
     if (_resolvingChanges[session] == true) {
       throw const LinkRemoteException(
         LinkErrors.busy,
@@ -1745,7 +1763,7 @@ class WorkspaceBridge {
     }
     _resolvingChanges[session] = true;
     try {
-      return await _resolveChangesFor(thread, params, keep: keep);
+      return await resolve();
     } finally {
       _resolvingChanges[session] = null;
     }
@@ -1839,6 +1857,124 @@ class WorkspaceBridge {
       throw _staleChange;
     }
     return null;
+  }
+
+  Future<Map<String, List<String>>> _reviewChanges(
+    AgentThread thread,
+    Map<String, Object?> params,
+  ) async {
+    final keep = switch (params['action']) {
+      LinkMethods.keep => true,
+      LinkMethods.undo => false,
+      _ => throw _staleChange,
+    };
+    final raw = params['changes'];
+    if (raw is! List || raw.isEmpty || raw.length > LinkLimits.reviewChanges) {
+      throw _staleChange;
+    }
+    final revisions = <String, String>{};
+    for (final row in raw) {
+      if (row
+          case {'path': final String path, 'revision': final String revision}
+          when path.isNotEmpty &&
+              revision.isNotEmpty &&
+              !revisions.containsKey(path)) {
+        revisions[path] = revision;
+      } else {
+        throw _staleChange;
+      }
+    }
+
+    final session = thread.session;
+    final review = session.changeReview;
+    final allowed = <String>{};
+    Map<String, FileChange> validate({bool queued = false}) {
+      if (!identical(_thread(params['session']).session, session) ||
+          !identical(session.changeReview, review)) {
+        throw _staleChange;
+      }
+      if (session.isStreaming || (queued && review?.isWriting == true)) {
+        throw const LinkRemoteException(
+          LinkErrors.busy,
+          'Wait for the agent to finish before resolving these changes.',
+        );
+      }
+      final changes = session.fileChanges;
+      if (changes.length != revisions.length) throw _staleChange;
+      final published = <String, FileChange>{};
+      for (final change in changes) {
+        final logical = _phonePath(thread.project, change.path);
+        final path = (logical ?? change.path).replaceAll(r'\', '/');
+        if (published.containsKey(path)) throw _staleChange;
+        published[path] = change;
+        final canResolve =
+            logical != null && (keep || (review != null && change.tracked));
+        if (queued) {
+          if (allowed.contains(path) != canResolve) throw _staleChange;
+        } else if (canResolve) {
+          allowed.add(path);
+        }
+      }
+      return {
+        for (final MapEntry(:key, :value) in revisions.entries)
+          key: _reviewedChange(thread, key, value, published: published),
+      };
+    }
+
+    final selected = validate();
+    final targets = [
+      for (final path in selected.keys)
+        if (allowed.contains(path)) selected[path]!,
+    ];
+    if (review == null) {
+      if (keep && targets.isNotEmpty) session.keepChanges(targets);
+    } else {
+      var validated = false;
+      void validateQueued() {
+        validate(queued: true);
+        validated = true;
+      }
+
+      final paths = targets.map((change) => change.path);
+      if (keep) {
+        await review.keep(paths, validate: validateQueued);
+      } else {
+        await review.undo(paths, validate: validateQueued);
+      }
+      if (review.failure != null) {
+        throw const LinkRemoteException(
+          LinkErrors.unsupported,
+          'The change review is no longer available.',
+        );
+      }
+      if (!validated) throw _staleChange;
+    }
+
+    final remaining = {
+      for (final change in session.fileChanges) change.path: change,
+    };
+    final resolved = <String>[];
+    final conflicts = <String>[];
+    final skipped = <String>[];
+    final pending = <String>[];
+    for (final MapEntry(key: path, :value) in selected.entries) {
+      final change = remaining[value.path];
+      if (!allowed.contains(path)) {
+        skipped.add(path);
+      } else if (change == null) {
+        resolved.add(path);
+      } else if (!keep && change.conflict) {
+        conflicts.add(path);
+      } else {
+        pending.add(path);
+      }
+    }
+    return {
+      'resolved': resolved,
+      'conflicts': conflicts,
+      'skipped': skipped,
+      'pending': pending,
+    };
   }
 
   /// A scoped read of the current and original text from this session's
@@ -2107,6 +2243,7 @@ class _Follow {
       'queue': session.canQueue,
       'edit': session.canEditMessages,
       'startPlan': session.canStartPlan,
+      LinkMethods.reviewChanges: true,
       'turn': ?session.activeTurnToken,
     };
     final restText = jsonEncode([
@@ -2271,7 +2408,8 @@ class _Follow {
       if (change.conflict) 'conflict': true,
       'revision': _changeRevisions[change] ??=
           '${WorkspaceBridge._run}-$_reviewFollow-${_nextChangeRevision++}',
-      'undoable': change.tracked && session.changeReview != null,
+      'undoable':
+          logicalPath != null && change.tracked && session.changeReview != null,
       if (logicalPath != null &&
           !change.binary &&
           session.originalOf(change) != null)

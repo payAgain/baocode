@@ -188,6 +188,7 @@ class TerminalBackend {
 
 class TerminalInstance extends ChangeNotifier {
   /// Starts the process at once, [columns] by [rows] until the view says.
+  /// An [outputOnly] instance instead draws text supplied by [printOutput].
   TerminalInstance({
     required this.id,
     required this.root,
@@ -199,8 +200,10 @@ class TerminalInstance extends ChangeNotifier {
     this.shell,
     this._config,
     this.environmentMutator,
+    this.outputOnly = false,
     ValueListenable<TerminalColorTheme>? colorTheme,
-  }) : _colorTheme = colorTheme ?? terminalColorTheme {
+  }) : _colorTheme = colorTheme ?? terminalColorTheme,
+       _exited = outputOnly {
     _initPlatform();
     xterm = TerminalXterm(
       vscodeTerminalOptions(
@@ -213,6 +216,14 @@ class TerminalInstance extends ChangeNotifier {
     CodeFont.families.addListener(_updateFont);
     LinuxCodeFonts.resolved.addListener(_updateFont);
     source = TerminalCoreSource(terminal, decorationService: decorations);
+    if (outputOnly) {
+      xterm.options.disableStdin = true;
+      // Keep ANSI styling, but ignore OSC requests that could change terminal
+      // metadata, set hyperlinks, manipulate the clipboard, or set the palette.
+      for (final code in [0, 1, 2, 4, 8, 10, 11, 12, 52, 104, 110, 111, 112]) {
+        xterm.parser.registerOscHandler(code, (_) => true);
+      }
+    }
     clipboard = TerminalClipboard(
       selection: selection,
       coreService: terminal.coreService,
@@ -224,7 +235,7 @@ class TerminalInstance extends ChangeNotifier {
       mouseStateService: terminal.mouseStateService,
       optionsService: terminal.optionsService,
       selection: selection,
-      clipboard: clipboard,
+      clipboard: outputOnly ? null : clipboard,
     );
     keyboard = TerminalKeyboard(
       bufferService: terminal.bufferService,
@@ -252,7 +263,18 @@ class TerminalInstance extends ChangeNotifier {
       final newLine = buffer.lines.get(index);
       if (newLine != null && !newLine.isWrapped) _sendLineData(index - 1);
     });
-    unawaited(_start());
+    if (!outputOnly) unawaited(_start());
+  }
+
+  /// Whether this instance displays output without starting a process.
+  final bool outputOnly;
+
+  /// Prints text into a process-free output view.
+  void printOutput(String text) {
+    assert(outputOnly);
+    if (outputOnly && !_disposed && text.isNotEmpty) {
+      _printed(utf8.encode(text));
+    }
   }
 
   /// Its initial text and exit messages are no lines of output
@@ -312,7 +334,7 @@ class TerminalInstance extends ChangeNotifier {
   /// [config] says, after the last one exited (a task's terminal, shared
   /// by tasks). What it printed stays.
   void reuse(TerminalLaunchConfig config) {
-    if (_disposed) return;
+    if (_disposed || outputOnly) return;
     if (!_exited) {
       exitReason = null;
       _pty?.kill();

@@ -386,10 +386,12 @@ class _PeopleEditors {
             title: _tr('Members', '成员'),
             children: [
               for (final bot in catalog.bots)
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(bot['name'] as String),
-                  value: draft.members.contains(bot['id']),
+                BotEditorMemberTile(
+                  member: (
+                    id: bot['id'] as String,
+                    name: bot['name'] as String,
+                  ),
+                  selected: draft.members.contains(bot['id']),
                   onChanged: !editable
                       ? null
                       : (on) => _edit(() {
@@ -478,37 +480,18 @@ class _PeopleEditors {
     _PeopleDraft draft,
     _PeopleCatalog catalog,
     bool editable,
-  ) {
-    final choices = catalog.bots
-        .where((bot) => draft.members.contains(bot['id']))
-        .toList();
-    return InputDecorator(
-      decoration: botEditorInput(_tr('Default lead', '默认领队')),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          key: const ValueKey('remote-group-lead'),
-          isExpanded: true,
-          value: choices.any((bot) => bot['id'] == draft.lead)
-              ? draft.lead
-              : '',
-          items: [
-            DropdownMenuItem(value: '', child: Text(_tr('Automatic', '自动'))),
-            for (final bot in choices)
-              DropdownMenuItem(
-                value: bot['id'] as String,
-                child: Text(
-                  bot['name'] as String,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-          ],
-          onChanged: editable
-              ? (id) => _edit(() => draft.lead = id == '' ? null : id)
-              : null,
-        ),
-      ),
-    );
-  }
+  ) => BotEditorLeadPicker(
+    pickerKey: const ValueKey('remote-group-lead'),
+    label: _tr('Default lead', '默认领队'),
+    defaultLabel: _tr('Automatic', '自动'),
+    members: [
+      for (final bot in catalog.bots)
+        if (draft.members.contains(bot['id']))
+          (id: bot['id'] as String, name: bot['name'] as String),
+    ],
+    lead: draft.lead,
+    onChanged: editable ? (id) => _edit(() => draft.lead = id) : null,
+  );
 
   Widget _memory(_PeopleDraft draft) => state._editor(
     title: _tr('Memory & self notes', '记忆和自我笔记'),

@@ -676,26 +676,14 @@ class _FilePreviewState extends State<FilePreview> {
       case _Text(:final lines):
         if (_edit case final edit?) return _editing(edit);
         final range = _request.range;
-        final gutter = _gutter(context, lines.length);
-        final wrap = EditorWordWrap.on.value;
-        return _Lines(
+        return ReadOnlyFileLines(
           key: ValueKey(('text', _request.path)),
-          count: lines.length,
-          wrap: wrap,
-          lineHeight: _lineHeight(context),
+          lines: lines,
+          colors: _colors,
           reveal: widget.reveal,
-          target: range == null ? null : range.start - 1,
-          width: _widthOf(context, lines, () => lines) + gutter + 20,
+          firstMarkedLine: range?.start,
+          lastMarkedLine: range?.end,
           onCopy: (first, last, text) => _copied(first + 1, last + 1, text),
-          row: (context, i, sideways) => _LineRow(
-            number: i + 1,
-            text: lines[i],
-            colors: _colors.elementAtOrNull(i),
-            gutter: gutter,
-            sideways: sideways,
-            wrap: wrap,
-            marked: range != null && i + 1 >= range.start && i + 1 <= range.end,
-          ),
         );
     }
   }
@@ -900,6 +888,64 @@ class _FilePreviewState extends State<FilePreview> {
         : FileLink.parseHref('x#$fragment')?.range;
     widget.onOpenFile?.call(FileOpenRequest(path, range: range));
   }
+}
+
+/// Selectable source lines with a line-number gutter and editor scrolling.
+/// The caller supplies content. This view never loads or opens a path.
+class ReadOnlyFileLines extends StatefulWidget {
+  const ReadOnlyFileLines({
+    super.key,
+    required this.lines,
+    this.colors = const [],
+    this.reveal = 0,
+    this.firstMarkedLine,
+    this.lastMarkedLine,
+    this.onCopy,
+  });
+
+  final List<String> lines;
+  final List<List<TextSpan>?> colors;
+  final int reveal;
+  final int? firstMarkedLine;
+  final int? lastMarkedLine;
+  final void Function(int first, int last, String text)? onCopy;
+
+  @override
+  State<ReadOnlyFileLines> createState() => _ReadOnlyFileLinesState();
+}
+
+class _ReadOnlyFileLinesState extends State<ReadOnlyFileLines> {
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder(
+    valueListenable: EditorWordWrap.on,
+    builder: (context, wrap, _) {
+      final lines = widget.lines;
+      final gutter = _gutter(context, lines.length);
+      final first = widget.firstMarkedLine;
+      final last = widget.lastMarkedLine;
+      return _Lines(
+        count: lines.length,
+        wrap: wrap,
+        lineHeight: _lineHeight(context),
+        reveal: widget.reveal,
+        target: first == null || lines.isEmpty
+            ? null
+            : (first - 1).clamp(0, lines.length - 1),
+        width: wrap ? 0 : _widthOf(context, lines, () => lines) + gutter + 20,
+        onCopy: widget.onCopy,
+        row: (context, i, sideways) => _LineRow(
+          number: i + 1,
+          text: lines[i],
+          colors: widget.colors.elementAtOrNull(i),
+          gutter: gutter,
+          sideways: sideways,
+          wrap: wrap,
+          marked:
+              first != null && last != null && i + 1 >= first && i + 1 <= last,
+        ),
+      );
+    },
+  );
 
   static TextStyle _codeStyle(BuildContext context) =>
       AppFonts.codeStyle(12).copyWith(height: 1.5);
@@ -994,7 +1040,6 @@ class _FilePreviewState extends State<FilePreview> {
 /// rows (from 0, the first and the last) they are.
 class _Lines extends StatefulWidget {
   const _Lines({
-    super.key,
     required this.count,
     required this.row,
     required this.width,

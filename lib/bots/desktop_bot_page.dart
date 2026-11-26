@@ -7,6 +7,7 @@ import '../chat/chat_models.dart' show UserMessageItem;
 import '../chat/chat_session.dart';
 import '../chat/composer/composer.dart';
 import '../chat/stop_confirmation.dart';
+import '../chat/widgets/image_thumbnails.dart';
 import '../chat/widgets/user_message_bubble.dart';
 import '../kernel/kernel_types.dart' show KernelHealthStatus;
 import '../keybindings/chat_keybindings.dart';
@@ -18,6 +19,7 @@ import '../workspace/session_tools.dart';
 import '../workspace/workspace.dart';
 import 'bot.dart';
 import 'bots.dart';
+import 'desktop_bot_message_row.dart';
 import 'desktop_bot_messages.dart';
 
 /// A bot's private chat. It uses the same conversation the phone opens.
@@ -220,7 +222,11 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
                   TextButton.icon(
                     onPressed: widget.onSettings,
                     icon: const Icon(Icons.tune, size: 18),
-                    label: Text(Localizations.localeOf(context).languageCode == 'zh' ? 'Bot 设置' : 'Bot settings'),
+                    label: Text(
+                      Localizations.localeOf(context).languageCode == 'zh'
+                          ? 'Bot 设置'
+                          : 'Bot settings',
+                    ),
                   ),
               ],
             ),
@@ -351,65 +357,34 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
         ),
       );
     }
-    final user = message.kind == DesktopBotMessageKind.user;
-    final narration = message.kind == DesktopBotMessageKind.narration;
-    return Align(
-      alignment: user
-          ? AlignmentDirectional.centerEnd
-          : AlignmentDirectional.centerStart,
-      child: FractionallySizedBox(
-        widthFactor: 0.88,
-        alignment: user
-            ? AlignmentDirectional.centerEnd
-            : AlignmentDirectional.centerStart,
-        child: Align(
-          alignment: user
-              ? AlignmentDirectional.centerEnd
-              : AlignmentDirectional.centerStart,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: user ? AppColors.bubbleFill : Colors.transparent,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (message.textWithAttachments case final text?)
-                    UserMessageBubble(text: text)
-                  else if (message.text.isNotEmpty)
-                    Text(
-                      message.text,
-                      style: TextStyle(
-                        color: narration ? AppColors.textMuted : AppColors.text,
-                        fontStyle: narration
-                            ? FontStyle.italic
-                            : FontStyle.normal,
-                      ),
-                    ),
-                  for (final image in message.images)
-                    Image.memory(
-                      image.bytes,
-                      fit: BoxFit.contain,
-                      height: 180,
-                      errorBuilder: (context, error, stackTrace) =>
-                          const Icon(Icons.broken_image_outlined),
-                    ),
-                  if (message.imageUrl case final url?)
-                    TextButton.icon(
-                      // Remote content loads only when the user opens it.
-                      onPressed: () => unawaited(openExternal(url.toString())),
-                      icon: const Icon(Icons.image_outlined, size: 16),
-                      label: Text(context.l10n.fileLinkOpenInBrowser),
-                    ),
-                ],
-              ),
-            ),
+    return DesktopBotMessageRow(
+      mine: message.kind == DesktopBotMessageKind.user,
+      sentAt: message.sentAt,
+      content: [
+        if (message.textWithAttachments case final text?)
+          UserMessageBubble(text: text)
+        else if (message.text.isNotEmpty)
+          DesktopBotMessageText(
+            message.text,
+            narration: message.kind == DesktopBotMessageKind.narration,
           ),
-        ),
-      ),
+      ],
+      media: message.images.isEmpty && message.imageUrl == null
+          ? null
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (message.images.isNotEmpty)
+                  ImageThumbnails(images: message.images),
+                if (message.imageUrl case final url?)
+                  TextButton.icon(
+                    // External content loads only when the user opens it.
+                    onPressed: () => unawaited(openExternal(url.toString())),
+                    icon: const Icon(Icons.image_outlined, size: 16),
+                    label: Text(context.l10n.fileLinkOpenInBrowser),
+                  ),
+              ],
+            ),
     );
   }
 

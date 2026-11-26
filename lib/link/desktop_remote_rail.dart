@@ -4,9 +4,13 @@ import 'dart:typed_data';
 
 import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../chat/side_panel/file_preview.dart' show ReadOnlyFileLines;
+import '../chat/side_panel/line_diff.dart' show diffLines;
 import '../ide/ide_list.dart';
 import '../ide/ide_panes.dart' show IdePaneAction, IdeViewTitle;
+import '../ide/workbench/parts/sash.dart';
 import '../l10n/l10n.dart';
 import '../theme/app_theme.dart' show AppColors;
 import '../theme/codicons.dart';
@@ -41,6 +45,10 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
   bool _downloading = false;
   String? _downloadStatus;
   StreamSubscription<LinkEvent>? _connection;
+  final _treeScroll = ScrollController();
+  static const _defaultTreeWidth = 200.0;
+  double _treeWidth = _defaultTreeWidth;
+  double _dragWidth = _defaultTreeWidth;
 
   String? get _project => switch (widget.chat) {
     DesktopHostChat(kind: 'project', projectId: final id?) when id.isNotEmpty =>
@@ -90,6 +98,7 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
   @override
   void dispose() {
     unawaited(_connection?.cancel());
+    _treeScroll.dispose();
     super.dispose();
   }
 
@@ -230,57 +239,103 @@ class _DesktopRemoteRailState extends State<DesktopRemoteRail> {
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            IdeViewTitle(
-              l10n.wbExplorer,
-              border: AppColors.partBorder,
-              actions: [
-                IdePaneAction(
-                  icon: Codicons.refresh,
-                  tooltip: l10n.cmdRefreshExplorer,
-                  onPressed: _refresh,
+        child: LayoutBuilder(
+          builder: (context, limits) {
+            final tree = Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                IdeViewTitle(
+                  l10n.wbExplorer,
+                  border: AppColors.partBorder,
+                  actions: [
+                    IdePaneAction(
+                      icon: Codicons.refresh,
+                      tooltip: l10n.cmdRefreshExplorer,
+                      onPressed: _refresh,
+                    ),
+                    IdePaneAction(
+                      icon: Codicons.collapseAll,
+                      tooltip: l10n.cmdCollapseExplorerFolders,
+                      onPressed: () => setState(_expanded.clear),
+                    ),
+                  ],
                 ),
-                IdePaneAction(
-                  icon: Codicons.collapseAll,
-                  tooltip: l10n.cmdCollapseExplorerFolders,
-                  onPressed: () => setState(_expanded.clear),
+                Expanded(
+                  child: ListView.builder(
+                    controller: _treeScroll,
+                    primary: false,
+                    padding: const EdgeInsets.symmetric(vertical: 3),
+                    itemCount: rows.length,
+                    itemBuilder: (context, index) {
+                      final (depth, value) = rows[index];
+                      return value is _Entry
+                          ? _row(value, depth)
+                          : _Notice(value as String, depth: depth);
+                    },
+                  ),
                 ),
               ],
-            ),
-            Expanded(
-              flex: preview == null ? 1 : 2,
-              child: ListView.builder(
-                primary: false,
-                padding: const EdgeInsets.symmetric(vertical: 3),
-                itemCount: rows.length,
-                itemBuilder: (context, index) {
-                  final (depth, value) = rows[index];
-                  return value is _Entry
-                      ? _row(value, depth)
-                      : _Notice(value as String, depth: depth);
-                },
-              ),
-            ),
-            if (preview != null)
-              Expanded(
-                flex: 3,
-                child: _FilePreviewPane(
-                  key: ValueKey(preview),
-                  path: preview.$1,
-                  result: preview.$2,
-                  downloading: _downloading,
-                  status: _downloadStatus,
-                  onDownload: WindowControls.canPickFiles ? _download : null,
-                  onClose: () => setState(() {
-                    _preview = null;
-                    _downloadStatus = null;
-                    _downloading = false;
-                  }),
+            );
+            final pane = preview == null
+                ? Center(child: _Notice(l10n.sidePanelSelectFile))
+                : _FilePreviewPane(
+                    key: ValueKey(preview),
+                    path: preview.$1,
+                    result: preview.$2,
+                    downloading: _downloading,
+                    status: _downloadStatus,
+                    onDownload: WindowControls.canPickFiles ? _download : null,
+                    onClose: () => setState(() {
+                      _preview = null;
+                      _downloadStatus = null;
+                      _downloading = false;
+                    }),
+                  );
+            final room = limits.maxWidth;
+            final wide = room >= 400;
+            final maxTree = room - 200;
+            final width = wide ? _treeWidth.clamp(140.0, maxTree) : room;
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                Flex(
+                  direction: wide ? Axis.horizontal : Axis.vertical,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (wide)
+                      SizedBox(width: width, child: tree)
+                    else
+                      Expanded(flex: 2, child: tree),
+                    if (wide || preview != null) ...[
+                      if (wide)
+                        VerticalDivider(width: 1, color: AppColors.partBorder)
+                      else
+                        Divider(height: 1, color: AppColors.partBorder),
+                      Expanded(
+                        key: const ValueKey('file-preview'),
+                        flex: 3,
+                        child: pane,
+                      ),
+                    ],
+                  ],
                 ),
-              ),
-          ],
+                if (wide)
+                  positionedSash(
+                    width,
+                    room,
+                    WorkbenchSash(
+                      key: const ValueKey('remote-files-sash'),
+                      onStart: () => _dragWidth = width,
+                      onDrag: (delta) => setState(() {
+                        _treeWidth = (_dragWidth + delta).clamp(140.0, maxTree);
+                      }),
+                      onReset: () =>
+                          setState(() => _treeWidth = _defaultTreeWidth),
+                    ),
+                  ),
+              ],
+            );
+          },
         ),
       ),
     );
@@ -476,14 +531,14 @@ Future<List<_Entry>> _loadFolder(
 
 class _FilePreview {
   const _FilePreview({
-    this.text,
+    this.document,
     this.image,
     this.binary = false,
     this.tooLarge = false,
     this.size,
   });
 
-  final String? text;
+  final ({String source, List<String> lines})? document;
   final Uint8List? image;
   final bool binary;
   final bool tooLarge;
@@ -507,7 +562,7 @@ Future<_FilePreview> _readFile(
     ),
     {'tooLarge': true} => const _FilePreview(tooLarge: true),
     {'text': final String text} when text.length <= LinkLimits.file =>
-      _FilePreview(text: text),
+      _FilePreview(document: (source: text, lines: diffLines(text))),
     {'text': final String text} => _FilePreview(
       tooLarge: true,
       size: text.length,
@@ -537,88 +592,93 @@ class _FilePreviewPane extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Divider(height: 1, color: AppColors.partBorder),
-        IdeViewTitle(
-          path,
-          border: AppColors.partBorder,
-          actions: [
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 90),
-              child: Text(
-                l10n.shownReadOnly,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 11, color: AppColors.textMuted),
-              ),
-            ),
-            if (onDownload != null)
-              KeyedSubtree(
-                key: const ValueKey('desktop-remote-download'),
-                child: IdePaneAction(
-                  icon: Codicons.cloudDownload,
-                  tooltip: l10n.explorerDownload,
-                  onPressed: downloading ? () {} : onDownload!,
+    return FutureBuilder(
+      future: result,
+      builder: (context, snapshot) {
+        final document = snapshot.data?.document;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            IdeViewTitle(
+              path,
+              border: AppColors.partBorder,
+              actions: [
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 90),
+                  child: Text(
+                    l10n.shownReadOnly,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: AppColors.textMuted),
+                  ),
                 ),
-              ),
-            IdePaneAction(
-              icon: Codicons.close,
-              tooltip: l10n.sidePanelCloseTab,
-              onPressed: onClose,
+                if (document != null)
+                  IdePaneAction(
+                    key: const ValueKey('desktop-remote-copy-all'),
+                    icon: Codicons.copy,
+                    tooltip: l10n.searchCopyAll,
+                    onPressed: () => unawaited(
+                      Clipboard.setData(ClipboardData(text: document.source)),
+                    ),
+                  ),
+                if (onDownload != null)
+                  KeyedSubtree(
+                    key: const ValueKey('desktop-remote-download'),
+                    child: IdePaneAction(
+                      icon: Codicons.cloudDownload,
+                      tooltip: l10n.explorerDownload,
+                      onPressed: downloading ? () {} : onDownload!,
+                    ),
+                  ),
+                IdePaneAction(
+                  icon: Codicons.close,
+                  tooltip: l10n.sidePanelCloseTab,
+                  onPressed: onClose,
+                ),
+              ],
+            ),
+            if (status case final message?) _Notice(message),
+            Expanded(
+              child: document == null
+                  ? SingleChildScrollView(
+                      primary: false,
+                      child: _nonTextContent(snapshot, l10n),
+                    )
+                  : ReadOnlyFileLines(lines: document.lines),
             ),
           ],
-        ),
-        if (status case final message?) _Notice(message),
-        Expanded(
-          child: FutureBuilder(
-            future: result,
-            builder: (context, snapshot) {
-              final Widget content = switch (snapshot) {
-                AsyncSnapshot(connectionState: ConnectionState.waiting) =>
-                  _Notice(l10n.langLoading),
-                AsyncSnapshot(
-                  error: LinkRemoteException(code: LinkErrors.notFound),
-                ) =>
-                  _Notice(l10n.placeholderNotFound),
-                AsyncSnapshot(data: _FilePreview(binary: true)) => _Notice(
-                  l10n.placeholderBinary,
-                ),
-                AsyncSnapshot(error: final RemoteMediaTooLarge error) =>
-                  _Notice(remoteMediaError(l10n, error)),
-                AsyncSnapshot(error: final RemoteUnsupportedImage error) =>
-                  _Notice(remoteMediaError(l10n, error)),
-                AsyncSnapshot(data: _FilePreview(image: final bytes?)) =>
-                  SizedBox(height: 180, child: DesktopRemoteImagePixels(bytes)),
-                AsyncSnapshot(
-                  data: _FilePreview(tooLarge: true, :final size),
-                ) =>
-                  _Notice(
-                    l10n.placeholderTooLarge(
-                      size == null ? '${LinkLimits.file ~/ 1024} KB+' : '$size',
-                    ),
-                  ),
-                AsyncSnapshot(data: _FilePreview(text: final text?)) => Padding(
-                  padding: const EdgeInsets.all(10),
-                  // Literal text only. A remote document cannot load resources
-                  // or run any of the local editor's open/edit actions.
-                  child: SelectableText(
-                    text,
-                    style: TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 12,
-                      color: AppColors.text,
-                    ),
-                  ),
-                ),
-                _ => _Notice(l10n.placeholderUnexpected),
-              };
-              return SingleChildScrollView(primary: false, child: content);
-            },
-          ),
-        ),
-      ],
+        );
+      },
     );
   }
+
+  Widget _nonTextContent(
+    AsyncSnapshot<_FilePreview> snapshot,
+    AppLocalizations l10n,
+  ) => switch (snapshot) {
+    AsyncSnapshot(connectionState: ConnectionState.waiting) => _Notice(
+      l10n.langLoading,
+    ),
+    AsyncSnapshot(error: LinkRemoteException(code: LinkErrors.notFound)) =>
+      _Notice(l10n.placeholderNotFound),
+    AsyncSnapshot(data: _FilePreview(binary: true)) => _Notice(
+      l10n.placeholderBinary,
+    ),
+    AsyncSnapshot(error: final RemoteMediaTooLarge error) => _Notice(
+      remoteMediaError(l10n, error),
+    ),
+    AsyncSnapshot(error: final RemoteUnsupportedImage error) => _Notice(
+      remoteMediaError(l10n, error),
+    ),
+    AsyncSnapshot(data: _FilePreview(image: final bytes?)) => SizedBox(
+      height: 180,
+      child: DesktopRemoteImagePixels(bytes),
+    ),
+    AsyncSnapshot(data: _FilePreview(tooLarge: true, :final size)) => _Notice(
+      l10n.placeholderTooLarge(
+        size == null ? '${LinkLimits.file ~/ 1024} KB+' : '$size',
+      ),
+    ),
+    _ => _Notice(l10n.placeholderUnexpected),
+  };
 }

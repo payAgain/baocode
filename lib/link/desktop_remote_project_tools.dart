@@ -9,6 +9,8 @@ import '../icons/icon_library.dart';
 import '../icons/project_icon.dart';
 import '../icons/project_icon_view.dart';
 import '../l10n/l10n.dart';
+import '../sidebar/sidebar_menu.dart';
+import '../sidebar/sidebar_rows.dart';
 
 /// Checks the live connection and catalog, not the snapshots used to build a row.
 typedef DesktopRemoteProjectGuard = bool Function(
@@ -29,6 +31,7 @@ class DesktopRemoteProjectActions extends StatefulWidget {
     required this.isCurrent,
     this.enabled = true,
     this.onError,
+    this.builder,
   });
 
   final LinkPeer peer;
@@ -37,6 +40,7 @@ class DesktopRemoteProjectActions extends StatefulWidget {
   final DesktopRemoteProjectGuard isCurrent;
   final bool enabled;
   final ValueChanged<String>? onError;
+  final Widget Function(List<SidebarMenuItem> Function()? items)? builder;
 
   @override
   State<DesktopRemoteProjectActions> createState() =>
@@ -150,6 +154,28 @@ class _DesktopRemoteProjectActionsState
     final id = widget.project.id;
     final pinned = widget.project.pinned == true;
     final strings = context.l10n;
+    final enabled = widget.enabled && _pending == null && _current(peer, id);
+    if (widget.builder case final build?) {
+      return build(
+        enabled
+            ? () => [
+                SidebarRowMenuItems.pin(
+                  strings,
+                  pinned,
+                  () => _manage(
+                    peer,
+                    id,
+                    pinned ? _ProjectAction.unpin : _ProjectAction.pin,
+                  ),
+                ),
+                SidebarRowMenuItems.removeProject(
+                  strings,
+                  () => _manage(peer, id, _ProjectAction.hide),
+                ),
+              ]
+            : null,
+      );
+    }
     return SizedBox.square(
       dimension: 28,
       child: PopupMenuButton<_ProjectAction>(
@@ -157,7 +183,7 @@ class _DesktopRemoteProjectActionsState
         tooltip: Localizations.localeOf(context).languageCode == 'zh'
             ? '项目操作'
             : 'Project actions',
-        enabled: widget.enabled && _pending == null && _current(peer, id),
+        enabled: enabled,
         padding: EdgeInsets.zero,
         iconSize: 16,
         onSelected: (action) => _manage(peer, id, action),

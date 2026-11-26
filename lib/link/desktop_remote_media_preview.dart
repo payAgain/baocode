@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:bao_link/bao_link.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:markdown/markdown.dart' as md;
 
@@ -155,15 +156,26 @@ class DesktopRemoteMessageImages extends StatefulWidget {
     required this.peer,
     required this.chat,
     required this.images,
-    required this.child,
+    required Widget this.child,
     this.trailing = false,
     this.isCurrent,
-  });
+  }) : mediaBuilder = null;
+
+  const DesktopRemoteMessageImages.inRow({
+    super.key,
+    required this.peer,
+    required this.chat,
+    required this.images,
+    required Widget Function(Widget?) this.mediaBuilder,
+    this.isCurrent,
+  }) : child = null,
+       trailing = false;
 
   final LinkPeer? peer;
   final DesktopHostChat chat;
   final List<DesktopRemoteImage> images;
-  final Widget child;
+  final Widget? child;
+  final Widget Function(Widget?)? mediaBuilder;
   final bool trailing;
   final bool Function()? isCurrent;
 
@@ -188,19 +200,15 @@ class _DesktopRemoteMessageImagesState
   @override
   void didUpdateWidget(DesktopRemoteMessageImages oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (_target(oldWidget) != _target(widget) || !_current) {
-      _preview = null;
-      _thumbnails.clear();
-    } else if (_preview case (final selected, _)
-        when !widget.images.any(
-          (image) =>
-              image._source == selected._source &&
-              image._value == selected._value,
+    if (_target(oldWidget) != _target(widget) ||
+        !_current ||
+        !listEquals(
+          oldWidget.images.map(_imageKey).toList(),
+          widget.images.map(_imageKey).toList(),
         )) {
       _preview = null;
+      _thumbnails.clear();
     }
-    final keys = widget.images.map(_imageKey).toSet();
-    _thumbnails.removeWhere((key, _) => !keys.contains(key));
   }
 
   bool _canShow(DesktopRemoteImage image) => switch (image._source) {
@@ -236,9 +244,12 @@ class _DesktopRemoteMessageImagesState
     );
   }
 
-  Widget _thumbnail(DesktopRemoteImage image, String label) {
+  Future<ImageAttachment> _thumbnailResult(
+    DesktopRemoteImage image,
+    String label,
+  ) {
     final key = _imageKey(image);
-    final result = _thumbnails.putIfAbsent(key, () {
+    return _thumbnails.putIfAbsent(key, () {
       late final Future<ImageAttachment> result;
       bool current() =>
           mounted && _current && identical(_thumbnails[key], result);
@@ -246,6 +257,16 @@ class _DesktopRemoteMessageImagesState
       result.ignore();
       return result;
     });
+  }
+
+  Widget _thumbnail(
+    DesktopRemoteImage image,
+    String label,
+    List<({DesktopRemoteImage image, String label})> gallery,
+    int index,
+  ) {
+    final key = _imageKey(image);
+    final result = _thumbnailResult(image, label);
     return FutureBuilder<ImageAttachment>(
       key: ObjectKey(result),
       future: result,
@@ -256,7 +277,17 @@ class _DesktopRemoteMessageImagesState
             image: attachment,
             memoryOnly: true,
             isPreviewCurrent: () =>
-                _current && identical(_thumbnails[key], result),
+                mounted && _current && identical(_thumbnails[key], result),
+            gallery: gallery.length < 2
+                ? null
+                : (
+                    count: gallery.length,
+                    index: index,
+                    load: (index) {
+                      final entry = gallery[index];
+                      return _thumbnailResult(entry.image, entry.label);
+                    },
+                  ),
           );
         }
         final error = snapshot.error;
@@ -320,14 +351,23 @@ class _DesktopRemoteMessageImagesState
     final images = _current
         ? widget.images.where(_canShow).toList()
         : const <DesktopRemoteImage>[];
-    if (images.isEmpty) return widget.child;
+    final child = widget.child;
+    final row = widget.mediaBuilder;
+    if (images.isEmpty) return row?.call(null) ?? child!;
     final l10n = context.l10n;
+    final gallery = [
+      for (final (index, image) in images.indexed)
+        if (image._source != _Source.relative)
+          (image: image, label: l10n.imageChip(index + 1)),
+    ];
+    var thumbnailIndex = 0;
     final preview = _preview;
-    return Column(
+    final media = Column(
       mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      crossAxisAlignment: row == null
+          ? CrossAxisAlignment.stretch
+          : CrossAxisAlignment.start,
       children: [
-        widget.child,
         Wrap(
           alignment: widget.trailing ? WrapAlignment.end : WrapAlignment.start,
           spacing: 6,
@@ -344,7 +384,12 @@ class _DesktopRemoteMessageImagesState
                   ),
                 )
               else
-                _thumbnail(image, l10n.imageChip(index + 1)),
+                _thumbnail(
+                  image,
+                  l10n.imageChip(index + 1),
+                  gallery,
+                  thumbnailIndex++,
+                ),
           ],
         ),
         if (preview != null)
@@ -380,6 +425,13 @@ class _DesktopRemoteMessageImagesState
           ),
       ],
     );
+    return row != null
+        ? row(media)
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [child!, media],
+          );
   }
 }
 

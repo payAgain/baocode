@@ -43,6 +43,7 @@ import 'composer/composer.dart';
 import 'composer/composer_draft.dart';
 import 'composer/composer_embeds.dart';
 import 'composer/composer_mock_data.dart';
+import 'composer/composer_presentation.dart';
 import 'composer/file_mentions.dart';
 import 'panels/activity_strip.dart';
 import 'panels/health_banner.dart';
@@ -1320,37 +1321,28 @@ class _ChatScreenState extends State<ChatScreen>
         ? ListenableBuilder(
             listenable: _session,
             builder: (context, _) => switch (_session.context) {
-              final usage? => ContextMeter(
-                usage: usage,
-                active: _contextPanelOpen,
-                labeled: true,
-                tooltip: ChatKeys.titleWithKey(
-                  context.l10n.composerContextUsage,
-                  ChatCommandIds.toggleContextPanel,
-                  const {ChatContextKeys.inChat: true},
+              final usage? => FittedBox(
+                fit: BoxFit.scaleDown,
+                child: ContextMeter(
+                  usage: usage,
+                  active: _contextPanelOpen,
+                  labeled: true,
+                  tooltip: ChatKeys.titleWithKey(
+                    context.l10n.composerContextUsage,
+                    ChatCommandIds.toggleContextPanel,
+                    const {ChatContextKeys.inChat: true},
+                  ),
+                  onTap: _toggleContextPanel,
                 ),
-                onTap: _toggleContextPanel,
               ),
               null => const SizedBox.shrink(),
             },
           )
         : null;
-    if (IslandFootTrailing.hosts(context)) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (below != null) Flexible(child: below),
-          ?meter,
-        ],
-      );
-    }
-    return Row(
-      children: [
-        Expanded(
-          child: Align(alignment: Alignment.centerLeft, child: below),
-        ),
-        ?meter,
-      ],
+    return ComposerStatusRow(
+      leading: below,
+      trailing: meter,
+      compact: IslandFootTrailing.hosts(context),
     );
   }
 

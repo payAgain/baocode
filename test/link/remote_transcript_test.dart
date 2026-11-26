@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:bao_link/bao_link.dart';
+import 'package:baocode/bots/desktop_bot_message_row.dart';
 import 'package:baocode/chat/chat_history_view.dart';
 import 'package:baocode/chat/side_panel/file_open.dart';
 import 'package:baocode/chat/widgets/code_citation.dart';
@@ -422,12 +423,16 @@ graph TD; a-->b;
       tester,
       const [],
       () async {
-        expect(find.text('Helper'), findsOneWidget);
-        expect(find.text('You'), findsOneWidget);
+        Finder speaker(String name) => find.descendant(
+          of: find.byType(DesktopBotMessageRow),
+          matching: find.text(name),
+        );
+        expect(speaker('Helper'), findsOneWidget);
+        expect(speaker('You'), findsOneWidget);
         expect(find.text('Current reply'), findsOneWidget);
         await tester.tap(find.text('Load earlier messages'));
         await tester.pumpAndSettle();
-        expect(find.text('Reviewer'), findsOneWidget);
+        expect(speaker('Reviewer'), findsOneWidget);
         expect(find.text('Earlier reply'), findsOneWidget);
         expect(find.text('Current reply'), findsOneWidget);
         expect(find.text('Load earlier messages'), findsNothing);

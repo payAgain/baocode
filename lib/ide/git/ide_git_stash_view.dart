@@ -9,11 +9,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../l10n/l10n.dart';
-import '../../theme/codicons.dart';
 import '../../theme/material_file_icons.dart';
 import '../ide_dates.dart';
 import '../ide_dialog.dart';
-import '../ide_hover.dart';
 import '../ide_list.dart';
 import '../ide_menu.dart';
 import '../ide_notifications.dart';
@@ -21,6 +19,7 @@ import 'git_checkout.dart' show ideSanitizeBranchName;
 import 'git_model.dart';
 import 'git_repository.dart';
 import 'ide_git_log_view.dart';
+import 'ide_git_presentation.dart';
 
 /// Asks how to stash (a message, the untracked files too), then stashes
 /// [git]'s changes, only [paths]' where given (JetBrains' shelving of some
@@ -285,8 +284,12 @@ class IdeGitStashViewState extends State<IdeGitStashView> {
       ideFromNow(stash.date, ago: true, l10n: l10n),
     ].join(' · ');
     return [
-      IdeListRow(
+      IdeGitStashRow(
         key: ValueKey('stash:${stash.id}'),
+        message: stash.message,
+        description: description,
+        tooltip: '${stash.ref}  ${stash.message}',
+        open: open,
         selected: _selected == stash.id,
         onTap: () => setState(() {
           _selected = stash.id;
@@ -296,28 +299,6 @@ class IdeGitStashViewState extends State<IdeGitStashView> {
           setState(() => _selected = stash.id);
           unawaited(_menu(position, git, stash));
         },
-        builder: (context, hovered) => Row(
-          children: [
-            const SizedBox(width: 4),
-            Icon(
-              open ? Codicons.chevronDown : Codicons.chevronRight,
-              size: 14,
-              color: IdeListColors.description,
-            ),
-            const SizedBox(width: 2),
-            Icon(Codicons.gitStash, size: 14, color: IdeListColors.description),
-            const SizedBox(width: 6),
-            Expanded(
-              child: IdeHover(
-                message: '${stash.ref}  ${stash.message}',
-                child: IdeResourceLabel(
-                  name: stash.message,
-                  description: description,
-                ),
-              ),
-            ),
-          ],
-        ),
       ),
       if (open)
         FutureBuilder<List<IdeGitDiffFile>>(
@@ -338,10 +319,9 @@ class IdeGitStashViewState extends State<IdeGitStashView> {
                     builder: (context, hovered) => Row(
                       children: [
                         const SizedBox(width: 40),
-                        FileIcon(file.path),
-                        const SizedBox(width: 6),
                         Expanded(
-                          child: IdeResourceLabel(
+                          child: IdeGitFileLabel(
+                            icon: FileIcon(file.path),
                             name: paths.basename(file.path),
                             nameColor: file.status?.color,
                             description: switch (paths.relative(

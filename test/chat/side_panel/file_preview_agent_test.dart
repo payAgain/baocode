@@ -73,7 +73,10 @@ class _Review extends ChangeReview {
       : null;
 
   @override
-  Future<void> keep(Iterable<String> paths) async => keptFiles.addAll(paths);
+  Future<void> keep(Iterable<String> paths, {void Function()? validate}) async {
+    validate?.call();
+    keptFiles.addAll(paths);
+  }
 
   @override
   Future<String> Function()? original(String path) =>

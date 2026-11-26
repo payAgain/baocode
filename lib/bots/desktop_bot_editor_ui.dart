@@ -235,6 +235,74 @@ InputDecoration botEditorInput(
   border: OutlineInputBorder(borderRadius: BorderRadius.circular(7)),
 );
 
+typedef BotEditorMember = ({String id, String name});
+
+class BotEditorMemberTile extends StatelessWidget {
+  const BotEditorMemberTile({
+    super.key,
+    required this.member,
+    required this.selected,
+    this.onChanged,
+  });
+
+  final BotEditorMember member;
+  final bool selected;
+  final ValueChanged<bool>? onChanged;
+
+  @override
+  Widget build(BuildContext context) => CheckboxListTile(
+    contentPadding: EdgeInsets.zero,
+    controlAffinity: ListTileControlAffinity.leading,
+    title: Text(member.name),
+    value: selected,
+    onChanged: onChanged == null
+        ? null
+        : (checked) => onChanged!(checked == true),
+  );
+}
+
+class BotEditorLeadPicker extends StatelessWidget {
+  const BotEditorLeadPicker({
+    super.key,
+    required this.pickerKey,
+    required this.label,
+    required this.defaultLabel,
+    required this.members,
+    required this.lead,
+    this.onChanged,
+  });
+
+  final Key pickerKey;
+  final String label;
+  final String defaultLabel;
+  final List<BotEditorMember> members;
+  final String? lead;
+  final ValueChanged<String?>? onChanged;
+
+  @override
+  Widget build(BuildContext context) => InputDecorator(
+    decoration: botEditorInput(label),
+    child: DropdownButtonHideUnderline(
+      child: DropdownButton<String>(
+        key: pickerKey,
+        isExpanded: true,
+        value: members.any((member) => member.id == lead) ? lead : '',
+        items: [
+          DropdownMenuItem(value: '', child: Text(defaultLabel)),
+          for (final member in members)
+            DropdownMenuItem(
+              value: member.id,
+              child: Text(member.name, overflow: TextOverflow.ellipsis),
+            ),
+        ],
+        onChanged: onChanged == null
+            ? null
+            : (id) => onChanged!(id == '' ? null : id),
+      ),
+    ),
+  );
+}
+
 class BotEditorActions extends StatelessWidget {
   const BotEditorActions({super.key, required this.children});
 

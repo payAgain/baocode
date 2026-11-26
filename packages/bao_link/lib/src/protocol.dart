@@ -188,6 +188,12 @@ abstract final class LinkMethods {
   /// `{"session", "paths"?}`: undoes them, as the desktop's Undo.
   static const undo = 'undo';
 
+  /// `{"session", "action": "keep"|"undo", "changes": [{"path", "revision"}]}`:
+  /// resolves a complete pending-change snapshot (up to [LinkLimits.reviewChanges]
+  /// files). Returns `resolved`, `conflicts`, `skipped`, and `pending` path
+  /// lists. `pending` counts other attempted paths that remain under review.
+  static const reviewChanges = 'reviewChanges';
+
   /// `{"session", "task"?, "agent"?}`: stops a task left running (see
   /// [LinkTask]), or the subagent the tool call `agent` started.
   static const stopTask = 'stopTask';
@@ -377,6 +383,9 @@ abstract final class LinkLimits {
 
   /// A project's files listed.
   static const files = 20000;
+
+  /// The maximum number of files in a [LinkMethods.reviewChanges] snapshot.
+  static const reviewChanges = 500;
 
   /// A picture's bytes.
   static const image = 8 * 1024 * 1024;
@@ -1044,6 +1053,7 @@ class LinkSessionUpdate {
 
   /// Optional host action capabilities: `queue`, `edit`, and `startPlan`
   /// are true only when the session supports the corresponding action.
+  /// `reviewChanges` is true when the host supports [LinkMethods.reviewChanges].
   /// `turn` is a token for the current turn when it can be identified.
   final Map<String, Object?>? actions;
 

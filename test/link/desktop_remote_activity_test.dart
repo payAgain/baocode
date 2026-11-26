@@ -2,7 +2,16 @@ import 'dart:async';
 
 import 'package:bao_editor/monaco/vs/workbench/services/themes/common/color_theme_data.dart';
 import 'package:bao_link/bao_link.dart';
+import 'package:bao_xterm/common/buffer/cell_data.dart';
+import 'package:baocode/chat/side_panel/file_preview.dart'
+    show ReadOnlyFileLines;
+import 'package:baocode/ide/git/ide_git_commit_panel.dart';
+import 'package:baocode/ide/git/ide_git_log_view.dart';
+import 'package:baocode/ide/git/ide_git_patch_reader.dart';
+import 'package:baocode/ide/ide_button.dart';
 import 'package:baocode/ide/ide_code_diff.dart';
+import 'package:baocode/ide/ide_input.dart';
+import 'package:baocode/ide/terminal/terminal_view.dart';
 import 'package:baocode/l10n/app_localizations.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_remote_activity.dart';
@@ -110,6 +119,44 @@ void main() {
     await host.close(tester);
   });
 
+  testWidgets('a narrow activity panel gives way and reopens over the chat', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester);
+    await tester.pumpAndSettle();
+    final chat = find.byType(TextField);
+    final toggle = find.byKey(
+      const ValueKey('desktop-remote-project-sidebar-toggle'),
+    );
+    final panel = find.byKey(const ValueKey('desktop-remote-project-sidebar'));
+    await tester.enterText(chat, 'unsent draft');
+    await _tap(tester, toggle);
+    expect(panel, findsOneWidget);
+
+    await tester.binding.setSurfaceSize(const Size(520, 720));
+    await tester.pumpAndSettle();
+    expect(panel, findsNothing);
+    expect(chat.hitTestable(), findsOneWidget);
+    await _tap(tester, toggle);
+    expect(panel, findsOneWidget);
+    expect(
+      find.ancestor(
+        of: chat,
+        matching: find.byWidgetPredicate(
+          (widget) => widget is ExcludeFocus && widget.excluding,
+        ),
+      ),
+      findsWidgets,
+    );
+    await _tap(tester, find.byTooltip('Close host activity'));
+    expect(chat.hitTestable(), findsOneWidget);
+    expect(
+      tester.widget<EditableText>(find.byType(EditableText)).controller.text,
+      'unsent draft',
+    );
+    await host.close(tester);
+  });
+
   testWidgets(
     'running output follows offsets and cleans up on session switch',
     (tester) async {
@@ -125,25 +172,85 @@ void main() {
         'session': 'session-a',
         'task': 'one',
       });
-      host.output('session-a', 'one', 'def', 6);
-      watched.complete({'text': 'abc', 'offset': 3});
+      const snapshot = 'abc\x1b[31';
+      const append = 'mdef\x1b[0m';
+      final offset = snapshot.length + append.length;
+      host.output('session-a', 'one', append, offset);
+      watched.complete({'text': snapshot, 'offset': snapshot.length});
       await tester.pumpAndSettle();
-      expect(find.text('abcdef'), findsOneWidget);
-      host.output('elsewhere', 'one', 'bad', 9);
-      host.output('session-a', 'elsewhere', 'bad', 9);
-      host.output('session-a', 'one', 'dup', 6);
+      expect(await _taskOutputScreen(tester), 'abcdef');
+      final screen = tester.widget<TerminalView>(find.byType(TerminalView));
+      final cell = screen.instance.xterm.buffer.active.getLine(0)!.getCell(3)!;
+      expect(cell.isFgPalette(), isTrue);
+      expect(cell.getFgColor(), 1);
+      host.output('elsewhere', 'one', 'bad', offset + 3);
+      host.output('session-a', 'elsewhere', 'bad', offset + 3);
+      host.output('session-a', 'one', 'dup', offset);
       await tester.pumpAndSettle();
-      expect(find.text('abcdef'), findsOneWidget);
+      expect(await _taskOutputScreen(tester), 'abcdef');
+      // A later append must complete an escape on the existing screen.
+      const next = '\n\x1b[32';
+      host.output('session-a', 'one', next, offset + next.length);
+      expect(await _taskOutputScreen(tester), 'abcdef');
+      host.output('session-a', 'one', 'mnext', offset + next.length + 5);
+      expect(await _taskOutputScreen(tester), 'abcdef\nnext');
+      expect(
+        screen.instance.xterm.buffer.active
+            .getLine(1)!
+            .getCell(0)!
+            .getFgColor(),
+        2,
+      );
+      // An interrupted OSC from the old file cannot consume replacement text.
+      const partial = '\x1b]2;incomplete';
+      host.output(
+        'session-a',
+        'one',
+        partial,
+        offset + next.length + 5 + partial.length,
+      );
+      await _taskOutputScreen(tester);
       host.output('session-a', 'one', 'reset', 5, reset: true);
+      expect(await _taskOutputScreen(tester), 'reset');
+      expect(
+        tester.widget<TerminalView>(find.byType(TerminalView)).instance,
+        same(screen.instance),
+      );
+      expect(screen.instance.pty, isNull);
+      expect(screen.instance.shellIntegration, isNull);
+      expect(screen.onOpenLink, isNull);
+      final titles = <String>[];
+      final listener = screen.instance.xterm.onTitleChange(titles.add);
+      addTearDown(listener.dispose);
+      const controls =
+          '\x1b]2;host title\x07'
+          '\x1b]52;c;aG9zdA==\x07'
+          '\x1b]8;;https://example.com\x07\nlink\x1b]8;;\x07';
+      host.output('session-a', 'one', controls, 5 + controls.length);
+      expect(await _taskOutputScreen(tester), 'reset\nlink');
+      expect(titles, isEmpty);
+      final linkCell = screen.instance.terminal.buffer.lines
+          .get(1)!
+          .loadCell(0, CellData());
+      expect(linkCell.extended.urlId, 0);
+      await tester.tap(find.byType(TerminalView));
+      await tester.pump();
+      expect(tester.testTextInput.hasAnyClients, isFalse);
+      await tester.tap(find.byType(TerminalView), buttons: kSecondaryButton);
       await tester.pumpAndSettle();
-      expect(find.text('reset'), findsOneWidget);
+      expect(find.text('Select All'), findsOneWidget);
+      expect(find.text('Paste'), findsNothing);
+      expect(find.text('Kill Terminal'), findsNothing);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(host.methods, [LinkMethods.open, LinkMethods.watchOutput]);
       await host.select('session-b', 'project-b');
       await tester.pumpAndSettle();
       host.expectLast(LinkMethods.unwatchOutput, {
         'session': 'session-a',
         'task': 'one',
       });
-      expect(find.text('reset'), findsNothing);
+      expect(find.byType(TerminalView), findsNothing);
       await host.close(tester);
     },
   );
@@ -159,14 +266,14 @@ void main() {
     await tester.pumpAndSettle();
     await _tap(tester, find.byTooltip('Host activity'));
     await _tap(tester, find.text('View output'));
-    expect(find.text('fixture output'), findsOneWidget);
+    expect(await _taskOutputScreen(tester), 'fixture output');
     host.push('session-a');
     await tester.pumpAndSettle();
     host.expectLast(LinkMethods.unwatchOutput, {
       'session': 'session-a',
       'task': 'one',
     });
-    expect(find.text('fixture output'), findsNothing);
+    expect(find.byType(TerminalView), findsNothing);
     await host.close(tester);
   });
 
@@ -186,7 +293,7 @@ void main() {
       await tester.pumpAndSettle();
       await _tap(tester, find.byTooltip('Host activity'));
       await _tap(tester, find.text('View output'));
-      expect(find.text('read-only snapshot'), findsOneWidget);
+      expect(await _taskOutputScreen(tester), 'read-only snapshot');
       expect(host.methods, [
         LinkMethods.open,
         LinkMethods.watchOutput,
@@ -200,6 +307,44 @@ void main() {
       ]);
     },
   );
+
+  testWidgets('task output reloads after errors and empty snapshots', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester);
+    final pending = Completer<Object?>();
+    var reads = 0;
+    host.reply = (method, _) => method != LinkMethods.output
+        ? null
+        : switch (reads++) {
+            0 => pending.future,
+            1 => {'text': ''},
+            _ => {'text': 'recovered output'},
+          };
+    host.push('session-a', tasks: [_task('done', status: 'succeeded')]);
+    await tester.pumpAndSettle();
+    await _tap(tester, find.byTooltip('Host activity'));
+    await _tap(tester, find.text('View output'));
+    expect(find.text('Loading…'), findsOneWidget);
+    expect(find.byType(TerminalView), findsNothing);
+    pending.complete({'invalid': true});
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Could not read host output. Reload to try again.'),
+      findsOneWidget,
+    );
+    await _tap(tester, find.byTooltip('Reload output'));
+    expect(find.text('No output yet.'), findsOneWidget);
+    await _tap(tester, find.byTooltip('Reload output'));
+    expect(await _taskOutputScreen(tester), 'recovered output');
+    expect(host.methods, [
+      LinkMethods.open,
+      LinkMethods.output,
+      LinkMethods.output,
+      LinkMethods.output,
+    ]);
+    await host.close(tester);
+  });
 
   testWidgets('a late watch is unwatched after the panel is disposed', (
     tester,
@@ -242,7 +387,7 @@ void main() {
       await tester.pumpAndSettle();
       await _tap(tester, find.byTooltip('Host activity'));
       await _tap(tester, find.text('View output').last);
-      expect(find.text('completed output'), findsOneWidget);
+      expect(await _taskOutputScreen(tester), 'completed output');
       host.expectLast(LinkMethods.output, {
         'session': 'session-a',
         'task': 'done',
@@ -726,6 +871,104 @@ void main() {
     await host.close(tester);
   });
 
+  testWidgets('collapsed composer sends one batch and waits for the follow', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, showStrip: true);
+    const first = {'path': 'a.txt', 'revision': 'a', 'undoable': true};
+    const second = {'path': 'b.txt', 'revision': 'b', 'undoable': true};
+    const third = {'path': 'c.txt', 'revision': 'c', 'undoable': false};
+    const changes = [first, second, third];
+    host.reply = (method, args) => {
+      'resolved': args['action'] == 'undo' ? ['a.txt'] : ['b.txt', 'c.txt'],
+      'conflicts': args['action'] == 'undo' ? ['b.txt'] : [],
+      'skipped': args['action'] == 'undo' ? ['c.txt'] : [],
+      'pending': [],
+    };
+    host.push('session-a', batch: true, changes: changes);
+    await tester.pumpAndSettle();
+    expect(find.text('a.txt'), findsNothing);
+    await _tap(tester, find.text('Undo all'));
+    expect(find.text('2 files to review, 1 skipped'), findsOneWidget);
+    expect(host.methods, [LinkMethods.open]);
+    await _tap(tester, _confirmButton('Undo all'));
+    host.expectLast(LinkMethods.reviewChanges, {
+      'session': 'session-a',
+      'action': 'undo',
+      'changes': [
+        for (final change in changes)
+          {'path': change['path'], 'revision': change['revision']},
+      ],
+    });
+    expect(find.text('3 files changed'), findsOneWidget);
+    expect(find.text('Waiting for host'), findsOneWidget);
+    expect(find.text('Keep all'), findsNothing);
+    host.push('session-a', batch: true, changes: [second, third]);
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Resolved 1 file · 1 conflict · 1 skipped'),
+      findsOneWidget,
+    );
+    await _tap(tester, find.text('2 files changed'));
+    expect(find.text('b.txt'), findsOneWidget);
+    await _tap(tester, find.text('Keep all'));
+    await _tap(tester, _confirmButton('Keep all'));
+    host.expectLast(LinkMethods.reviewChanges, {
+      'session': 'session-a',
+      'action': 'keep',
+      'changes': [
+        {'path': 'b.txt', 'revision': 'b'},
+        {'path': 'c.txt', 'revision': 'c'},
+      ],
+    });
+    host.push('session-a', batch: true);
+    await tester.pumpAndSettle();
+    expect(find.text('Resolved 2 files'), findsOneWidget);
+    expect(find.text('b.txt'), findsNothing);
+    expect(host.methods, [
+      LinkMethods.open,
+      LinkMethods.reviewChanges,
+      LinkMethods.reviewChanges,
+    ]);
+    await host.close(tester);
+  });
+
+  testWidgets(
+    'batch confirmation is invalid after a change or session switch',
+    (tester) async {
+      final host = await _Host.show(tester, showStrip: true);
+      const first = {'path': 'a.txt', 'revision': 'a', 'undoable': true};
+      const second = {'path': 'b.txt', 'revision': 'b', 'undoable': true};
+      host.push('session-a', changes: [first, second]);
+      await tester.pumpAndSettle();
+      expect(find.text('Keep all'), findsNothing);
+      expect(
+        find.textContaining('does not support batch review'),
+        findsOneWidget,
+      );
+      host.push('session-a', batch: true, changes: [first, second]);
+      await tester.pumpAndSettle();
+      await _tap(tester, find.text('Keep all'));
+      host.push(
+        'session-a',
+        batch: true,
+        changes: [
+          first,
+          {...second, 'revision': 'new'},
+        ],
+      );
+      await tester.pumpAndSettle();
+      await _tap(tester, _confirmButton('Keep all'));
+      expect(find.textContaining('Review it again.'), findsOneWidget);
+      await _tap(tester, find.text('Undo all'));
+      await host.select('session-b', 'project-b');
+      await tester.pumpAndSettle();
+      await _tap(tester, _confirmButton('Undo all'));
+      expect(host.methods, [LinkMethods.open, LinkMethods.open]);
+      await host.close(tester);
+    },
+  );
+
   testWidgets('switching change rows ignores a late diff reply', (
     tester,
   ) async {
@@ -862,6 +1105,75 @@ void main() {
     },
   );
 
+  testWidgets('docked project sidebar resizes on the Changes tab', (
+    tester,
+  ) async {
+    final host = await _Host.show(tester, showFiles: true);
+    host.reply = (method, _) => switch (method) {
+      LinkMethods.projectGitStatus => _gitStatus(),
+      LinkMethods.projectGitHistory => _gitHistory,
+      LinkMethods.projectGitCapabilities => null,
+      _ => throw StateError(method),
+    };
+    await tester.binding.setSurfaceSize(const Size(1300, 760));
+    await tester.pumpAndSettle();
+    await _tap(tester, find.byTooltip('Project sidebar'));
+    await _tap(tester, _tab('changes'));
+
+    final sidebar = find.byKey(
+      const ValueKey('desktop-remote-project-sidebar'),
+    );
+    final chat = find.byType(TextField).first;
+    final defaultWidth = tester.getSize(sidebar).width;
+    final chatWidth = tester.getSize(chat).width;
+    final gitRequests = host.methods;
+    Future<void> dragDivider(double dx) async {
+      await tester.drag(
+        find.byKey(const ValueKey('side-panel-sash')),
+        Offset(dx, 0),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.pumpAndSettle();
+    }
+
+    await dragDivider(-100);
+    expect(
+      tester.widget<IdeGitIslandSplit>(find.byType(IdeGitIslandSplit)).beside,
+      isTrue,
+    );
+    expect(tester.getSize(sidebar).width, closeTo(defaultWidth + 100, .01));
+    expect(tester.getSize(chat).width, closeTo(chatWidth - 100, .01));
+    expect(find.text('working.txt'), findsOneWidget);
+
+    await dragDivider(220);
+    expect(
+      tester.widget<IdeGitIslandSplit>(find.byType(IdeGitIslandSplit)).beside,
+      isFalse,
+    );
+    final resizedWidth = defaultWidth - 120;
+    expect(tester.getSize(sidebar).width, closeTo(resizedWidth, .01));
+    await _tap(tester, _tab('files'));
+    await _tap(tester, _tab('changes'));
+    expect(tester.getSize(sidebar).width, closeTo(resizedWidth, .01));
+    expect(host.methods, gitRequests);
+
+    await _tap(tester, find.byTooltip('Close project sidebar'));
+    host.reply = (method, _) => switch (method) {
+      LinkMethods.projectGitStatus => {
+        ..._gitStatus(),
+        'files': [_gitFile('changed-while-closed.txt', 'workingTree')],
+      },
+      LinkMethods.projectGitHistory => _gitHistory,
+      LinkMethods.projectGitCapabilities => null,
+      _ => throw StateError(method),
+    };
+    await _tap(tester, find.byTooltip('Project sidebar'));
+    expect(find.text('changed-while-closed.txt'), findsOneWidget);
+    expect(find.text('working.txt'), findsNothing);
+    expect(tester.getSize(sidebar).width, closeTo(resizedWidth, .01));
+    await host.close(tester);
+  });
+
   testWidgets('project Git previews staged and working tree changes', (
     tester,
   ) async {
@@ -934,7 +1246,9 @@ void main() {
     tester,
   ) async {
     final host = await _Host.show(tester, showFiles: true);
-    const patch = '-prior line\n+committed line\n';
+    const patch =
+        '@@ -1 +1 @@\n-prior line\n+committed line\n'
+        '@@ -18 +18 @@\n-old tail\n+new tail\n';
     host.reply = (method, _) => switch (method) {
       LinkMethods.projectGitStatus => _gitStatus(),
       LinkMethods.projectGitHistory => _gitHistory,
@@ -942,17 +1256,16 @@ void main() {
         'files': [_gitFile('committed.txt', 'commit')],
         'truncated': false,
       },
-      LinkMethods.projectGitCommitDiff => _gitDiff(patch),
+      LinkMethods.projectGitCommitDiff => {
+        ..._gitDiff(patch),
+        'truncated': true,
+      },
       _ => throw StateError(method),
     };
 
     await _tap(tester, find.byTooltip('Project sidebar'));
     await _tap(tester, _tab('changes'));
     expect(find.textContaining('Fixture Author'), findsOneWidget);
-    expect(
-      tester.getCenter(find.text('Fixture commit')).dy,
-      lessThan(tester.getCenter(find.text('working.txt')).dy),
-    );
     await _tap(tester, find.text('Fixture commit'));
     host.expectLast(LinkMethods.projectGitCommitFiles, {
       'project': 'project-a',
@@ -965,6 +1278,17 @@ void main() {
       'path': 'committed.txt',
     });
     expect(_gitPatch(patch), findsOneWidget);
+    expect(find.text('Diff truncated'), findsOneWidget);
+    int? markedLine() => tester
+        .widget<ReadOnlyFileLines>(find.byType(ReadOnlyFileLines))
+        .firstMarkedLine;
+    expect(markedLine(), isNull);
+    await _tap(tester, find.byTooltip('Go to Next Change'));
+    expect(markedLine(), 1);
+    await _tap(tester, find.byTooltip('Go to Next Change'));
+    expect(markedLine(), 4);
+    await _tap(tester, find.byTooltip('Go to Previous Change'));
+    expect(markedLine(), 1);
     await _tap(tester, find.byTooltip('Back from diff'));
     expect(find.text('committed.txt'), findsOneWidget);
     await _tap(tester, find.byTooltip('Back'));
@@ -997,13 +1321,28 @@ void main() {
       await _tap(tester, _tab('changes'));
       await _tap(tester, find.byTooltip('Stage').first);
       expect(host.methods, contains(LinkMethods.projectGitStage));
-      await _tap(tester, find.text('Stash'));
-      expect(find.text('No stashes'), findsOneWidget);
-      await _tap(tester, find.widgetWithText(TextButton, 'Commit'));
-      final input = find.widgetWithText(TextField, 'Commit message');
-      await tester.enterText(input, 'Draft commit message');
+      Focus.of(tester.element(find.text('Stash'))).requestFocus();
       await tester.pump();
-      await _tap(tester, find.widgetWithText(FilledButton, 'Commit'));
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+      expect(find.text('No stashes'), findsOneWidget);
+      await _tap(
+        tester,
+        find.descendant(
+          of: find.byType(IdeGitCommitTabs),
+          matching: find.text('Commit'),
+        ),
+      );
+      final input = find.byWidgetPredicate(
+        (widget) =>
+            widget is IdeInputBox && widget.placeholder == 'Commit message',
+      );
+      await tester.enterText(
+        find.descendant(of: input, matching: find.byType(EditableText)),
+        'Draft commit message',
+      );
+      await tester.pump();
+      await _tap(tester, find.widgetWithText(IdeButton, 'Commit'));
       expect(host.methods, contains(LinkMethods.projectGitCommit));
       expect(find.text('Draft commit message'), findsOneWidget);
       expect(find.textContaining('Git operation failed'), findsOneWidget);
@@ -1205,7 +1544,9 @@ void main() {
 Finder _tab(String section) =>
     find.byKey(ValueKey('desktop-remote-tab-$section'));
 
-Finder _gitPatch(String patch) => find.widgetWithText(SelectableText, patch);
+Finder _gitPatch(String patch) => find.byWidgetPredicate(
+  (widget) => widget is IdeGitPatchReader && widget.patch == patch,
+);
 
 const _gitRevision = '0123456789abcdef0123456789abcdef01234567';
 const _gitHistory = {
@@ -1272,6 +1613,20 @@ Future<void> _openChangeMenu(WidgetTester tester, String name) async {
 Future<void> _tap(WidgetTester tester, Finder finder) async {
   await tester.tap(finder.hitTestable());
   await tester.pumpAndSettle();
+}
+
+Future<String> _taskOutputScreen(WidgetTester tester) async {
+  await tester.pumpAndSettle();
+  await tester.pump(const Duration(milliseconds: 20));
+  final screen = tester.widget<TerminalView>(find.byType(TerminalView));
+  final lines = screen.instance.terminal.buffer.lines;
+  final text = StringBuffer();
+  for (var i = 0; i < lines.length; i++) {
+    final line = lines.get(i)!;
+    if (i > 0 && !line.isWrapped) text.write('\n');
+    text.write(line.translateToString(true));
+  }
+  return text.toString().trimRight();
 }
 
 class _Host {
@@ -1399,6 +1754,7 @@ class _Host {
     List<LinkTask> tasks = const [],
     List<Map<String, Object?>> changes = const [],
     bool live = false,
+    bool batch = false,
   }) => LinkSessionUpdate(
     session: session,
     start: 0,
@@ -1407,6 +1763,7 @@ class _Host {
     tasks: tasks,
     changes: changes,
     live: live,
+    actions: batch ? const {'reviewChanges': true} : null,
   );
 
   void push(
@@ -1414,8 +1771,15 @@ class _Host {
     List<LinkTask> tasks = const [],
     List<Map<String, Object?>> changes = const [],
     bool live = false,
+    bool batch = false,
   }) {
-    final update = _update(session, tasks: tasks, changes: changes, live: live);
+    final update = _update(
+      session,
+      tasks: tasks,
+      changes: changes,
+      live: live,
+      batch: batch,
+    );
     host.emit(
       LinkEvents.session,
       _slimmers[session]?.encode(update) ?? update.toJson(),

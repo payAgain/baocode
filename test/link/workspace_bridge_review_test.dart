@@ -10,13 +10,302 @@ import 'package:baocode/chat/review/review_store.dart'
     show ReviewBlob, ReviewStore;
 import 'package:baocode/chat/review/review_store_io.dart';
 import 'package:baocode/kernel/agent_kernel.dart';
+import 'package:baocode/kernel/kernel_event.dart';
 import 'package:baocode/kernel/kernel_types.dart' show KernelHealth;
 import 'package:baocode/link/workspace_bridge.dart';
 import 'package:baocode/workspace/workspace.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+Matcher _error(String code) =>
+    isA<LinkRemoteException>().having((e) => e.code, 'code', code);
+
+Map<String, List<String>> _result({
+  List<String> resolved = const [],
+  List<String> conflicts = const [],
+  List<String> skipped = const [],
+  List<String> pending = const [],
+}) => {
+  'resolved': resolved,
+  'conflicts': conflicts,
+  'skipped': skipped,
+  'pending': pending,
+};
+
 void main() {
+  test('advertises batch keep and resolves both named roots', () async {
+    final host = await _Fixture.open();
+    await host.edit(host.first, 'first edit\n');
+    await host.edit(host.second, 'second edit\n');
+    final update = await host.update();
+    expect(update.actions?[LinkMethods.reviewChanges], isTrue);
+    final snapshot = host.snapshot(update.changes);
+
+    expect(
+      await host.batch('keep', snapshot),
+      _result(resolved: [for (final change in snapshot) change['path']!]),
+    );
+    expect(host.session.fileChanges, isEmpty);
+    expect(host.first.readAsStringSync(), 'first edit\n');
+    expect(host.second.readAsStringSync(), 'second edit\n');
+  });
+
+  test('batch skips undo but can keep without an active review', () async {
+    final host = await _Fixture.open();
+    host.review.abandon('Review store unavailable');
+    for (final file in [host.first, host.second]) {
+      file.writeAsStringSync('agent edit\n');
+      host.kernel.emit(
+        FileEdited(
+          host.kernel.nextSeq,
+          FileChange(path: file.path, added: 1, removed: 1),
+        ),
+      );
+    }
+    final update = await host.update();
+    expect(update.changes, hasLength(2));
+    expect(update.changes.map((change) => change['undoable']), [false, false]);
+    final snapshot = host.snapshot(update.changes);
+    final paths = [for (final change in snapshot) change['path']!];
+    expect(await host.batch('undo', snapshot), _result(skipped: paths));
+    expect(await host.batch('keep', snapshot), _result(resolved: paths));
+    expect(host.session.fileChanges, isEmpty);
+    expect(host.first.readAsStringSync(), 'agent edit\n');
+    expect(host.second.readAsStringSync(), 'agent edit\n');
+  });
+
+  test(
+    'batch undo restores both files and preserves later user edits',
+    () async {
+      final host = await _Fixture.open();
+      host.second.writeAsStringSync('one\ntwo\nthree\nfour\n');
+      await host.edit(host.first, 'first edit\n');
+      await host.edit(host.second, 'agent\ntwo\nthree\nfour\n');
+      final snapshot = await host.confirmedChanges();
+      host.second.writeAsStringSync('agent\ntwo\nthree\nuser\n');
+
+      expect(
+        await host.batch('undo', snapshot),
+        _result(resolved: [for (final change in snapshot) change['path']!]),
+      );
+      expect(host.session.fileChanges, isEmpty);
+      expect(host.first.readAsStringSync(), 'original\n');
+      expect(host.second.readAsStringSync(), 'one\ntwo\nthree\nuser\n');
+    },
+  );
+
+  test(
+    'batch undo continues after a conflict and skips untracked files',
+    () async {
+      final host = await _Fixture.open();
+      final untracked = '${host.first.parent.path}/untracked.txt';
+      File(untracked).writeAsStringSync('untracked edit\n');
+      await host.edit(host.first, 'first edit\n');
+      await host.edit(host.second, 'second edit\n');
+      host.review.report(FileChange(path: untracked, added: 1, removed: 0));
+      await host.review.look();
+      final snapshot = await host.confirmedChanges();
+      host.first.writeAsStringSync('different user edit\n');
+
+      expect(
+        await host.batch('undo', snapshot),
+        _result(
+          resolved: ['shared (2)/note.txt'],
+          conflicts: ['shared/note.txt'],
+          skipped: ['shared/untracked.txt'],
+        ),
+      );
+      expect(host.first.readAsStringSync(), 'different user edit\n');
+      expect(host.second.readAsStringSync(), 'original\n');
+      expect(
+        host.session.fileChanges.map((change) => change.path),
+        unorderedEquals([host.first.path, untracked]),
+      );
+      expect(
+        host.session.fileChanges
+            .firstWhere((change) => change.path == host.first.path)
+            .conflict,
+        isTrue,
+      );
+    },
+  );
+
+  for (final action in ['keep', 'undo']) {
+    test('batch $action validates but skips an out-of-scope record', () async {
+      final host = await _Fixture.open();
+      final outside = File('${host.first.parent.parent.path}/outside.txt')
+        ..writeAsStringSync('original outside\n');
+      await host.edit(outside, 'outside edit\n');
+      await host.edit(host.first, 'first edit\n');
+      final changes = await host.changes();
+      expect(changes[outside.path]?['undoable'], isFalse);
+      final snapshot = host.snapshot(changes.values);
+      await expectLater(
+        host.batch(
+          action,
+          snapshot.where((row) => row['path'] != outside.path).toList(),
+        ),
+        throwsA(_error('stale')),
+      );
+      await host.edit(outside, 'new outside edit\n');
+      await expectLater(host.batch(action, snapshot), throwsA(_error('stale')));
+      expect(host.first.readAsStringSync(), 'first edit\n');
+      expect(host.session.fileChanges, hasLength(2));
+
+      expect(
+        await host.batch(action, await host.confirmedChanges()),
+        _result(resolved: ['shared/note.txt'], skipped: [outside.path]),
+      );
+      expect(outside.readAsStringSync(), 'new outside edit\n');
+      expect(host.session.fileChanges.single.path, outside.path);
+    });
+  }
+
+  test(
+    'duplicate or same-count stale snapshots leave every file intact',
+    () async {
+      final host = await _Fixture.open();
+      await host.edit(host.first, 'first edit\n');
+      await host.edit(host.second, 'second edit\n');
+      final snapshot = await host.confirmedChanges();
+      await expectLater(
+        host.batch('keep', [snapshot.first, snapshot.first]),
+        throwsA(_error('stale')),
+      );
+      await host.edit(host.second, 'new second edit\n');
+      await expectLater(host.batch('undo', snapshot), throwsA(_error('stale')));
+      expect(host.first.readAsStringSync(), 'first edit\n');
+      expect(host.second.readAsStringSync(), 'new second edit\n');
+      expect(host.session.fileChanges, hasLength(2));
+    },
+  );
+
+  test(
+    'queued batch rejects unseen changes and excludes a legacy writer',
+    () async {
+      late final _GatedStore store;
+      final host = await _Fixture.open(
+        wrapStore: (base) => store = _GatedStore(base),
+      );
+      await host.edit(host.first, 'first edit\n');
+      await host.edit(host.second, 'second edit\n');
+      final snapshot = await host.confirmedChanges();
+      final added = File('${host.second.parent.path}/added.txt');
+      await host.review.before(added.path);
+      added.writeAsStringSync('new edit\n');
+      final release = store.gate = Completer<void>();
+      final edit = host.review.after(added.path);
+      await store.entered.future;
+
+      final batch = host.bridge.handle(LinkMethods.reviewChanges, {
+        'session': 'review-session',
+        'action': 'undo',
+        'changes': snapshot,
+      });
+      try {
+        await expectLater(
+          host.call(LinkMethods.keep),
+          throwsA(_error(LinkErrors.busy)),
+        );
+      } finally {
+        release.complete();
+      }
+      await expectLater(batch, throwsA(_error('stale')));
+      await edit;
+      expect(host.first.readAsStringSync(), 'first edit\n');
+      expect(host.second.readAsStringSync(), 'second edit\n');
+      expect(added.readAsStringSync(), 'new edit\n');
+      final fresh = await host.confirmedChanges();
+      expect(
+        await host.batch('keep', fresh),
+        _result(resolved: [for (final change in fresh) change['path']!]),
+      );
+    },
+  );
+
+  test(
+    'batch refuses a running agent and an in-progress review write',
+    () async {
+      final host = await _Fixture.open();
+      await host.edit(host.first, 'first edit\n');
+      await host.edit(host.second, 'second edit\n');
+      final snapshot = await host.confirmedChanges();
+      host.kernel.emit(TurnStarted(host.kernel.nextSeq, 'turn'));
+      expect(host.session.isStreaming, isTrue);
+      await expectLater(
+        host.batch('undo', snapshot),
+        throwsA(_error(LinkErrors.busy)),
+      );
+      host.kernel.emit(TurnEnded(host.kernel.nextSeq, 'turn'));
+      await host.review.forgetTurns(const {});
+
+      final fresh = await host.confirmedChanges();
+      await host.review.before(host.second.path);
+      await expectLater(
+        host.batch('keep', fresh),
+        throwsA(_error(LinkErrors.busy)),
+      );
+      await host.review.after(host.second.path);
+      expect(host.first.readAsStringSync(), 'first edit\n');
+      expect(host.second.readAsStringSync(), 'second edit\n');
+      expect(host.session.fileChanges, hasLength(2));
+    },
+  );
+
+  test(
+    'batch authorization requires the same session and active follow',
+    () async {
+      final host = await _Fixture.open();
+      await host.edit(host.first, 'first edit\n');
+      await host.edit(host.second, 'second edit\n');
+      final snapshot = await host.confirmedChanges();
+      await expectLater(
+        host.call(LinkMethods.reviewChanges, {
+          'session': 'other-session',
+          'action': 'undo',
+          'changes': snapshot,
+        }),
+        throwsA(_error(LinkErrors.notFound)),
+      );
+      await host.call(LinkMethods.close);
+      await expectLater(host.batch('undo', snapshot), throwsA(_error('stale')));
+      await host.update();
+      await expectLater(host.batch('undo', snapshot), throwsA(_error('stale')));
+      expect(host.first.readAsStringSync(), 'first edit\n');
+      expect(host.second.readAsStringSync(), 'second edit\n');
+      expect(host.session.fileChanges, hasLength(2));
+    },
+  );
+
+  test('batch cap accepts 500 changes but rejects 501', () async {
+    final host = await _Fixture.open();
+    void report(int index) => host.review.report(
+      FileChange(
+        path: '${host.first.parent.path}/$index.txt',
+        added: 1,
+        removed: 0,
+      ),
+    );
+    for (var i = 0; i < LinkLimits.reviewChanges; i++) {
+      report(i);
+    }
+    await host.review.forgetTurns(const {});
+    final snapshot = await host.confirmedChanges();
+    expect(snapshot, hasLength(500));
+    expect(
+      await host.batch('undo', snapshot),
+      _result(skipped: [for (final change in snapshot) change['path']!]),
+    );
+    final same = (await host.changes()).values;
+    expect(same, hasLength(500));
+    report(LinkLimits.reviewChanges);
+    await host.review.forgetTurns(const {});
+    final oversized = await host.confirmedChanges();
+    expect(oversized, hasLength(501));
+    await expectLater(host.batch('keep', oversized), throwsA(_error('stale')));
+    expect(host.session.fileChanges, hasLength(501));
+  });
+
   test(
     'a published revision cannot undo a newer edit queued for review',
     () async {
@@ -191,6 +480,7 @@ class _Fixture {
     this.bridge,
     this.peer,
     this.review,
+    this.kernel,
     this.first,
     this.second,
   );
@@ -199,6 +489,7 @@ class _Fixture {
   final WorkspaceBridge bridge;
   final LinkPeer peer;
   final ChangeReview review;
+  final _Kernel kernel;
   final File first;
   final File second;
 
@@ -220,12 +511,13 @@ class _Fixture {
       root: first.parent.path,
     );
     late final KernelDescriptor descriptor;
+    late final _Kernel kernel;
     descriptor = KernelDescriptor(
       id: 'fixture-review',
       label: 'Fixture review',
       icon: Icons.edit,
       description: '',
-      create: (_) => _Kernel(descriptor),
+      create: (_) => kernel = _Kernel(descriptor),
     );
     final project = Project('Review fixture', first.parent.path);
     final session = ChatSession(
@@ -262,7 +554,7 @@ class _Fixture {
       session.dispose();
     });
     expect(session.changeReview, same(review));
-    return _Fixture(session, bridge, peer, review, first, second);
+    return _Fixture(session, bridge, peer, review, kernel, first, second);
   }
 
   Future<void> edit(File file, String text) async {
@@ -276,10 +568,27 @@ class _Fixture {
     Map<String, Object?> params = const {},
   ]) => peer.call(method, {'session': 'review-session', ...params});
 
+  Future<Object?> batch(String action, List<Map<String, String>> changes) =>
+      call(LinkMethods.reviewChanges, {'action': action, 'changes': changes});
+
+  List<Map<String, String>> snapshot(Iterable<Map<String, Object?>> changes) =>
+      [
+        for (final change in changes)
+          {
+            'path': change['path']! as String,
+            'revision': change['revision']! as String,
+          },
+      ];
+
+  Future<List<Map<String, String>>> confirmedChanges() async =>
+      snapshot((await update()).changes);
+
+  Future<LinkSessionUpdate> update() async => LinkSessionUpdate.fromJson(
+    (await call(LinkMethods.open))! as Map<String, Object?>,
+  );
+
   Future<Map<String, Map<String, Object?>>> changes() async {
-    final update = LinkSessionUpdate.fromJson(
-      (await call(LinkMethods.open))! as Map<String, Object?>,
-    );
+    final update = await this.update();
     return {
       for (final change in update.changes) change['path']! as String: change,
     };
