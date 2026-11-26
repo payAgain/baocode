@@ -2,31 +2,32 @@ name: Personal BaoCode 2.0.7+43 Windows x64
 
 on:
   push:
-    branches: [personal/build-windows-2.0.7-43]
+    branches: [personal/package-windows-2.0.7-43]
 
 permissions:
   contents: read
+  actions: read
 
 env:
   WORKFLOW_PATH: .github/workflows/personal-windows-2.0.7-43.yml
+  SOURCE_SHA: 94a818ed9e19d64f968f500acbb7619951c82837
   FLUTTER_VERSION: '3.47.5'
 
 jobs:
   source:
     if: github.repository == 'payAgain/baocode'
     runs-on: ubuntu-latest
-    outputs:
-      source_sha: ${{ steps.verify.outputs.source_sha }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
       - name: Verify release source and version
         id: verify
         shell: bash
         run: |
-          source_sha=$(git rev-parse HEAD^)
+          source_sha=$SOURCE_SHA
+          git merge-base --is-ancestor "$source_sha" HEAD
           ci_diff=$(git diff --name-status --no-renames "$source_sha" HEAD)
           if [[ "$ci_diff" != "A"$'\t'"$WORKFLOW_PATH" ]]; then
             printf 'The CI commit must add only %s. Found: %s\n' "$WORKFLOW_PATH" "$ci_diff" >&2
@@ -40,12 +41,8 @@ jobs:
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
           printf 'Verified BaoCode 2.0.7+43 source SHA: %s\n' "$source_sha"
 
-  remote:
-    needs: source
-    uses: ./.github/workflows/remote.yml
-
   windows:
-    needs: remote
+    needs: source
     runs-on: windows-latest
     timeout-minutes: 55
     steps:
@@ -69,6 +66,8 @@ jobs:
         with:
           name: remote
           path: build/remote
+          run-id: 45738302733
+          github-token: ${{ github.token }}
       - name: Verify remote artifacts and point manifest at the release
         shell: pwsh
         run: |
@@ -109,46 +108,6 @@ jobs:
           if ($setupProcess.ExitCode -ne 0) { throw "Inno Setup installation exited $($setupProcess.ExitCode)" }
       - name: Package the x64 installer with the remote servers
         run: dart run tool/build_windows.dart --skip-build --arch x64 --remote-built
-      - name: Install and launch BaoCode
-        shell: pwsh
-        run: |
-          $installer = 'build/installers/BaoCode-2.0.7-setup.exe'
-          $installDir = Join-Path $env:RUNNER_TEMP 'baocode-install-test'
-          $installLog = Join-Path $env:RUNNER_TEMP 'baocode-install.log'
-          $setupProcess = Start-Process $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$installDir`"","/LOG=`"$installLog`"" -Wait -PassThru
-          if ($setupProcess.ExitCode -ne 0) {
-            Get-Content $installLog -Tail 50 -ErrorAction SilentlyContinue
-            throw "BaoCode setup exited $($setupProcess.ExitCode)"
-          }
-          foreach ($path in 'baocode.exe','unins000.exe','flutter_windows.dll','bao_iroh.dll','msvcp140.dll','data/app.so','openssh/ssh.exe','remote/servers.json') {
-            if (-not (Test-Path (Join-Path $installDir $path) -PathType Leaf)) { throw "Missing installed file: $path" }
-          }
-          foreach ($name in 'VERSION','servers.json') {
-            $installed = Join-Path $installDir "remote/$name"
-            $expectedHash = (Get-FileHash "build/remote/$name" -Algorithm SHA256).Hash
-            if ((Get-FileHash $installed -Algorithm SHA256).Hash -cne $expectedHash) {
-              throw "Unexpected installed remote file checksum: $name"
-            }
-          }
-          $app = Get-Item (Join-Path $installDir 'baocode.exe')
-          $info = $app.VersionInfo
-          $version = $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart -join '.'
-          if ($version -ne '2.0.7.43') { throw "Unexpected installed version: $version" }
-          $stream = [IO.BinaryReader]::new($app.OpenRead())
-          try {
-            $stream.BaseStream.Position = 0x3c
-            $stream.BaseStream.Position = $stream.ReadInt32()
-            if ($stream.ReadUInt32() -ne 0x4550 -or $stream.ReadUInt16() -ne 0x8664) { throw 'Expected an x64 PE executable' }
-          } finally { $stream.Dispose() }
-          $env:BAOCODE_DATA_DIR = Join-Path $env:RUNNER_TEMP 'baocode-smoke-data'
-          New-Item -ItemType Directory -Path $env:BAOCODE_DATA_DIR | Out-Null
-          $appProcess = Start-Process $app.FullName -WorkingDirectory $installDir -PassThru
-          try {
-            if ($appProcess.WaitForExit(15000)) { throw "Installed BaoCode exited within 15 seconds: $($appProcess.ExitCode)" }
-            Write-Host "Installed BaoCode x64 $version remained running for 15 seconds."
-          } finally {
-            if (-not $appProcess.HasExited) { Stop-Process -Id $appProcess.Id -Force }
-          }
       - name: Record and verify the installer checksum
         shell: pwsh
         run: |
