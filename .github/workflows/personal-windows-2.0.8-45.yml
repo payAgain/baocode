@@ -1,0 +1,145 @@
+name: Personal BaoCode 2.0.8+45 Windows x64
+
+on:
+  push:
+    branches: [personal/package-windows-2.0.8-45]
+
+permissions:
+  contents: read
+
+env:
+  WORKFLOW_PATH: .github/workflows/personal-windows-2.0.8-45.yml
+  FLUTTER_VERSION: '3.47.5'
+
+jobs:
+  source:
+    if: github.repository == 'payAgain/baocode'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify release source and version
+        shell: bash
+        run: |
+          read -r ci_sha source_sha extra_parents <<< "$(git rev-list --parents -n 1 HEAD)"
+          if [[ "$ci_sha" != "$GITHUB_SHA" || -z "$source_sha" || -n "$extra_parents" ]]; then
+            echo 'Expected the pushed CI commit to have exactly one source parent' >&2
+            exit 1
+          fi
+          ci_diff=$(git diff --name-status --no-renames "$source_sha" "$ci_sha")
+          if [[ "$ci_diff" != "A"$'\t'"$WORKFLOW_PATH" ]]; then
+            printf 'The CI commit must add only %s. Found: %s\n' "$WORKFLOW_PATH" "$ci_diff" >&2
+            exit 1
+          fi
+          if ! grep -Fxq 'version: 2.0.8+45' pubspec.yaml ||
+             ! grep -Fxq "const appVersionString = '2.0.8+45';" lib/update/version.dart; then
+            echo 'Expected BaoCode 2.0.8+45 in both version files' >&2
+            exit 1
+          fi
+          printf 'Verified BaoCode 2.0.8+45 source SHA: %s\n' "$source_sha"
+
+  remote:
+    name: Remote server
+    needs: source
+    uses: ./.github/workflows/remote.yml
+
+  windows:
+    # Build alongside the remote server. Remote test failures still fail the workflow.
+    needs: source
+    permissions:
+      contents: read
+      actions: read # Poll for the artifact from this run.
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - name: Verify the Windows runner architecture
+        env:
+          RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        run: |
+          if ($env:RUNNER_ARCHITECTURE -ne 'X64') { throw 'Expected an x64 Windows runner' }
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: false
+      - uses: ./.github/actions/setup-rust
+      - name: Build the personal update channel
+        run: dart run tool/build_windows.dart --build-only --arch x64
+      - name: Verify the built app version
+        shell: pwsh
+        run: |
+          $app = Get-Item 'build/windows/x64/runner/Release/baocode.exe'
+          $info = $app.VersionInfo
+          $version = ($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart) -join '.'
+          if ($version -cne '2.0.8.45') { throw "Unexpected BaoCode executable version: $version" }
+      - uses: ./.github/actions/wait-for-artifact
+        with:
+          name: remote
+          path: build/remote
+          job: Remote server / Build the remote server
+      - name: Verify remote artifacts and point manifest at the release
+        shell: pwsh
+        run: |
+          $manifestPath = 'build/remote/servers.json'
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          $remoteVersion = (Get-Content 'build/remote/VERSION' -Raw).Trim()
+          if ($remoteVersion -cnotmatch '^2\.0\.7\.45-[0-9a-f]{12}$' -or $manifest.version -cne $remoteVersion) {
+            throw 'Unexpected remote server version in VERSION or servers.json'
+          }
+          $platforms = @('linux-x64', 'linux-arm64', 'linux-riscv64', 'darwin-x64', 'darwin-arm64', 'windows-x64', 'windows-arm64')
+          $actualPlatforms = @($manifest.files.PSObject.Properties.Name | Sort-Object)
+          if (($actualPlatforms -join ',') -cne (@($platforms | Sort-Object) -join ',')) {
+            throw "Unexpected remote platforms: $($actualPlatforms -join ',')"
+          }
+          foreach ($platform in $platforms) {
+            $name = "baocode-server-$platform.gz"
+            $path = Join-Path 'build/remote' $name
+            $entry = $manifest.files.$platform
+            $file = Get-Item -LiteralPath $path
+            $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($file.Length -ne [long]$entry.size -or $digest -cne [string]$entry.sha256) {
+              throw "Remote artifact size or SHA-256 mismatch: $name"
+            }
+            $entry.url = "https://github.com/payAgain/baocode/releases/download/v2.0.8%2B44/$name"
+            Write-Host "Verified ${name}: $digest ($($file.Length) bytes)"
+          }
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
+      - name: Install the pinned Inno Setup compiler
+        shell: pwsh
+        run: |
+          $compilerSetup = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $compilerSetup
+          if ((Get-FileHash $compilerSetup -Algorithm SHA256).Hash -ne '9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732') {
+            throw 'Inno Setup download checksum mismatch'
+          }
+          $setupProcess = Start-Process $compilerSetup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/ALLUSERS' -Wait -PassThru
+          if ($setupProcess.ExitCode -ne 0) { throw "Inno Setup installation exited $($setupProcess.ExitCode)" }
+      - name: Package the x64 installer with the remote servers
+        run: dart run tool/build_windows.dart --skip-build --arch x64 --remote-built
+      - name: Record and verify the installer checksum
+        shell: pwsh
+        run: |
+          $installer = Get-Item 'build/installers/BaoCode-2.0.8-setup.exe'
+          $digest = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "$digest  $($installer.Name) ($($installer.Length) bytes)"
+          $checksumPath = 'build/installers/BaoCode-2.0.8-setup.exe.sha256'
+          "$digest  $($installer.Name)" | Set-Content -LiteralPath $checksumPath -Encoding ascii
+          $recordedHash, $recordedName = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '  ', 2
+          if ($recordedName -cne $installer.Name -or (Get-FileHash $installer -Algorithm SHA256).Hash -ine $recordedHash) {
+            throw 'Installer checksum verification failed'
+          }
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: BaoCode-personal-2.0.8-45-windows-x64
+          path: |
+            build/installers/BaoCode-2.0.8-setup.exe
+            build/installers/BaoCode-2.0.8-setup.exe.sha256
+            build/remote/servers.json
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
