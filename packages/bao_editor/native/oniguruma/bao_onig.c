@@ -153,6 +153,7 @@ typedef struct BaoOnigScanner_ {
   // The match: its register count, then each register's start and end.
   int32_t* result;
   int capacity;
+  void (*freeInOwner)(struct BaoOnigScanner_*);
 } BaoOnigScanner;
 
 #define MAX_REGIONS 1000
@@ -414,6 +415,8 @@ static OnigRegion* searchOnigRegExp(OnigRegExp* regex, int64_t strCacheId,
 
 // OnigScanner
 
+static void freeScanner(BaoOnigScanner* scanner);
+
 // A scanner over [count] UTF-8 patterns, laid end to end in [patterns]. Puts the index of the first invalid pattern in
 // [invalid] (-1 for none) and Oniguruma's message for it in [error]
 // (ONIG_MAX_ERROR_MESSAGE_LEN bytes).
@@ -477,10 +480,11 @@ BAO_ONIG_EXPORT BaoOnigScanner* bao_onig_scanner_new(
   scanner->invalidCount = invalidCount;
   scanner->capacity = capacity;
   scanner->result = (int32_t*)malloc(sizeof(int32_t) * (1 + 2 * capacity));
+  scanner->freeInOwner = freeScanner;
   return scanner;
 }
 
-BAO_ONIG_EXPORT void bao_onig_scanner_free(BaoOnigScanner* scanner) {
+static void freeScanner(BaoOnigScanner* scanner) {
   int i;
   if (scanner->rset != NULL) {
     // The regexes are shared: out of the regset before it frees them (from
@@ -497,6 +501,12 @@ BAO_ONIG_EXPORT void bao_onig_scanner_free(BaoOnigScanner* scanner) {
   free(scanner->regexes);
   free(scanner->result);
   free(scanner);
+}
+
+BAO_ONIG_EXPORT void bao_onig_scanner_free(BaoOnigScanner* scanner) {
+  // A development rebuild can leave two copies of this library loaded. Use
+  // the one that created the scanner and owns its compiled-pattern cache.
+  scanner->freeInOwner(scanner);
 }
 
 // Where bao_onig_find_next puts a match: its register count, then each
