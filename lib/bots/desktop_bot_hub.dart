@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../chat/chat_session.dart';
+import '../link/chat_codec.dart';
 import '../theme/app_theme.dart';
 import '../workspace/workspace.dart';
 import 'bot_groups.dart';
@@ -137,29 +138,20 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
 
   void _findOlderPrivateText(AgentThread thread) {
     final session = thread.session;
-    if (!session.hasEarlierHistory ||
-        session.loadingEarlier ||
+    if ((!session.loadingHistory && !session.hasEarlierHistory) ||
         !_searchedHistory.add(session)) {
       return;
     }
     final bots = widget.bots;
-    // The latest page can be entirely group turns. Page through the local
-    // transcript without attaching a view or preparing the backend.
+    // A legacy head can contain group turns. Read its retained pages using
+    // the history reader so showing the preview doesn't resume that model.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      while (mounted &&
-          identical(bots, widget.bots) &&
-          _panel == _Panel.list &&
-          session.hasEarlierHistory) {
-        final before = session.prependedCount;
-        await session.loadEarlier();
-        if (!mounted ||
-            session.prependedCount == before ||
-            _privatePreview(thread) != null) {
-          return;
-        }
+      if (!mounted || !identical(bots, widget.bots)) return;
+      try {
+        await loadBotChatHistory(session);
+      } finally {
+        if (mounted && identical(bots, widget.bots)) setState(() {});
       }
-      // If the user left the list before the search finished, resume on return.
-      _searchedHistory.remove(session);
     });
   }
 
@@ -172,6 +164,21 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
       if (thread != null && thread.isOpen) {
         preview = _privatePreview(thread);
         if (preview == null) _findOlderPrivateText(thread);
+      }
+      if (preview == null) {
+        for (final history in bots.privateHistory(bot).reversed) {
+          preview = _privatePreview(history);
+          if (preview != null) break;
+          _findOlderPrivateText(history);
+        }
+      }
+      if (bots.privateDeliveries(bot).lastOrNull case final delivery?) {
+        final text = ChatCodec.botSentToUser(delivery.item);
+        if (text != null &&
+            text.isNotEmpty &&
+            (preview == null || delivery.at.isAfter(preview.at))) {
+          preview = (text: text, at: delivery.at);
+        }
       }
       rows.add((
         id: bot.id,

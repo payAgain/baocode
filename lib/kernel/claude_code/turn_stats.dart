@@ -1,11 +1,40 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
+
 import '../../chat/chat_models.dart';
 
 /// What a turn took and spent, as its footer shows it once it ends: kept,
 /// for the footer to show again when the session is opened later, which
 /// Claude Code's own session file does not tell.
 typedef TurnRecord = ({Duration worked, TurnUsage? usage});
+
+/// The host's terminal observation for an exact submitted prompt. Older timing
+/// records cannot certify a successful turn.
+typedef TurnCompletion = ({
+  bool succeeded,
+  int toolIterations,
+  List<String> itemIds,
+  Map<String, String> successfulCommands,
+  Set<String> noteDigests,
+});
+
+String turnNoteDigest(String note) =>
+    sha256.convert(utf8.encode(note)).toString();
+
+String terminalEvidenceDigest(TerminalItem item) =>
+    turnNoteDigest(jsonEncode([item.command, item.output]));
+
+abstract interface class TurnCompletionStore {
+  void writeCompletion(
+    String sessionId,
+    String turnId,
+    TurnRecord? timing,
+    TurnCompletion completion,
+  );
+
+  Future<Map<String, TurnCompletion>> readCompletions(String sessionId);
+}
 
 /// The turns' records of Claude Code sessions, by session; each turn by its
 /// prompt's uuid (the turn's id, as BaoCode sends it and the session file

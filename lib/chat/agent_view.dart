@@ -48,6 +48,14 @@ class ConversationLayer extends StatelessWidget {
         reverseCurve: Curves.easeInCubic,
       );
 
+  // Portals paint outside this layer, so they need to follow its visibility
+  // explicitly. Every enclosing layer must be interactive.
+  static bool isInteractive(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<_ConversationVisibility>()
+          ?.interactive ??
+      true;
+
   @override
   Widget build(BuildContext context) {
     final cover = this.cover;
@@ -66,6 +74,9 @@ class ConversationLayer extends StatelessWidget {
               enabled: opacity > 0,
               child: Opacity(
                 opacity: opacity,
+                // ExcludeSemantics above owns accessibility visibility, even
+                // on the first frame of the fade.
+                alwaysIncludeSemantics: true,
                 child: Transform.translate(
                   offset: Offset((1 - shown) * shift - covered * shift, 0),
                   child: child,
@@ -75,9 +86,25 @@ class ConversationLayer extends StatelessWidget {
           ),
         );
       },
-      child: RepaintBoundary(child: child),
+      child: _ConversationVisibility(
+        interactive: interactive && isInteractive(context),
+        child: RepaintBoundary(child: child),
+      ),
     );
   }
+}
+
+class _ConversationVisibility extends InheritedWidget {
+  const _ConversationVisibility({
+    required this.interactive,
+    required super.child,
+  });
+
+  final bool interactive;
+
+  @override
+  bool updateShouldNotify(_ConversationVisibility oldWidget) =>
+      interactive != oldWidget.interactive;
 }
 
 /// Above a subagent's conversation: the back button and its trail of titles.

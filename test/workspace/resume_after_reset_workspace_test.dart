@@ -143,7 +143,7 @@ void main() {
 
   testWidgets('usage limit: deleted, it is forgotten', (tester) async {
     await hitLimit(tester);
-    workspace.delete(kept());
+    await workspace.delete(kept());
     expect(resumes['session-1'], isNull);
     await tester.pump(const Duration(milliseconds: 100));
   });

@@ -213,6 +213,9 @@ class AgentEngine {
       options: options,
       emit: send,
       hostRequest: _hostRequest,
+      readSystemPrompt: options.refreshSystemPromptOnCompaction
+          ? _readSystemPrompt
+          : null,
       clientFactory: clientFactory,
     );
     session.onTaskEnded = _taskEnded;
@@ -248,15 +251,21 @@ class AgentEngine {
     final branch = session.context.git?.branch;
     final resume = options.resume;
     if (resume != null) {
-      final file =
-          session.paths.findSession(resume) ??
-          session.paths.sessionFile(session.cwd, resume);
+      final managed = options.transcriptProjectsDir != null;
+      final found = session.paths.findSession(
+        resume,
+        cwd: managed ? session.cwd : null,
+      );
+      if (managed && found == null) {
+        throw StateError('Managed transcript for session $resume is missing');
+      }
       session.store = SessionStore.resume(
         sessionId: resume,
         cwd: session.cwd,
-        file: file,
+        file: found ?? session.paths.sessionFile(session.cwd, resume),
         gitBranch: branch,
         persist: options.persist,
+        requireFile: managed,
       );
       session.checkpoints.load(session.store.extras);
       _titled = session.store.title != null;
@@ -364,8 +373,9 @@ class AgentEngine {
   /// Sends the host a request, and waits for its answer.
   Future<Map<String, Object?>> _hostRequest(
     String subtype,
-    Map<String, Object?> fields,
-  ) {
+    Map<String, Object?> fields, {
+    Duration? timeout,
+  }) {
     if (_closed) return Future.error(const Cancelled('closed'));
     final id = randomId(16);
     final done = Completer<Map<String, Object?>>();
@@ -375,7 +385,42 @@ class AgentEngine {
       'request_id': id,
       'request': {'subtype': subtype, ...fields},
     });
-    return done.future;
+    if (timeout == null) return done.future;
+    return done.future.timeout(
+      timeout,
+      onTimeout: () {
+        _pending.remove(id);
+        return const <String, Object?>{};
+      },
+    );
+  }
+
+  Future<({String text, String requestId})?> _readSystemPrompt({
+    bool onlyWithdrawn = false,
+  }) async {
+    try {
+      final reply = await _hostRequest(
+        onlyWithdrawn ? 'check_system_prompt' : 'refresh_system_prompt',
+        const {},
+        timeout: const Duration(seconds: 5),
+      );
+      if (onlyWithdrawn && reply['valid'] != true) {
+        throw StateError('Conversation prompt unavailable');
+      }
+      final text = asString(reply['system_prompt']);
+      if (text == null) return null;
+      final requestId = asString(reply['prompt_request_id']);
+      if (requestId == null) {
+        throw StateError('Conversation prompt has no request identity');
+      }
+      return (text: text, requestId: requestId);
+    } on StateError {
+      if (onlyWithdrawn) rethrow;
+      return null;
+    } on Cancelled {
+      if (onlyWithdrawn) rethrow;
+      return null;
+    }
   }
 
   /// Tells the host its pending requests are moot (the turn stopped).
@@ -699,7 +744,7 @@ class AgentEngine {
 
   /// What the main agent is told besides the conversation.
   AgentPrompt _mainPrompt(ToolSet tools) => session.context.main(
-    own: options.systemPrompt,
+    own: session.systemPrompt,
     core: options.coreSystemPrompt,
     appended: [?options.appendSystemPrompt, ?_appendedByHost],
     notes: [
@@ -992,6 +1037,7 @@ class AgentEngine {
       'duration_ms': DateTime.now().difference(turn.started).inMilliseconds,
       'duration_api_ms': result.apiDuration.inMilliseconds,
       'num_turns': result.requests,
+      'tool_iterations': result.toolIterations,
       'result': error ? (result.error ?? 'Error') : result.lastText,
       'stop_reason': result.reason == 'end_turn' ? 'end_turn' : null,
       'total_cost_usd': session.totalCost,
@@ -1069,6 +1115,7 @@ class AgentEngine {
 
   /// The files and folders `@`-mentioned in [text], read for the model.
   List<String> _mentions(String text) {
+    if (options.restrictedContext) return const [];
     final out = <String>[];
     final seen = <String>{};
     for (final match in RegExp(

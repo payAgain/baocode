@@ -22,6 +22,7 @@ import '../icons/project_icon_picker.dart';
 import '../icons/project_icon_view.dart';
 import '../ide/ide_button.dart' show IdeButtonColors;
 import '../ide/ide_commands.dart' show ideUsesMacKeys;
+import '../ide/ide_dialog.dart';
 import '../ide/ide_hover.dart';
 import '../ide/ide_list.dart';
 import '../ide/ide_speed_search.dart';
@@ -2585,8 +2586,12 @@ class _SidebarState extends State<Sidebar>
       },
     );
     if (!(confirmed ?? false)) return;
-    _workspace.deleteArchived(where: where ?? _here);
-    if (_archivedCount == 0) _workspace.showArchived = false;
+    if (await _deleteConversations(
+          () => _workspace.deleteArchived(where: where ?? _here),
+        ) &&
+        _archivedCount == 0) {
+      _workspace.showArchived = false;
+    }
   }
 
   Widget _buildArchivedLabel(int count, bool active) {
@@ -2652,10 +2657,30 @@ class _SidebarState extends State<Sidebar>
       },
     );
     if (!(confirmed ?? false)) return;
-    if (threads.length == 1) {
-      _workspace.delete(threads.first);
-    } else {
-      _workspace.deleteAll(threads);
+    await _deleteConversations(
+      () => threads.length == 1
+          ? _workspace.delete(threads.first)
+          : _workspace.deleteAll(threads),
+    );
+  }
+
+  Future<bool> _deleteConversations(Future<void> Function() delete) async {
+    try {
+      await delete();
+      return true;
+    } on Object catch (error) {
+      if (mounted) {
+        final l10n = context.l10n;
+        await showIdeDialog(
+          context,
+          message: l10n.commonDelete,
+          detail: error.toString(),
+          buttons: [l10n.commonDismiss],
+          cancel: null,
+          type: IdeDialogType.error,
+        );
+      }
+      return false;
     }
   }
 }

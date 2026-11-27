@@ -980,7 +980,7 @@ void main() {
   ) async {
     final workspace = await pumpApp(tester);
     final open = workspace.selected;
-    workspace.delete(open);
+    await workspace.delete(open);
     await tester.pump();
     expect(workspace.selected.title, 'Sticky user message on scroll');
     expect(chatTitle(tester), 'Sticky user message on scroll');

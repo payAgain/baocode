@@ -85,6 +85,11 @@ abstract final class LinkMethods {
   /// running. No-op if the session is already idle.
   static const stop = 'stop';
 
+  /// `{"session", "queueId"}`: takes back a pending private message. The
+  /// active session advertises `cancelQueued` in its actions and `queueId`
+  /// on each cancellable message. A replaced window or entry is stale.
+  static const cancelQueued = 'cancelQueued';
+
   /// `{"session", "request", "answer"}`: answers what the agent asked (see
   /// [LinkSessionUpdate.interaction]).
   static const answer = 'answer';
@@ -297,6 +302,75 @@ abstract final class LinkMethods {
   /// `{"bot", "text"}`: its notes of itself as the user left them; empty
   /// clears them.
   static const setBotSelf = 'setBotSelf';
+
+  /// `{"bot", "group"?}`: structured memory entries and their budgets.
+  /// With [botMemoryFactScopes], use `factScope` (`private` or `project`)
+  /// instead of `group` to select typed facts. Project scope takes a project ID.
+  static const botMemoryEntries = 'botMemoryEntries';
+
+  /// `{"bot", "group"?, "changes": [{"action", "id"?, "revision"?,
+  /// "text"?, "pinned"?}]}`: atomic, revision-checked changes; returns the
+  /// same snapshot as [botMemoryEntries]. `pin` takes `pinned` and a revision.
+  /// With a `factScope`, add may take `kind` and person selectors
+  /// (`personKey`, `personName`, `newPerson`).
+  static const changeBotMemory = 'changeBotMemory';
+
+  /// `{"bot"}`: typed private facts and the authorized local project IDs
+  /// available for typed memory operations.
+  static const botMemoryFactScopes = 'botMemoryFactScopes';
+
+  /// `{"bot", "group"?, "query", "cursor"?}`: scoped visible history hits.
+  static const botMemorySearch = 'botMemorySearch';
+
+  /// `{"bot", "group"?, "source", "before"?, "after"?}`: a source message
+  /// and its neighbors, resolved and authorized on the host.
+  static const botMemorySource = 'botMemorySource';
+
+  /// `{"bot", "group", "source", "confirm": true}`: delete a supported
+  /// original from its host-owned group. Local owner only.
+  static const deleteBotMemorySource = 'deleteBotMemorySource';
+
+  /// `{"bot", "group", "id", "revision", "factScope"?, "project"?}`.
+  /// Share the exact saved revision of a preference or typed fact with one
+  /// group. Returns the recipient memory state. Local owner only.
+  static const shareBotMemoryEntry = 'shareBotMemoryEntry';
+
+  /// `{"bot", "group", "id", "revision", "shareId"}`. Withdraw an approved
+  /// recipient entry and return the recipient memory state. Local owner only.
+  static const revokeBotMemoryShare = 'revokeBotMemoryShare';
+
+  /// `{"bot", "group"?, "pendingOnly"?}`: review settings, job status and
+  /// proposals, including their proposed and current content.
+  static const botMemoryReview = 'botMemoryReview';
+
+  /// `{"bot", "group"?, "automatic"?, "memoryApproval"?,
+  /// "skillApproval"?, "model"?}`: sets review settings for the scope.
+  static const configureBotMemoryReview = 'configureBotMemoryReview';
+
+  /// `{"bot", "group"?, "focus"?}`: queues a review of stable history.
+  static const refineBotMemory = 'refineBotMemory';
+
+  /// `{"bot", "group"?, "proposal", "approve"}`: revision- and source-checked
+  /// approval or rejection. The authenticated host records the reviewer.
+  static const decideBotMemory = 'decideBotMemory';
+
+  /// `{"bot", "project"?, "includeArchived"?}`: authorized local projects and
+  /// learned skills for the selected project. Defaults to the first project.
+  static const botMemorySkills = 'botMemorySkills';
+
+  /// `{"bot", "project", "name", "beforeRevision"?}`: retained versions of a
+  /// learned skill, newest first, with the generated Markdown for comparison.
+  static const botMemorySkillRevisions = 'botMemorySkillRevisions';
+
+  /// `{"bot", "project", "name", "revision", "pinned"?, "locked"?,
+  /// "archived"?}`: updates skill maintenance flags at the expected revision.
+  static const maintainBotMemorySkill = 'maintainBotMemorySkill';
+
+  /// `{"bot"}`: switches to a fresh private conversation and retains history.
+  static const newBotConversation = 'newBotConversation';
+
+  /// `{"bot"}`: loads updated memory for the next turn of the current chat.
+  static const refreshBotMemory = 'refreshBotMemory';
 
   /// `{"name", "gender", "signature", "picture"?}`: who the user is, as
   /// their phone's profile says, for their bots to know (`picture`,
@@ -820,6 +894,7 @@ class LinkState {
     this.bots = const [],
     this.groups = const [],
     this.groupOptions = const [],
+    this.botMemoryOptions = const [],
   });
 
   factory LinkState.fromJson(Map<String, Object?> json) => LinkState(
@@ -840,13 +915,8 @@ class LinkState {
       for (final group in (json['groups'] as List?) ?? const [])
         LinkGroup.fromJson(_map(group)),
     ],
-    groupOptions: switch (json['groupOptions']) {
-      final List options => [
-        for (final option in options)
-          if (option is String) option,
-      ],
-      _ => const [],
-    },
+    groupOptions: _options(json['groupOptions']),
+    botMemoryOptions: _options(json['botMemoryOptions']),
   );
 
   final DeviceInfo device;
@@ -864,6 +934,14 @@ class LinkState {
   /// when every group is using defaults and omits those fields.
   final List<String> groupOptions;
 
+  /// Memory RPCs supported by this host. Missing on legacy hosts.
+  final List<String> botMemoryOptions;
+
+  static List<String> _options(Object? value) => switch (value) {
+    final List options => options.whereType<String>().toList(),
+    _ => const [],
+  };
+
   Map<String, Object?> toJson() => {
     'device': device.toJson(),
     'projects': [for (final project in projects) project.toJson()],
@@ -872,6 +950,7 @@ class LinkState {
     if (groups.isNotEmpty)
       'groups': [for (final group in groups) group.toJson()],
     if (groupOptions.isNotEmpty) 'groupOptions': groupOptions,
+    if (botMemoryOptions.isNotEmpty) 'botMemoryOptions': botMemoryOptions,
   };
 }
 

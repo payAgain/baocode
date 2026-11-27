@@ -429,8 +429,11 @@ class _GroupMessage extends StatelessWidget {
         ),
       );
     }
-    final parts = message.mine
-        ? [(tag: ChatCodec.botSayTag, text: message.text, ref: message.ref)]
+    final literal = message.mine
+        ? message.text
+        : ChatCodec.literalBotText(message.text);
+    final parts = literal != null
+        ? [(tag: ChatCodec.botSayTag, text: literal, ref: message.ref)]
         : [
             for (final (:tag, :text, :ref) in ChatCodec.botPartsOf(
               ChatCodec.withoutBotEvents(message.text),

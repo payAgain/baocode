@@ -10,30 +10,126 @@ import 'package:path/path.dart' as p;
 
 import '../chat/chat_models.dart';
 import '../chat/chat_session.dart';
-import '../images/image_tools.dart' show ImageTools;
 import '../kernel/agent_kernel.dart';
 import '../kernel/claude_code/claude_sdk_tools.dart';
+import '../kernel/claude_code/managed_transcripts_io.dart';
 import '../kernel/kernel_registry.dart';
 import '../kernel/kernel_types.dart' show KernelOption;
 import '../kernel/queued_messages.dart';
 import '../link/chat_codec.dart';
 import '../link/link_platform.dart';
+import '../search/memory_history.dart'
+    show
+        MemoryHistoryAccess,
+        MemoryHistoryReference,
+        MemoryHistoryScope,
+        MemoryHistoryWindow;
 import '../workspace/preference_store.dart';
+import '../workspace/session_tools.dart';
 import '../workspace/workspace.dart';
 import 'bot.dart';
+import 'bot_fact_store.dart';
 import 'bot_files.dart';
 import 'bot_folders.dart';
+import 'bot_group_prompt.dart' show BotGroup;
 import 'bot_groups.dart';
+import 'bot_history.dart' show botHistoryIndex;
+import 'bot_legacy_diary.dart';
 import 'bot_life.dart';
+import 'bot_memory.dart';
+import 'bot_memory_snapshot.dart';
+import 'bot_memory_migration.dart';
+import 'bot_memory_review.dart';
 import 'bot_pacer.dart';
 import 'bot_permissions.dart';
 import 'bot_prompt.dart';
-import '../workspace/session_tools.dart';
 import 'bot_tools.dart';
 import 'bot_watch.dart';
+import 'desktop_bot_messages.dart' show privateBotItems;
+
+part 'bots_facts.dart';
+part 'bot_memory_sharing.dart';
+part 'bots_memory_migration.dart';
+part 'bots_managed_sources.dart';
 
 /// A bot's picture: its bytes, and their media type.
 typedef BotAvatarImage = ({Uint8List bytes, String type});
+
+enum BotMemoryRefresh { restarting, afterReply, onOpen }
+
+typedef _PrivateChat = ({
+  String alias,
+  String? thread,
+  Map<String, String> retired,
+  Set<String> forgotten,
+  Set<String> invalidated,
+});
+
+class _QueuedPrivate {
+  _QueuedPrivate({
+    required this.id,
+    required this.message,
+    required this.from,
+    required this.notes,
+    required this.at,
+    this.alias,
+    this.linkKey,
+    this.groupCommand,
+  });
+
+  factory _QueuedPrivate.fromJson(Bots bots, Map<String, Object?> json) {
+    final item = ChatCodec.decode(
+      json['item'] as Map<String, Object?>,
+    ) as UserMessageItem;
+    final from = json['from'] as String?;
+    final message = ComposerMessage(
+      text: item.text,
+      images: item.images,
+      mentions: (json['mentions'] as List).cast<String>(),
+    );
+    return _QueuedPrivate(
+      id: json['id'] as String,
+      message: message,
+      groupCommand: json['explicitGroupCommand'] == true
+          ? BotTools.expiredGroupCommand(bots, message)
+          : null,
+      from: from == null ? null : UserPlace.values.byName(from),
+      notes: (json['notes'] as List).cast<String>(),
+      at: item.sentAt!,
+      alias: json['alias'] as String?,
+      linkKey: json['linkKey'] as String?,
+    );
+  }
+
+  final String id;
+  final ComposerMessage message;
+  final UserPlace? from;
+  final List<String> notes;
+  final DateTime at;
+  final String? alias;
+  final String? linkKey;
+  final BotGroupCommand? groupCommand;
+
+  late final item = UserMessageItem(
+    text: message.text,
+    images: message.images,
+    sentAt: at,
+    queued: true,
+  );
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'item': ChatCodec.encode(item),
+    'mentions': message.mentions,
+    'from': ?from?.name,
+    'notes': notes,
+    'alias': ?alias,
+    'linkKey': ?linkKey,
+    if (groupCommand != null) 'explicitGroupCommand': true,
+  };
+}
+
+typedef _PrivateReceipt = ({String fingerprint, String alias, bool cancelled});
 
 /// The user's bots: agents of their own making that chat as a person does
 /// (see bot.dart), each a conversation in a folder of its own, which the
@@ -56,9 +152,9 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
   final Workspace workspace;
   final BotFolders folders;
 
-  /// The user's group chats with them: each bot's, in its one
-  /// conversation with its chat with the user.
+  /// The user's group chats. Each member has a worker specific to the room.
   late final BotGroups groups = BotGroups(this);
+  BotMemoryReview? memoryReview;
 
   /// Where what the app keeps of them besides their files is: the agents
   /// each is told of.
@@ -177,8 +273,14 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     if (workspace.loading) await workspace.loaded;
     if (_disposed) return;
     // Each with its conversation, for the phones to open from the first.
-    _bots.forEach(threadFor);
+    for (final bot in _bots) {
+      _restorePrivateQueue(bot);
+      threadFor(bot);
+    }
     groups.start();
+    for (final bot in _bots) {
+      dispatchPrivate(bot.id);
+    }
     _dropWorld(root);
     workspace.addListener(_watch);
     _watch();
@@ -312,6 +414,8 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
           model: bot.model,
           assistant: had?.assistant ?? false,
           created: bot.created ?? had?.created ?? _clock(),
+          chatOnly: had?.chatOnly ?? false,
+          writesFirst: had?.writesFirst ?? true,
         );
         if (!_same(kept, bot)) _writeBot(kept);
         bot = kept;
@@ -332,6 +436,9 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
       }
       if (_same(had, bot)) continue;
       changed = true;
+      if (had.can(BotAbility.agents) && !bot.can(BotAbility.agents)) {
+        _withdrawProjectMemoryShares(had);
+      }
       _restart(bot);
       if (by?.id != bot.id) {
         _tellChanged(
@@ -344,11 +451,27 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     }
     for (final had in [..._bots]) {
       if (next.any((bot) => bot.id == had.id)) continue;
+      final recreate = had.assistant && !next.any((bot) => bot.assistant);
+      final chat = recreate ? _readPrivateChat(had) : null;
       _forget(had);
       changed = true;
       // The assistant's gone: as new, its conversation with it.
-      if (had.assistant && !next.any((bot) => bot.assistant)) {
-        next.insert(0, _newAssistant(root));
+      if (recreate) {
+        final assistant = _newAssistant(root);
+        _savePrivateChat(assistant, (
+          alias: _newPrivateAlias(assistant),
+          thread: null,
+          retired: const {},
+          forgotten: const {},
+          invalidated: {
+            if (chat != null) ...{
+              chat.alias,
+              ...chat.retired.keys,
+              ...chat.invalidated,
+            },
+          },
+        ));
+        next.insert(0, assistant);
       }
     }
     final added = [
@@ -473,84 +596,263 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
 
   Bot? byId(String id) => _bots.where((bot) => bot.id == id).firstOrNull;
 
-  /// The bot whose folder [cwd] is: its conversation's, or one of a group
-  /// chat's it had before its groups came to it there
-  /// ([BotGroups.memberFolder]).
-  Bot? botAt(String cwd) {
-    final member = BotGroups.groupAt(cwd) == null
-        ? null
-        : p.dirname(p.dirname(cwd));
-    return _bots
-        .where((bot) => bot.folder == cwd || bot.folder == member)
-        .firstOrNull;
+  String _runtimeRoot(Bot bot) => p.join(folders.root!, 'runtime', bot.id);
+
+  /// Each conversation scope has its own catalog project and session history.
+  String runtimeFolder(Bot bot, {String? group}) => group == null
+      ? p.join(_runtimeRoot(bot), 'private')
+      : p.join(_runtimeRoot(bot), 'rooms', group);
+
+  String _workerFolder(Bot bot, String? group, {int? generation}) {
+    final folder = runtimeFolder(bot, group: group);
+    final current = group == null ? 0 : groups.sourceGeneration(group);
+    final version = generation ?? current;
+    return version == 0 ? folder : p.join(folder, 'source-history-$version');
   }
 
-  AgentSetup? _setup(String path) => switch (botAt(path)) {
-    final bot? => AgentSetup(
-      workspace: () => KernelWorkspace(
+  bool isBotPath(String path) => switch (folders.root) {
+    final root? => p.equals(root, path) || p.isWithin(root, path),
+    null => false,
+  };
+
+  ({Bot bot, String? group})? _runtimeAt(String cwd) {
+    final root = folders.root;
+    if (root == null) return null;
+    final runtime = p.join(root, 'runtime');
+    if (!p.isWithin(runtime, cwd)) return null;
+    final parts = p.split(p.relative(cwd, from: runtime));
+    final bot = byId(parts.first);
+    if (bot == null) return null;
+    switch (parts) {
+      case [_, 'private']:
+        return (bot: bot, group: null);
+      case [_, 'rooms', final group, ...]
+          when groups.byId(group)?.members.contains(bot.id) == true &&
+              p.equals(_workerFolder(bot, group), cwd):
+        return (bot: bot, group: group);
+      default:
+        return null;
+    }
+  }
+
+  Bot? botAt(String cwd) => _runtimeAt(cwd)?.bot;
+  String? groupOfCwd(String cwd) => _runtimeAt(cwd)?.group;
+
+  AgentSetup? _setup(String path) {
+    final scope = _runtimeAt(path);
+    if (scope == null) {
+      // Old bot records are opened only to read their persisted history.
+      // A stale/removed scope never inherits ordinary workspace access.
+      return isBotPath(path)
+          ? AgentSetup(
+              workspace: () => const KernelWorkspace(
+                folders: [],
+                ownPrompt: true,
+                tools: [],
+              ),
+              settings: settings,
+              kernel: KernelRegistry.claudeCode.id,
+            )
+          : null;
+    }
+    final (:bot, :group) = scope;
+    if (group != null) {
+      return AgentSetup(
+        workspace: () {
+          String render(String notes) =>
+              botGroupInstructions(bot, memory: notes, now: _clock());
+          return KernelWorkspace(
+            folders: const [],
+            sessionPrompt: (id, {required refresh}) {
+              if (_runtimeAt(path)?.group != group) {
+                throw StateError('The group worker is no longer active');
+              }
+              return _sessionPrompt(bot, group, id, render, refresh: refresh);
+            },
+            ownPrompt: true,
+            refreshSystemPromptOnCompaction: true,
+            tools: BotPermissions.chatTools,
+          );
+        },
+        settings: {...settings, 'model': ?bot.model},
+        kernel: KernelRegistry.claudeCode.id,
+      );
+    }
+    return _privateSetup(bot);
+  }
+
+  AgentSetup _privateSetup(Bot bot) => AgentSetup(
+    workspace: () {
+      String render(String notes) => botInstructions(
+        bot,
+        user: _me,
+        memoryNotes: notes,
+        life: _life(bot),
+        computer: computer,
+        now: _clock(),
+        imageModel: false,
+      );
+      return KernelWorkspace(
         folders: const [],
-        instructions: [
-          botInstructions(
-            bot,
-            user: _me,
-            memory: memory(bot),
-            self: selfNotes(bot),
-            people: people(bot),
-            life: _life(bot),
-            computer: computer,
-            now: _clock(),
-            imageModel:
-                ClaudeSdkTools.called(
-                  'mcp__${ClaudeSdkTools.server}__${ImageTools.name}',
-                ) !=
-                null,
-          ),
-        ].join('\n\n'),
+        sessionPrompt: (id, {required refresh}) =>
+            _sessionPrompt(bot, null, id, render, refresh: refresh),
         // Told only who it is and how it talks: no coding agent's prompt.
         ownPrompt: true,
-        // An agent's, but for what waits on someone at the computer
-        // (BotPermissions), and its own; only the web's and its own when
-        // it only chats (with the tool search, for the browser's, which
-        // are deferred). All of it unasked: the user is on their phone,
-        // not at the computer.
-        // Its files and its groups' chats read with Read, even one that
-        // only chats.
-        tools: [...BotPermissions.tools(bot), if (bot.chatOnly) 'Read'],
-        // An agent's has the user's MCP servers, as an agent does.
-        userServers: !bot.chatOnly,
+        refreshSystemPromptOnCompaction: true,
+        preferManagedTranscript: true,
+        tools: BotPermissions.chatTools,
         approvesAll: true,
         // What the user writes while it talks, taken up as it does: as a
         // person hears what is said meanwhile; and shown where they wrote
         // it.
         queuedMessages: QueuedMessages.duringTurn,
         queuedInPlace: true,
+      );
+    },
+    settings: {...settings, 'model': ?bot.model},
+    kernel: KernelRegistry.claudeCode.id,
+  );
+
+  BotMemorySnapshot _freshMemorySnapshot(Bot bot, String? group) {
+    final memory = userMemory(bot, keepLegacyIds: true, group: group);
+    final facts = group == null ? privateFactMemory(bot) : null;
+    return BotMemorySnapshot(
+      user: memory.promptEntries,
+      facts: facts?.promptEntries ?? const [],
+      userGeneration: memory.withdrawalGeneration,
+      factGeneration: facts?.withdrawalGeneration ?? 0,
+      now: group == null ? selfNow(bot) : '',
+    );
+  }
+
+  String _renderPromptNotes(BotMemorySnapshot snapshot, String? group) {
+    if (snapshot.legacyNotes case final notes?) return notes;
+    final user = snapshot.user.map((entry) => entry.markdown).join('\n');
+    if (group != null) return user;
+    return botMemoryNotes(
+      user,
+      self: [
+        if (snapshot.now.isNotEmpty) snapshot.now,
+        for (final entry in snapshot.facts)
+          if (entry.key?.startsWith('["person",') != true) entry.markdown,
+      ].join('\n'),
+      people: snapshot.facts
+          .where((entry) => entry.key?.startsWith('["person",') == true)
+          .map((entry) => entry.markdown)
+          .join('\n'),
+      preselected: true,
+    );
+  }
+
+  final _loadedMemorySnapshots =
+      <String, ({BotMemorySnapshot snapshot, Object receipt})>{};
+
+  BotMemorySnapshot? loadedMemorySnapshot(Bot bot, {String? group}) {
+    final thread = threadOf(bot, group: group);
+    if (thread == null || !thread.isOpen) return null;
+    final id = thread.session.sessionId;
+    return id == null
+        ? null
+        : _loadedMemorySnapshots[_snapshotPath(bot, group, id)]?.snapshot;
+  }
+
+  String _snapshotFolder(Bot bot, String? group) =>
+      p.join(_workerFolder(bot, group), 'prompt-memory-v1');
+
+  String _snapshotPath(Bot bot, String? group, String sessionId) => p.join(
+    _snapshotFolder(bot, group),
+    sha256.convert(utf8.encode(sessionId)).toString(),
+  );
+
+  void _savePromptNotes(
+    Bot bot,
+    String? group,
+    String sessionId,
+    BotMemorySnapshot snapshot,
+  ) {
+    if (_disposed ||
+        !reviewScopeExists(BotMemoryScope(botId: bot.id, groupId: group))) {
+      throw StateError('The conversation scope is unavailable');
+    }
+    folders.writeFileAtomically(
+      _snapshotPath(bot, group, sessionId),
+      utf8.encode(snapshot.encode()),
+    );
+  }
+
+  KernelSessionPrompt _sessionPrompt(
+    Bot bot,
+    String? group,
+    String? sessionId,
+    String Function(String) render, {
+    required bool refresh,
+  }) {
+    final generation = group == null ? 0 : groups.sourceGeneration(group);
+    final bytes = !refresh && sessionId != null
+        ? folders.readFile(_snapshotPath(bot, group, sessionId), strict: true)
+        : null;
+    final saved = bytes == null
+        ? null
+        : BotMemorySnapshot.decode(utf8.decode(bytes));
+    final memory = userMemory(bot, group: group);
+    final facts = group == null ? privateFactMemory(bot) : null;
+    final snapshot = switch (saved) {
+      final kept? when kept.isCurrent(memory, facts) => kept,
+      final kept? when kept.legacyNotes == null => kept.withoutWithdrawn(
+        memory,
+        facts,
       ),
-      settings: {...settings, 'model': ?bot.model},
-      kernel: KernelRegistry.claudeCode.id,
-    ),
-    null => null,
-  };
+      _ => _freshMemorySnapshot(bot, group),
+    };
+    bool withdrawn() =>
+        _disposed ||
+        !reviewScopeExists(BotMemoryScope(botId: bot.id, groupId: group)) ||
+        group != null && groups.sourceGeneration(group) != generation ||
+        !snapshot.isCurrent(
+          userMemory(bot, group: group),
+          group == null ? privateFactMemory(bot) : null,
+        );
+    return (
+      text: render(_renderPromptNotes(snapshot, group)),
+      withdrawn: withdrawn,
+      save: (id) {
+        if (withdrawn()) {
+          throw StateError('A memory in the snapshot was withdrawn');
+        }
+        final path = _snapshotPath(bot, group, id);
+        if (refresh ||
+            (!identical(saved, snapshot) &&
+                (saved != null || folders.readFile(path) == null))) {
+          _savePromptNotes(bot, group, id, snapshot);
+        }
+        final receipt = Object();
+        _loadedMemorySnapshots[path] = (snapshot: snapshot, receipt: receipt);
+        return () {
+          if (identical(_loadedMemorySnapshots[path]?.receipt, receipt)) {
+            _loadedMemorySnapshots.remove(path);
+          }
+        };
+      },
+    );
+  }
 
   // --- What a bot is offered -------------------------------------------------
 
   @override
   bool offersTool(String cwd, String tool) {
     final ability = BotTools.abilityOf(tool);
-    final bot = botAt(cwd);
+    final scope = _runtimeAt(cwd);
+    if (scope?.group != null) {
+      return BotPermissions.groupHostTools.contains(tool);
+    }
+    if (scope == null && isBotPath(cwd)) return false;
+    final bot = scope?.bot;
     // A project agent's as well, for one looking after the agents.
     if (SessionTools.names.contains(tool)) {
       return bot == null || bot.can(BotAbility.agents);
     }
     if (bot == null) return ability == null;
-    if (ability != null) return ability.allows(bot);
-    // The app's other tools: pictures made; the browser's, if it may use
-    // it; the rest, as an agent's, unless it only chats.
-    if (tool == ImageTools.name) return true;
-    final browser =
-        ClaudeSdkTools.called('mcp__${ClaudeSdkTools.server}__$tool')?.kind ==
-        ToolKind.browser;
-    if (browser) return bot.can(BotAbility.browser);
-    return !bot.chatOnly;
+    return ability?.allows(bot) ?? false;
   }
 
   // --- The session tools, a bot's ---------------------------------------------
@@ -591,10 +893,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
   bool asksUser(String cwd) => botAt(cwd) == null;
 
   @override
-  bool tellsFeature(String cwd, String feature) => switch (botAt(cwd)) {
-    null => true,
-    final bot => feature == 'browser' && bot.can(BotAbility.browser),
-  };
+  bool tellsFeature(String cwd, String feature) => !isBotPath(cwd);
 
   // --- Its conversation --------------------------------------------------
 
@@ -604,17 +903,157 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     for (var i = 0; i < session.itemCount; i++) session.itemAt(i),
   ]);
 
-  /// [bot]'s conversation, if it has one.
-  AgentThread? threadOf(Bot bot) {
+  final _freshPrivateAliases = Expando<String>();
+  final _forgottenThreads = Expando<bool>();
+
+  /// Only records from the matching isolated project can be resumed.
+  AgentThread? threadOf(Bot bot, {String? group}) {
+    final folder = _workerFolder(bot, group);
+    final chat = group == null ? _readPrivateChat(bot) : null;
+    final retired = chat?.retired.values.toSet();
     AgentThread? latest;
     for (final thread in workspace.threads) {
-      if (thread.project.path != bot.folder || thread.archived) continue;
+      if (thread.project.path != folder || _forgottenThreads[thread] == true) {
+        continue;
+      }
+      final id = thread.id;
+      if (chat?.thread case final active?) {
+        if (id == active) return thread;
+        continue;
+      }
+      if (thread.archived ||
+          retired?.contains(id) == true ||
+          chat?.forgotten.contains(id) == true &&
+              _freshPrivateAliases[thread] != chat!.alias) {
+        continue;
+      }
       if (latest == null || thread.updatedAt.isAfter(latest.updatedAt)) {
         latest = thread;
       }
     }
     return latest;
   }
+
+  bool isLegacyPrivateThread(Bot bot, AgentThread thread) =>
+      thread.project.path == bot.folder;
+
+  /// The app can read these records for display. Their raw mixed transcript
+  /// must never be used as a model's input.
+  List<AgentThread> privateHistory(Bot bot) {
+    final chat = _readPrivateChat(bot);
+    final active = threadOf(bot);
+    return [
+      for (final thread in workspace.threads)
+        if (thread.id case final id?
+            when !identical(thread, active) &&
+                _forgottenThreads[thread] != true &&
+                chat?.forgotten.contains(id) != true &&
+                (isLegacyPrivateThread(bot, thread) ||
+                    thread.project.path == runtimeFolder(bot) &&
+                        (thread.archived ||
+                            chat?.retired.containsValue(id) == true)))
+          thread,
+    ]..sort((a, b) => a.updatedAt.compareTo(b.updatedAt));
+  }
+
+  bool canActivateConversation(Bot bot, AgentThread thread) =>
+      thread.project.path == runtimeFolder(bot) &&
+      privateHistory(bot).contains(thread);
+
+  String _privateIdFile(Bot bot) => p.join(_runtimeRoot(bot), 'private-id');
+  final _privateChats = <String, _PrivateChat?>{};
+
+  _PrivateChat? _readPrivateChat(Bot bot) =>
+      _privateChats.putIfAbsent(bot.id, () {
+        final saved = _readText(_privateIdFile(bot)).trim();
+        if (saved.isEmpty) return null;
+        if (!saved.startsWith('{')) {
+          return (
+            alias: saved,
+            thread: null,
+            retired: const {},
+            forgotten: const {},
+            invalidated: const {},
+          );
+        }
+        final json = jsonDecode(saved) as Map<String, Object?>;
+        return (
+          alias: json['alias'] as String,
+          thread: json['thread'] as String?,
+          retired: (json['retired'] as Map).cast<String, String>(),
+          forgotten: (json['forgotten'] as List).cast<String>().toSet(),
+          invalidated: (json['invalidated'] as List).cast<String>().toSet(),
+        );
+      });
+
+  void _savePrivateChat(Bot bot, _PrivateChat chat) {
+    folders.writeFileAtomically(
+      _privateIdFile(bot),
+      utf8.encode(
+        jsonEncode({
+          'alias': chat.alias,
+          'thread': ?chat.thread,
+          'retired': chat.retired,
+          'forgotten': chat.forgotten.toList(),
+          'invalidated': chat.invalidated.toList(),
+        }),
+      ),
+    );
+    _privateChats[bot.id] = chat;
+  }
+
+  String? legacyPrivateId(Bot bot) =>
+      privateHistory(bot)
+          .where((thread) => isLegacyPrivateThread(bot, thread))
+          .lastOrNull
+          ?.id;
+
+  /// Kept across worker replacements. Older phones can keep their DM id.
+  String privateSessionId(Bot bot) {
+    final previous = _readPrivateChat(bot);
+    if (previous != null) return previous.alias;
+    final id = legacyPrivateId(bot) ?? 'bot-dm:${bot.id}';
+    _savePrivateChat(bot, (
+      alias: id,
+      thread: threadOf(bot)?.id,
+      retired: const {},
+      forgotten: const {},
+      invalidated: const {},
+    ));
+    return id;
+  }
+
+  String _newPrivateAlias(Bot bot) {
+    final random = math.Random.secure();
+    final generation = base64UrlEncode(
+      List.generate(12, (_) => random.nextInt(256)),
+    );
+    return 'bot-dm:${bot.id}:$generation';
+  }
+
+  Bot? privateBotForSession(String id) =>
+      _bots.where((bot) => privateSessionId(bot) == id).firstOrNull;
+
+  ({Bot bot, AgentThread thread})? archivedPrivateSession(String alias) {
+    for (final bot in _bots) {
+      final id = _readPrivateChat(bot)?.retired[alias];
+      if (id == null) continue;
+      for (final thread in workspace.threads) {
+        if (thread.id == id &&
+            (thread.project.path == runtimeFolder(bot) ||
+                isLegacyPrivateThread(bot, thread))) {
+          return (bot: bot, thread: thread);
+        }
+      }
+    }
+    return null;
+  }
+
+  bool isStalePrivateSession(String alias) => _bots.any((bot) {
+    final chat = _readPrivateChat(bot);
+    return chat?.retired.containsKey(alias) == true ||
+        chat?.invalidated.contains(alias) == true;
+  });
 
   /// What each bot was last told of reply suggestions, by its id, this
   /// run: on or off (see [BotSuggestions]).
@@ -653,30 +1092,452 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
   }
 
   /// [bot]'s conversation, started if it has none.
-  AgentThread threadFor(Bot bot) {
+  AgentThread threadFor(Bot bot, {String? group}) {
+    if (group != null && groups.byId(group)?.members.contains(bot.id) != true) {
+      throw StateError('Not in the group $group');
+    }
+    final folder = _workerFolder(bot, group);
     final thread =
-        threadOf(bot) ??
+        threadOf(bot, group: group) ??
         (() {
-          folders.make(bot.folder);
-          return workspace.startAgent(workspace.projectAt(bot.folder));
+          folders.make(folder);
+          final fresh = workspace.startAgent(
+            workspace.projectAt(folder),
+            reuseUntouched: !workspace.threads.any(
+              (thread) =>
+                  thread.project.path == folder &&
+                  _forgottenThreads[thread] == true,
+            ),
+          );
+          if (group == null) {
+            _freshPrivateAliases[fresh] = _readPrivateChat(bot)?.alias;
+          }
+          return fresh;
         })();
-    // Followed from now: what is sent it, seen.
     thread.session;
-    _follow();
+    if (group == null) {
+      _follow();
+    } else {
+      groups.follow(group, bot.id, thread.session);
+    }
     return thread;
   }
 
-  /// Has [bot]'s agent start again on its conversation, to be told what
-  /// changed (its identity, abilities, memory) from its next message.
-  void _restart(Bot bot) {
+  final Map<String, List<_QueuedPrivate>> _pendingPrivate = {};
+  final Map<String, Map<String, _PrivateReceipt>> _privateReceipts = {};
+  final Map<String, String> _dispatchedPrivate = {};
+
+  String get _deletedPrivateReceiptFile =>
+      p.join(folders.root!, 'runtime', 'deleted-private-requests.json');
+
+  late final _deletedPrivateRequests = switch (_readText(
+    _deletedPrivateReceiptFile,
+  )) {
+    '' => <String>{},
+    final saved => (jsonDecode(saved) as List).cast<String>().toSet(),
+  };
+
+  bool isDeletedPrivateRequest(String key) =>
+      folders.root != null && _deletedPrivateRequests.contains(key);
+
+  void _retirePrivateReceipts(Bot bot) {
+    final requests = _privateReceipts[bot.id];
+    if (requests == null || requests.isEmpty) return;
+    folders.writeFileAtomically(
+      _deletedPrivateReceiptFile,
+      utf8.encode(jsonEncode([..._deletedPrivateRequests, ...requests.keys])),
+    );
+    _deletedPrivateRequests.addAll(requests.keys);
+    _privateReceipts.remove(bot.id);
+  }
+
+  String _pendingPrivateFile(Bot bot) =>
+      p.join(_runtimeRoot(bot), 'private-queue.json');
+
+  void _restorePrivateQueue(Bot bot) {
+    final file = _pendingPrivateFile(bot);
+    final bytes = folders.readFile(file);
+    if (bytes == null) return;
+    try {
+      final saved = jsonDecode(utf8.decode(bytes));
+      final pending = saved is List ? saved : (saved as Map)['pending'] as List;
+      final restored = [
+        for (final item in pending)
+          _QueuedPrivate.fromJson(this, item as Map<String, Object?>),
+      ];
+      if (restored.isNotEmpty) _pendingPrivate[bot.id] = restored;
+      if ((saved is Map ? saved['receipts'] : null) case final Map receipts) {
+        _privateReceipts[bot.id] = {
+          for (final MapEntry(key: key, value: value) in receipts.entries)
+            key as String: (
+              fingerprint: (value as Map)['fingerprint'] as String,
+              alias: value['alias'] as String,
+              cancelled: value['cancelled'] == true,
+            ),
+        };
+      }
+    } on Object catch (error) {
+      debugPrint('bots: could not restore pending private messages: $error');
+    }
+  }
+
+  void _savePrivateQueue(
+    Bot bot,
+    List<_QueuedPrivate> pending, {
+    Map<String, _PrivateReceipt>? receipts,
+  }) {
+    final kept = receipts ?? _privateReceipts[bot.id] ?? const {};
+    folders.writeFileAtomically(
+      _pendingPrivateFile(bot),
+      utf8.encode(
+        jsonEncode({
+          'pending': [for (final item in pending) item.toJson()],
+          'receipts': {
+            for (final MapEntry(:key, :value) in kept.entries)
+              key: {
+                'fingerprint': value.fingerprint,
+                'alias': value.alias,
+                if (value.cancelled) 'cancelled': true,
+              },
+          },
+        }),
+      ),
+    );
+    if (receipts != null) _privateReceipts[bot.id] = receipts;
+    if (pending.isEmpty) {
+      _pendingPrivate.remove(bot.id);
+    } else {
+      _pendingPrivate[bot.id] = pending;
+    }
+  }
+
+  Iterable<_QueuedPrivate> _visiblePrivateQueue(Bot bot) =>
+      (_pendingPrivate[bot.id] ?? const <_QueuedPrivate>[]).where((queued) {
+        final chat = _readPrivateChat(bot);
+        return _dispatchedPrivate[bot.id] != queued.id &&
+            (queued.alias == chat?.alias ||
+                queued.alias == null && chat?.invalidated.isNotEmpty != true);
+      });
+
+  Iterable<UserMessageItem> pendingPrivateItems(Bot bot) =>
+      _visiblePrivateQueue(bot).map((queued) => queued.item);
+
+  String? pendingPrivateId(Bot bot, UserMessageItem item) =>
+      _visiblePrivateQueue(bot)
+          .where((queued) => identical(queued.item, item))
+          .firstOrNull
+          ?.id;
+
+  bool cancelPendingPrivate(Bot bot, String id) {
+    final target = _visiblePrivateQueue(bot)
+        .where((queued) => queued.id == id)
+        .firstOrNull;
+    if (target == null) return false;
+    final key = target.linkKey;
+    final kept = _privateReceipts[bot.id];
+    final receipt = kept?[key];
+    _savePrivateQueue(
+      bot,
+      _pendingPrivate[bot.id]!.where((queued) => queued.id != id).toList(),
+      receipts: receipt == null || key == null
+          ? null
+          : {
+              ...kept!,
+              key: (
+                fingerprint: receipt.fingerprint,
+                alias: receipt.alias,
+                cancelled: true,
+              ),
+            },
+    );
+    notifyListeners();
+    return true;
+  }
+
+  ({String bot, String fingerprint, String alias, bool valid})?
+  privateLinkReceipt(String key) {
+    for (final bot in _bots) {
+      if (_privateReceipts[bot.id]?[key] case final receipt?) {
+        final chat = _readPrivateChat(bot);
+        return (
+          bot: bot.id,
+          fingerprint: receipt.fingerprint,
+          alias: receipt.alias,
+          valid:
+              !receipt.cancelled &&
+              (chat?.alias == receipt.alias ||
+                  archivedPrivateSession(receipt.alias) != null),
+        );
+      }
+    }
+    return null;
+  }
+
+  void sendPrivate(
+    Bot bot,
+    ComposerMessage message, {
+    UserPlace? from,
+    bool now = false,
+    List<String> notes = const [],
+    String? commandText,
+    ({String key, String fingerprint})? linkRequest,
+  }) {
+    if (message.isEmpty) return;
+    final turnId = ChatSession.newTurnId();
+    final command = commandText == null
+        ? message
+        : ComposerMessage(
+            text: commandText,
+            images: message.images,
+            mentions: message.mentions,
+          );
+    final groupCommand = BotTools.prepareGroupCommand(this, bot, command);
+    final session = threadFor(bot).session;
+    final mustQueue =
+        groups.answering(bot.id) != null ||
+        groupCommand != null && session.isStreaming;
+    if (mustQueue && now) {
+      throw StateError('The private turn is no longer active');
+    }
+    if (mustQueue ||
+        !now && (linkRequest != null || _pendingPrivate.containsKey(bot.id))) {
+      final alias = privateSessionId(bot);
+      _savePrivateQueue(
+        bot,
+        [
+          ...?_pendingPrivate[bot.id],
+          _QueuedPrivate(
+            id: turnId,
+            message: message,
+            from: from,
+            notes: notes,
+            at: _clock(),
+            alias: alias,
+            linkKey: linkRequest?.key,
+            groupCommand: groupCommand,
+          ),
+        ],
+        receipts: linkRequest == null
+            ? null
+            : {
+                ...?_privateReceipts[bot.id],
+                linkRequest.key: (
+                  fingerprint: linkRequest.fingerprint,
+                  alias: alias,
+                  cancelled: false,
+                ),
+              },
+      );
+      notifyListeners();
+      if (linkRequest == null) {
+        dispatchPrivate(bot.id);
+      } else {
+        // The RPC can hand the durable receipt back before model dispatch.
+        Timer.run(() => dispatchPrivate(bot.id));
+      }
+      return;
+    }
+    if (BotTools.runGroupCommand(this, bot, session, turnId, groupCommand)) {
+      return;
+    }
+    session.send(message, from: from, now: now, notes: notes, turnId: turnId);
+  }
+
+  /// Dispatch a pending DM before offering this bot a waiting group turn.
+  /// Keep its stable ID on disk until the private worker processes it.
+  bool dispatchPrivate(String member) {
+    if (_disposed || groups.answering(member) != null) return false;
+    final bot = byId(member);
+    if (bot == null) return false;
     final thread = threadOf(bot);
+    if (thread != null && thread.isOpen && thread.session.hasQueuedMessages) {
+      return true;
+    }
+    final pending = _pendingPrivate[member];
+    if (pending == null || pending.isEmpty) return false;
+    final session = threadFor(bot).session;
+    if (session.loadingHistory || session.isStreaming || !session.canSend) {
+      return true;
+    }
+    final known = {
+      for (var index = 0; index < session.itemCount; index++)
+        if (session.itemAt(index) is UserMessageItem) ?session.itemIdAt(index),
+    };
+    final alias = privateSessionId(bot);
+    final chat = _readPrivateChat(bot)!;
+    final remaining = pending
+        .where(
+          (entry) =>
+              !known.contains(entry.id) &&
+              (entry.alias == alias ||
+                  entry.alias == null && chat.invalidated.isEmpty),
+        )
+        .toList();
+    if (remaining.length != pending.length) {
+      _savePrivateQueue(bot, remaining);
+      _dispatchedPrivate.remove(member);
+      notifyListeners();
+    }
+    final next = remaining.firstOrNull;
+    if (next == null) return false;
+    if (BotTools.runGroupCommand(
+      this,
+      bot,
+      session,
+      next.id,
+      next.groupCommand,
+    )) {
+      _savePrivateQueue(bot, remaining.skip(1).toList());
+      scheduleMicrotask(() => groups.caughtUp(member));
+    } else {
+      _dispatchedPrivate[member] = next.id;
+      session.send(
+        next.message,
+        from: next.from,
+        notes: next.notes,
+        turnId: next.id,
+      );
+    }
+    notifyListeners();
+    return true;
+  }
+
+  AgentThread newConversation(Bot bot) => _switchPrivateConversation(bot);
+
+  AgentThread activateConversation(Bot bot, AgentThread archived) {
+    if (!canActivateConversation(bot, archived)) {
+      throw StateError('That conversation cannot be resumed');
+    }
+    return _switchPrivateConversation(bot, archived: archived);
+  }
+
+  AgentThread _switchPrivateConversation(Bot bot, {AgentThread? archived}) {
+    if (_pendingPrivate.containsKey(bot.id)) {
+      throw StateError('Wait for the queued messages to finish');
+    }
+    final current = threadOf(bot);
+    final session = current?.isOpen == true ? current!.session : null;
+    if (session?.isStreaming == true || session?.pendingInteraction != null) {
+      throw StateError('Wait for the current reply to finish');
+    }
+    if (session?.hasQueuedMessages == true) {
+      throw StateError('Wait for the queued messages to finish');
+    }
+    final alias = privateSessionId(bot);
+    final chat = _readPrivateChat(bot)!;
+    final previousId =
+        current?.id ?? (alias == legacyPrivateId(bot) ? alias : null);
+    // Commit the alias and routing before notifying any observers. This also
+    // selects the correct worker if the workspace's archive flags lag on disk.
+    _savePrivateChat(bot, (
+      alias: _newPrivateAlias(bot),
+      thread: archived?.id,
+      retired: {...chat.retired, alias: ?previousId},
+      forgotten: chat.forgotten,
+      invalidated: {...chat.invalidated, if (previousId == null) alias},
+    ));
+    if (session != null) {
+      if (_followed.remove(session) case final listener?) {
+        session.removeListener(listener);
+      }
+    }
+    if (current != null) {
+      if (current.id == null) {
+        workspace.delete(current);
+      } else {
+        workspace.setArchived(current, true);
+      }
+    }
+    if (archived != null) workspace.setArchived(archived, false);
+    _seen.remove(bot.id);
+    _suggestionsTold.remove(bot.id);
+    _restartWhenIdle.remove(runtimeFolder(bot));
+    final next = threadFor(bot);
+    notifyListeners();
+    return next;
+  }
+
+  /// Relaunch the same conversation with an updated memory snapshot.
+  BotMemoryRefresh refreshMemory(Bot bot, {String? group}) {
+    final thread = threadOf(bot, group: group);
+    if (thread == null) return BotMemoryRefresh.onOpen;
+    final session = thread.isOpen ? thread.session : null;
+    if (session?.isStreaming == true) {
+      _restartWhenIdle.add(thread.project.path);
+      return BotMemoryRefresh.afterReply;
+    }
+    final id = session?.sessionId ?? thread.id;
+    if (id == null) return BotMemoryRefresh.onOpen;
+    _savePromptNotes(bot, group, id, _freshMemorySnapshot(bot, group));
+    if (session == null) return BotMemoryRefresh.onOpen;
+    session.restart();
+    return BotMemoryRefresh.restarting;
+  }
+
+  final _withdrawalWhenIdle = <String>{};
+
+  void memoryWithdrawn(Bot bot, {String? group}) {
+    if (group == null) _checkLiveMemoryShares(bot);
+    final thread = threadOf(bot, group: group);
     if (thread == null || !thread.isOpen) return;
-    final session = thread.session;
-    if (session.isStreaming) {
-      // Once it is done answering.
-      _restartWhenIdle.add(bot.id);
-    } else if (session.sessionId != null) {
-      session.restart();
+    if (thread.session.isStreaming) {
+      _withdrawalWhenIdle.add(thread.project.path);
+    } else {
+      _restartAfterWithdrawal(bot, group);
+    }
+  }
+
+  void _restartAfterWithdrawal(Bot bot, String? group) {
+    final thread = threadOf(bot, group: group);
+    if (thread == null || !thread.isOpen) return;
+    final loaded = loadedMemorySnapshot(bot, group: group);
+    if (loaded?.isCurrent(
+          userMemory(bot, group: group),
+          group == null ? privateFactMemory(bot) : null,
+        ) ==
+        true) {
+      return;
+    }
+    thread.session.restart();
+  }
+
+  String memorySnapshotStatus(Bot bot, {String? group}) {
+    final folder = _workerFolder(bot, group);
+    if (_withdrawalWhenIdle.contains(folder) ||
+        _restartWhenIdle.contains(folder)) {
+      return 'pending';
+    }
+    final snapshot = loadedMemorySnapshot(bot, group: group);
+    if (snapshot == null || snapshot.legacyNotes != null) return 'unknown';
+    return snapshot.isCurrent(
+          userMemory(bot, group: group),
+          group == null ? privateFactMemory(bot) : null,
+        )
+        ? 'confirmed'
+        : 'pending';
+  }
+
+  void groupSettled(
+    String group,
+    String member, {
+    required bool refreshAfterCompaction,
+  }) {
+    final bot = byId(member);
+    if (bot == null) return;
+    final folder = _workerFolder(bot, group);
+    final withdrawn = _withdrawalWhenIdle.remove(folder);
+    if (_restartWhenIdle.remove(folder) ||
+        refreshAfterCompaction && !withdrawn) {
+      refreshMemory(bot, group: group);
+    } else if (withdrawn) {
+      _restartAfterWithdrawal(bot, group);
+    }
+  }
+
+  void _restart(Bot bot) {
+    refreshMemory(bot);
+    for (final group in groups.groups) {
+      if (group.members.contains(bot.id)) refreshMemory(bot, group: group.id);
     }
   }
 
@@ -684,28 +1545,29 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
   /// its messages, stickers, cards and pictures, as a chat app counts; in
   /// its chat with them, not its groups'.
   int unread(Bot bot) {
+    var unread = _unreadDeliveries[bot.id]?.length ?? 0;
     final thread = threadOf(bot);
-    if (thread == null || !thread.isOpen) return 0;
+    if (thread == null || !thread.isOpen) return unread;
     final session = thread.session;
     // Its history being read (as the app starts): none of it new.
-    if (session.loadingHistory) return 0;
+    if (session.loadingHistory) return unread;
     final count = session.itemCount;
     final (at, before) = _seen[bot.id] ??= (count, session.prependedCount);
     final seen = (at + session.prependedCount - before).clamp(0, count);
-    final places = _places(session);
-    var unread = 0;
     for (var i = seen; i < count; i++) {
-      if (places[i] == null) unread += _shown(session.itemAt(i));
+      unread += _shown(session.itemAt(i));
     }
     return unread;
   }
 
   /// The user has read all [bot] said.
   void seen(Bot bot) {
+    _unreadDeliveries.remove(bot.id);
     final thread = threadOf(bot);
-    if (thread == null || !thread.isOpen) return;
-    final session = thread.session;
-    _seen[bot.id] = (session.itemCount, session.prependedCount);
+    if (thread != null && thread.isOpen) {
+      final session = thread.session;
+      _seen[bot.id] = (session.itemCount, session.prependedCount);
+    }
     notifyListeners();
   }
 
@@ -729,12 +1591,23 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     return _places(thread.session).lastOrNull == null;
   }
 
-  /// Where [bot] is at work now ([group]'s, or null for its chat with the
-  /// user), since its turn was sent; none when it is not.
+  /// Where [bot] is at work now, since the worker's turn was sent.
   ({String? group, DateTime? since})? atWork(Bot bot) {
-    final thread = threadOf(bot);
+    String? group;
+    var thread = threadOf(bot);
+    if (thread?.status != ThreadStatus.running) {
+      for (final room in groups.groups) {
+        if (!room.members.contains(bot.id)) continue;
+        final worker = threadOf(bot, group: room.id);
+        if (worker?.status == ThreadStatus.running) {
+          thread = worker;
+          group = room.id;
+          break;
+        }
+      }
+    }
     if (thread == null || thread.status != ThreadStatus.running) return null;
-    if (!thread.isOpen) return (group: null, since: null);
+    if (!thread.isOpen) return (group: group, since: null);
     final session = thread.session;
     DateTime? since;
     for (var i = session.itemCount - 1; i >= 0; i--) {
@@ -746,16 +1619,12 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
         break;
       }
     }
-    return (group: _places(session).lastOrNull, since: since);
+    return (group: group, since: since);
   }
 
   /// The last [bot] said: its first line; a picture or a sticker, as a
   /// chat app's list says it.
   String? lastLine(Bot bot) {
-    final thread = threadOf(bot);
-    if (thread == null || !thread.isOpen) return null;
-    final session = thread.session;
-    final places = _places(session);
     String? firstLine(String text) {
       final line = text
           .split('\n')
@@ -765,56 +1634,54 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
       return line.length > 120 ? '${line.substring(0, 120)}…' : line;
     }
 
-    for (var i = session.itemCount - 1; i >= 0; i--) {
-      if (places[i] != null) continue;
-      switch (session.itemAt(i)) {
-        case AssistantTextItem(:final text):
-          if (ChatCodec.botSays(text).lastOrNull case final said?) {
-            if (firstLine(said) case final line?) return line;
-          }
-        case final ToolCallItem item when ChatCodec.botSentToUser(item) != null:
-          if (firstLine(ChatCodec.botSentToUser(item)!) case final line?) {
-            return line;
-          }
-          return chinese ? '[图片]' : '[Picture]';
-        case final ToolCallItem item
-            when item.status != ToolStatus.failed &&
-                (item.images.isNotEmpty || ChatCodec.botImageUrl(item) != null):
-          return chinese ? '[图片]' : '[Picture]';
-        default:
-      }
-    }
-    return null;
+    final latest = _latestPrivateDelivery(bot);
+    final transcript = _privatePreview(bot, replyOnly: true);
+    final line =
+        latest != null &&
+            (transcript == null || !latest.at.isBefore(transcript.at))
+        ? latest.text
+        : transcript?.text;
+    if (line == null) return null;
+    return firstLine(line) ?? (chinese ? '[图片]' : '[Picture]');
   }
 
-  /// When [bot]'s chat with the user last went on: what either said there
-  /// (or the bot sent there from a group), as its turn was sent; none if
-  /// nothing was. Not its groups': the phone's chat list has its chat by it.
   DateTime? chattedAt(Bot bot) {
-    final thread = threadOf(bot);
-    if (thread == null || !thread.isOpen) return null;
-    final session = thread.session;
-    final places = _places(session);
-    for (var i = session.itemCount - 1; i >= 0; i--) {
-      if (places[i] != null) continue;
-      final said = switch (session.itemAt(i)) {
-        AssistantTextItem(:final text) => ChatCodec.botSays(text).isNotEmpty,
-        final ToolCallItem item =>
-          ChatCodec.botSentToUser(item) != null ||
-              item.status != ToolStatus.failed &&
-                  (item.images.isNotEmpty ||
-                      ChatCodec.botImageUrl(item) != null),
-        final UserMessageItem item =>
-          !item.queued && ChatCodec.botEvent(item) == null,
-        _ => false,
-      };
-      if (!said) continue;
-      for (var j = i; j >= 0; j--) {
-        if (session.itemAt(j) case UserMessageItem(:final sentAt?)) {
-          return sentAt;
-        }
+    final delivery = _latestPrivateDelivery(bot)?.at;
+    final transcript = _privatePreview(bot)?.at;
+    if (delivery == null) return transcript;
+    return transcript == null || delivery.isAfter(transcript)
+        ? delivery
+        : transcript;
+  }
+
+  ({DateTime at, String text})? _privatePreview(
+    Bot bot, {
+    bool replyOnly = false,
+  }) {
+    for (final thread in [?threadOf(bot), ...privateHistory(bot).reversed]) {
+      if (!thread.isOpen) continue;
+      final items = privateBotItems(
+        thread.session,
+        active: !thread.archived && !isLegacyPrivateThread(bot, thread),
+        legacy: isLegacyPrivateThread(bot, thread),
+      ).toList();
+      for (final (:item, :at, index: _) in items.reversed) {
+        final text =
+            ChatCodec.botSentToUser(item) ??
+            switch (item) {
+              AssistantTextItem(:final text) => ChatCodec.botSays(
+                text,
+              ).lastOrNull,
+              ToolCallItem(status: ToolStatus.succeeded, :final images)
+                  when images.isNotEmpty ||
+                      ChatCodec.botImageUrl(item) != null =>
+                '',
+              UserMessageItem(queued: false, :final text) when !replyOnly =>
+                text,
+              _ => null,
+            };
+        if (text != null) return (at: at ?? thread.updatedAt, text: text);
       }
-      return thread.updatedAt;
     }
     return null;
   }
@@ -915,6 +1782,9 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     if (had.can(BotAbility.proactive) && !bot.can(BotAbility.proactive)) {
       _pacers.remove(bot.id);
     }
+    if (had.can(BotAbility.agents) && !bot.can(BotAbility.agents)) {
+      _withdrawProjectMemoryShares(bot);
+    }
     _writeBot(bot);
     _restart(bot);
     // Changed by itself, it knows.
@@ -975,15 +1845,17 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     );
   }
 
-  /// What [bot] keeps of itself: what it said it likes, has done, thinks;
-  /// to be the same one each time. Empty for nothing.
-  String selfNotes(Bot bot) =>
-      _readText(p.join(bot.folder, BotFiles.self)).trim();
+  /// Compatibility view for the original self notes editor.
+  String selfNotes(Bot bot) => _privateFacts(bot).selfMarkdown;
 
-  /// [bot]'s notes of itself now [text]: by itself, as it goes; else the
-  /// user's, which it is told from its next message ([restart]).
+  String selfNow(Bot bot) => _privateFacts(bot).now;
+
+  BotMemory privateFactMemory(Bot bot) => _privateFacts(bot).memory;
+
   void setSelfNotes(Bot bot, String text, {bool restart = false}) {
-    _writeText(p.join(bot.folder, BotFiles.self), text);
+    final previous = _privateFacts(bot);
+    final current = previous.replaceSelf(text, at: _clock());
+    _commitFacts(bot, null, previous, current);
     if (!restart) return;
     _restart(bot);
     notifyListeners();
@@ -1065,9 +1937,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     final bot = byId(id);
     if (bot == null) return;
     if (bot.assistant) throw StateError('The assistant stays');
-    folders.delete(bot.folder);
-    _forget(bot);
-    unawaited(forgetSessions(bot.folder));
+    _forget(bot, deleteCard: true);
     notifyListeners();
   }
 
@@ -1080,11 +1950,21 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
   /// or under it, but those open now: not only the ones its threads are
   /// on (one a restart left behind, an older one), so nothing of what was
   /// said there is left for anyone to read.
-  Future<void> forgetSessions(String folder) async {
-    Set<String> open() => {
-      for (final thread in workspace.threads) ?thread.record?.id,
+  Future<void> forgetSessions(String folder, {bool includeChildren = true}) =>
+      _forgetSessions(folder, includeChildren: includeChildren);
+
+  Future<void> _forgetSessions(
+    String folder, {
+    bool includeChildren = true,
+    bool strict = false,
+  }) async {
+    Set<(SessionCatalog, String)> open() => {
       for (final thread in workspace.threads)
-        if (thread.isOpen) ?thread.session.sessionId,
+        if (thread.kernel.catalog case final catalog?) ...{
+          if (thread.record?.id case final id?) (catalog, id),
+          if (thread.isOpen)
+            if (thread.session.sessionId case final id?) (catalog, id),
+        },
     };
     final wasOpen = open();
     final gone = <(SessionCatalog, String)>[];
@@ -1093,16 +1973,20 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
       if (catalog == null) continue;
       try {
         for (final project in await catalog.projects()) {
-          if (project.path != folder && !p.isWithin(folder, project.path)) {
+          if (project.path != folder &&
+              !(includeChildren && p.isWithin(folder, project.path))) {
             continue;
           }
           for (final session in project.sessions) {
-            if (!wasOpen.contains(session.id)) {
+            if (!wasOpen.contains((catalog, session.id))) {
               gone.add((catalog, session.id));
+            } else if (strict) {
+              throw StateError('A private conversation is still in use');
             }
           }
         }
       } on Object catch (error) {
+        if (strict) rethrow;
         debugPrint('bots: sessions of $folder not listed: $error');
       }
     }
@@ -1111,10 +1995,14 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     // One started meanwhile, on a session listed: kept.
     final nowOpen = open();
     for (final (catalog, id) in gone) {
-      if (nowOpen.contains(id)) continue;
+      if (nowOpen.contains((catalog, id))) {
+        if (strict) throw StateError('A private conversation is still in use');
+        continue;
+      }
       try {
         await catalog.delete(id);
       } on Object catch (error) {
+        if (strict) rethrow;
         debugPrint('bots: session $id not deleted: $error');
       }
     }
@@ -1126,21 +2014,52 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
   /// was of that conversation: gone with it; so are its timeline's lines
   /// of it (its groups' kept), and what it was up to (SELF.md's `Now:`),
   /// else it would read them back.
-  void clearChat(Bot bot) {
-    workspace.deleteAll([
+  Future<void> clearChat(Bot bot) async {
+    final folder = runtimeFolder(bot);
+    final removed = [
       for (final thread in workspace.threads)
-        if (thread.project.path == bot.folder) thread,
-    ]);
-    // Those its threads were not on too; not the one it starts now.
-    unawaited(forgetSessions(bot.folder));
+        if (thread.project.path == folder || isLegacyPrivateThread(bot, thread))
+          thread,
+    ];
+    final alias = privateSessionId(bot);
+    final chat = _readPrivateChat(bot)!;
+    for (final thread in removed) {
+      _forgottenThreads[thread] = true;
+    }
+    // Revoke aliases before deleting anything or notifying Link subscribers.
+    _savePrivateChat(bot, (
+      alias: _newPrivateAlias(bot),
+      thread: null,
+      retired: const {},
+      forgotten: {...chat.forgotten, for (final thread in removed) ?thread.id},
+      invalidated: {...chat.invalidated, ...chat.retired.keys, alias},
+    ));
+    _savePrivateQueue(bot, const []);
+    _dispatchedPrivate.remove(bot.id);
+    for (final thread in removed) {
+      if (!thread.isOpen) continue;
+      if (_followed.remove(thread.session) case final listener?) {
+        thread.session.removeListener(listener);
+      }
+    }
+    await workspace.deleteAll(removed);
+    folders.delete(_snapshotFolder(bot, null));
+    await _forgetSessions(folder, strict: true);
+    await _forgetSessions(bot.folder, strict: true);
+    unawaited(botHistoryIndex(this).invalidate(MemoryHistoryScope.dm(bot.id)));
+    _invalidateReview(bot);
+    _clearPrivateDeliveries(bot);
+    _unreadDeliveries.remove(bot.id);
+    _deliveryPreview.remove(bot.id);
     _forgetPrivate(bot);
     final self = selfNotes(bot);
     final now = BotLife.withoutNow(self);
     if (now != self) setSelfNotes(bot, now);
     _followed.removeWhere((session, _) => !_sessionOf(session));
     _pacers.remove(bot.id);
-    _restartWhenIdle.remove(bot.id);
+    _restartWhenIdle.remove(folder);
     _seen.remove(bot.id);
+    _suggestionsTold.remove(bot.id);
     _writeLaters(bot, const []);
     threadFor(bot);
     _save();
@@ -1151,14 +2070,8 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
   /// [bot]'s chat with the user gone from its timeline, every day of it:
   /// in either language's name of the place, the app's might have changed.
   void _forgetPrivate(Bot bot) {
-    final folder = p.join(bot.folder, BotLife.timeline);
-    for (final path in folders.filesIn(folder)) {
-      if (p.extension(path) != '.md') continue;
-      if (BotLife.withoutPlaces(_readText(path), const {'私聊', 'private'})
-          case final left?) {
-        _writeText(path, left);
-      }
-    }
+    BotLegacyDiary(folders, bot).forgetPrivate();
+    unawaited(botHistoryIndex(this).invalidate(MemoryHistoryScope.bot(bot.id)));
   }
 
   /// Whether [session] is a bot's conversation's still.
@@ -1166,13 +2079,168 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     (thread) => thread.isOpen && identical(thread.session, session),
   );
 
-  /// [bot], its folder gone: its conversation deleted, nothing kept of it.
-  void _forget(Bot bot) {
-    workspace.deleteAll([
+  void revokeGroupRecall(Bot bot, String group) {
+    BotTools.revokeGroupCommands(this, bot.id, group);
+    for (final path in folders.filesIn(_deliveryFolder(bot))) {
+      if (p.extension(path) != '.json') continue;
+      try {
+        if (jsonDecode(_readText(path)) case {'recallGroup': final String id}
+            when id == group) {
+          folders.deleteFile(path);
+          _unreadDeliveries[bot.id]?.remove(p.basenameWithoutExtension(path));
+        }
+      } on FormatException {
+        // A corrupted record is already ignored by the private projection.
+      }
+    }
+    _deliveryPreview.remove(bot.id);
+  }
+
+  bool hasActiveGroupWorker(BotGroup group) => group.members.any((id) {
+    final bot = byId(id);
+    if (bot == null) return false;
+    final thread = threadOf(bot, group: group.id);
+    if (thread == null || !thread.isOpen) return false;
+    final session = thread.session;
+    return session.isStreaming ||
+        session.pendingInteraction != null ||
+        session.queued.isNotEmpty;
+  });
+
+  void redactGroupSourceCopies(
+    Bot bot,
+    String group,
+    int seq, {
+    required String text,
+    required bool mine,
+    bool checkOnly = false,
+  }) {
+    BotLegacyDiary(folders, bot).redactOriginal(
+      MemoryHistoryReference(
+        scope: MemoryHistoryScope.group(bot.id, group),
+        sessionId: group,
+        messageId: '$seq',
+      ),
+      legacyText: [text],
+      mine: mine,
+      checkOnly: checkOnly,
+    );
+    if (!checkOnly) revokeGroupRecall(bot, group);
+  }
+
+  Future<void> groupOriginalDeleted(
+    BotGroup group,
+    int previousGeneration,
+  ) async {
+    final tasks = <Future<void>>[];
+    for (final id in group.members) {
+      final bot = byId(id);
+      if (bot == null) continue;
+      final scope = MemoryHistoryScope.group(id, group.id);
+      tasks.add(botHistoryIndex(this).invalidate(scope));
+      tasks.add(botHistoryIndex(this).invalidate(MemoryHistoryScope.dm(id)));
+      tasks.add(botHistoryIndex(this).invalidate(MemoryHistoryScope.bot(id)));
+      if (memoryReview case final review?) {
+        tasks.add(
+          review.invalidateDeletedSources(
+            BotMemoryScope(botId: id, groupId: group.id),
+          ),
+        );
+      }
+      final old = _workerFolder(bot, group.id, generation: previousGeneration);
+      final threads = workspace.threads
+          .where((t) => t.project.path == old)
+          .toList();
+      for (final thread in threads) {
+        if (thread.isOpen) groups.unfollow(thread.session);
+      }
+      workspace.deleteAll(threads);
+      final snapshots = p.join(old, 'prompt-memory-v1');
+      folders.delete(snapshots);
+      _loadedMemorySnapshots.removeWhere(
+        (path, _) => p.isWithin(snapshots, path),
+      );
+      _restartWhenIdle.remove(old);
+      _withdrawalWhenIdle.remove(old);
+      unawaited(forgetSessions(old, includeChildren: false));
+    }
+    notifyListeners();
+    await Future.wait(tasks);
+  }
+
+  void dropGroupRuntime(Bot bot, String group) {
+    revokeGroupRecall(bot, group);
+    final folder = runtimeFolder(bot, group: group);
+    final threads = [
       for (final thread in workspace.threads)
-        if (thread.project.path == bot.folder) thread,
-    ]);
+        if (thread.project.path == folder ||
+            p.isWithin(folder, thread.project.path))
+          thread,
+    ];
+    for (final thread in threads) {
+      if (thread.isOpen) groups.unfollow(thread.session);
+    }
+    workspace.deleteAll(threads);
+    folders.delete(folder);
+    _restartWhenIdle.removeWhere(
+      (path) => path == folder || p.isWithin(folder, path),
+    );
+    _withdrawalWhenIdle.removeWhere(
+      (path) => path == folder || p.isWithin(folder, path),
+    );
+    unawaited(forgetSessions(folder));
+    unawaited(
+      botHistoryIndex(this).invalidate(MemoryHistoryScope.group(bot.id, group)),
+    );
+    _invalidateReview(bot, group: group);
+  }
+
+  /// [bot], its folder gone: its conversation deleted, nothing kept of it.
+  void _forget(Bot bot, {bool deleteCard = false}) {
+    _retirePrivateReceipts(bot);
+    if (deleteCard) folders.delete(bot.folder);
+    final runtime = _runtimeRoot(bot);
+    final removed = [
+      for (final thread in workspace.threads)
+        if (thread.project.path == bot.folder ||
+            p.isWithin(runtime, thread.project.path))
+          thread,
+    ];
+    for (final thread in removed) {
+      _forgottenThreads[thread] = true;
+      if (!thread.isOpen) continue;
+      final session = thread.session;
+      if (_followed.remove(session) case final listener?) {
+        session.removeListener(listener);
+      }
+      groups.unfollow(session);
+    }
+    for (final group in groups.groups) {
+      if (!group.members.contains(bot.id)) continue;
+      revokeGroupRecall(bot, group.id);
+      _invalidateReview(bot, group: group.id);
+    }
+    folders.delete(runtime);
+    _restartWhenIdle.removeWhere((path) => p.isWithin(runtime, path));
+    _withdrawalWhenIdle.removeWhere((path) => p.isWithin(runtime, path));
+    unawaited(botHistoryIndex(this).invalidateBot(bot.id));
+    _invalidateReview(bot);
+    _unreadDeliveries.remove(bot.id);
+    _deliveryPreview.remove(bot.id);
+    _pendingPrivate.remove(bot.id);
+    _privateReceipts.remove(bot.id);
+    _dispatchedPrivate.remove(bot.id);
+    _privateChats.remove(bot.id);
+    _factOwners.remove(bot.id);
     _bots.removeWhere((b) => b.id == bot.id);
+    unawaited(() async {
+      try {
+        await workspace.deleteAll(removed);
+      } on Object catch (error) {
+        debugPrint('bots: conversations of ${bot.id} not deleted: $error');
+      }
+      await Future.wait([forgetSessions(runtime), forgetSessions(bot.folder)]);
+    }());
     _pacers.remove(bot.id);
     _watching.remove(bot.id);
     _seen.remove(bot.id);
@@ -1199,24 +2267,217 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     return bot.model;
   }
 
-  String memory(Bot bot) =>
-      _readText(p.join(bot.folder, BotFiles.memory)).trim();
+  String memory(Bot bot) => userMemory(bot).markdown;
+
+  String _memoryDataPath(Bot bot, String? group) {
+    if (group == null) return p.join(bot.folder, BotFiles.memoryData);
+    if (groups.byId(group)?.members.contains(bot.id) != true) {
+      throw StateError('Not in the group $group');
+    }
+    return p.join(runtimeFolder(bot, group: group), BotFiles.memoryData);
+  }
+
+  BotMemory userMemory(Bot bot, {bool keepLegacyIds = false, String? group}) {
+    final saved = folders.readFile(_memoryDataPath(bot, group), strict: true);
+    if (saved != null) {
+      final memory = BotMemory.fromJson(
+        jsonDecode(utf8.decode(saved)) as Map<String, Object?>,
+      );
+      if (group == null) {
+        return memory.withUnavailableSources(
+          (entry) => _managedSourceDeleted(
+            bot,
+            null,
+            entry.session,
+            entry.sourceMessage,
+          ),
+        );
+      }
+      final checked = _checkMemoryShares(bot, group, memory);
+      if (groups.sourceGeneration(group) == 0) return checked;
+      return checked.withUnavailableSources((entry) {
+        if (entry.session == null) return false;
+        // Earlier group tools recorded a worker session but no message locator.
+        if (entry.sourceMessage == null) return true;
+        return _groupSourceDeleted(group, entry.sourceMessage!);
+      });
+    }
+    if (group != null) return BotMemory.fromMarkdown('');
+    const source = BotMemoryMirror.memory;
+    final legacy = folders.readFile(_mirrorPath(bot, source), strict: true);
+    if (legacy == null) return BotMemory.fromMarkdown('');
+    _backupLegacyMirror(bot, source, authorityExists: false);
+    final memory = BotMemory.fromMarkdown(decodeBotMemoryMarkdown(legacy));
+    if (keepLegacyIds) _writeUserMemory(bot, memory);
+    return memory;
+  }
+
+  bool _groupSourceDeleted(String group, String messageId) {
+    final seq = int.tryParse(messageId);
+    return seq != null && groups.isOriginalDeleted(group, seq);
+  }
+
+  BotMemory retainUserMemory(Bot bot, String? group, int id, int revision) {
+    final memory = userMemory(
+      bot,
+      group: group,
+    ).retainWithoutSource(id, revision);
+    _writeUserMemory(bot, memory, group: group);
+    refreshMemory(bot, group: group);
+    notifyListeners();
+    return memory;
+  }
+
+  BotMemory changeUserMemory(
+    Bot bot,
+    List<BotMemoryChange> changes, {
+    String? session,
+    String? sourceMessage,
+    DateTime? at,
+    String? group,
+    String? operationId,
+    List<BotMemorySource>? changeSources,
+    bool allowRememberingWithdrawn = false,
+  }) {
+    final previous = userMemory(bot, group: group);
+    if (group != null &&
+        (sourceMessage != null && _groupSourceDeleted(group, sourceMessage) ||
+            changeSources?.any(
+                  (source) => _groupSourceDeleted(group, source.messageId),
+                ) ==
+                true ||
+            (session != null || operationId != null) &&
+                changes.any(
+                  (change) => previous.unavailableEntries.contains(change.id),
+                ))) {
+      throw StateError('The group source was deleted');
+    }
+    if (group == null &&
+        (_managedSourceDeleted(bot, null, session, sourceMessage) ||
+            changeSources?.any(
+                  (source) => _managedSourceDeleted(
+                    bot,
+                    null,
+                    source.sessionId,
+                    source.messageId,
+                  ),
+                ) ==
+                true ||
+            (session != null || operationId != null) &&
+                changes.any(
+                  (change) => previous.unavailableEntries.contains(change.id),
+                ))) {
+      throw StateError('The original was deleted');
+    }
+    final memory = previous.apply(
+      changes,
+      session: session,
+      sourceMessage: sourceMessage,
+      at: at ?? _clock(),
+      operationId: operationId,
+      changeSources: changeSources,
+      allowRememberingWithdrawn: allowRememberingWithdrawn,
+    );
+    if (identical(memory, previous)) return memory;
+    _writeUserMemory(bot, memory, group: group);
+    if (memory.withdrawalGeneration != previous.withdrawalGeneration) {
+      memoryWithdrawn(bot, group: group);
+    }
+    if (operationId == null) {
+      _forgetRemovedMemory(bot, previous, memory, group: group);
+    }
+    return memory;
+  }
+
+  void _forgetRemovedMemory(
+    Bot bot,
+    BotMemory previous,
+    BotMemory current, {
+    String? group,
+  }) {
+    final review = memoryReview;
+    if (review == null) return;
+    final remaining = {for (final entry in current.entries) entry.id};
+    final scope = BotMemoryScope(botId: bot.id, groupId: group);
+    for (final entry in previous.entries) {
+      if (remaining.contains(entry.id)) continue;
+      _reviewInBackground(
+        review.forgetEntry(scope: scope, id: entry.id, text: entry.text),
+      );
+    }
+  }
+
+  BotMemory pinUserMemory(
+    Bot bot,
+    int id,
+    int revision,
+    bool pinned, {
+    String? group,
+  }) {
+    final memory = userMemory(bot, group: group).withPin(id, revision, pinned);
+    _writeUserMemory(bot, memory, group: group);
+    refreshMemory(bot, group: group);
+    return memory;
+  }
+
+  void _writeUserMemory(
+    Bot bot,
+    BotMemory memory, {
+    String? group,
+    String? reviewedDigest,
+  }) {
+    final authority = _memoryDataPath(bot, group);
+    final mirror = group == null
+        ? _planMirrorWrite(
+            bot,
+            BotMemoryMirror.memory,
+            ledger: _readMemoryLedger(authority),
+            before: userMemory(bot).markdown,
+            after: memory.markdown,
+            reviewedDigest: reviewedDigest,
+          )
+        : null;
+    folders.writeFileAtomically(
+      authority,
+      utf8.encode(
+        jsonEncode({
+          ...memory.toJson(),
+          if (mirror?.knownAfter case final digest?)
+            botMemoryMirrorDigestsKey: {'memory': digest},
+        }),
+      ),
+    );
+    if (mirror != null) _publishMemoryMirror(mirror);
+  }
 
   // --- Its life -----------------------------------------------------------
 
-  /// What [bot] thinks of the people it knows: its PEOPLE.md.
-  String people(Bot bot) =>
-      _readText(p.join(bot.folder, BotLife.people)).trim();
+  final _factOwners = <String, Object>{};
 
-  /// [bot]'s note [note] of [who], kept: by itself, as it goes.
+  void _factsChanged() => notifyListeners();
+
+  /// Compatibility view for the original people notes editor.
+  String people(Bot bot) => _privateFacts(bot).peopleMarkdown;
+
   void notePerson(Bot bot, String who, String note) {
-    final path = p.join(bot.folder, BotLife.people);
-    _writeText(path, BotLife.withPersonNote(_readText(path), who, note));
+    changeFacts(privateFactAccess(bot), [
+      BotFactChange(
+        action: BotMemoryAction.add,
+        kind: BotFactKind.person,
+        personName: who,
+        text: note,
+      ),
+    ]);
   }
 
-  /// [bot] is [now]: its mood, what it is up to, SELF.md's first line.
-  void setNow(Bot bot, String now) =>
-      setSelfNotes(bot, BotLife.withNow(selfNotes(bot), now));
+  /// Current state is kept separately from long-lived self facts.
+  void setNow(Bot bot, String now) {
+    final previous = _privateFacts(bot);
+    final current = previous.withNow(BotLife.nowOf(BotLife.withNow('', now)));
+    if (!identical(current, previous)) {
+      _writePrivateFacts(bot, previous, current);
+    }
+  }
 
   /// Where [bot]'s timeline of today is, in full.
   String timelineFile(Bot bot) => p.join(bot.folder, BotLife.dayFile(_clock()));
@@ -1242,23 +2503,18 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     required String who,
     required String text,
     bool mine = false,
+    MemoryHistoryReference? original,
   }) {
     if (text.trim().isEmpty) return;
-    final path = timelineFile(bot);
-    final had = _readText(path);
+    final at = _clock();
     final line = BotLife.line(
-      _clock(),
-      place,
-      mine ? (chinese ? '我' : 'me') : who,
-      text,
+      at,
+      place.replaceAll(RegExp(r'[\r\n]+'), ' '),
+      mine ? (chinese ? '我' : 'me') : who.replaceAll(RegExp(r'[\r\n]+'), ' '),
+      text.replaceAll(RegExp(r'\r\n?'), '\n'),
       max: mine ? BotLife.said : BotLife.heard,
     );
-    _writeText(
-      path,
-      had.trim().isEmpty
-          ? '# ${p.basenameWithoutExtension(path)}\n\n$line'
-          : '${had.trimRight()}\n$line',
-    );
+    BotLegacyDiary(folders, bot).append(at, line, original: original);
   }
 
   /// The name the bots know the user by.
@@ -1268,19 +2524,10 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
   /// Where [bot]'s chat with the user is, as its timeline says.
   String get privatePlace => chinese ? '私聊' : 'private';
 
-  /// What [bot] is told of its one life, its files and its timeline.
   String? _life(Bot bot) {
     final root = folders.root;
     if (root == null) return null;
-    final today = timeline(bot);
-    return botLife(
-      bot,
-      folder: bot.folder,
-      world: p.join(root, BotLife.world),
-      timelineFile: timelineFile(bot),
-      lines: today.count,
-      timeline: today.lines,
-    );
+    return botLife(bot, folder: bot.folder, world: p.join(root, BotLife.world));
   }
 
   /// [session]'s items from [from] on, of [bot]'s chat with the user, kept
@@ -1290,6 +2537,19 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     final count = session.itemCount;
     final items = [for (var i = 0; i < count; i++) session.itemAt(i)];
     final places = ChatCodec.botPlaces(items);
+    final sessionId = session.sessionId;
+    final managed =
+        sessionId != null &&
+        (ManagedTranscripts.isManagedSessionId(sessionId) ||
+            ManagedTranscripts.exists(runtimeFolder(bot), sessionId));
+    MemoryHistoryReference? source(String? messageId) =>
+        !managed || messageId == null
+        ? null
+        : MemoryHistoryReference(
+            scope: MemoryHistoryScope.dm(bot.id),
+            sessionId: sessionId,
+            messageId: messageId,
+          );
     for (var i = from.clamp(0, count); i < count; i++) {
       if (places[i] != null) continue;
       switch (items[i]) {
@@ -1303,13 +2563,39 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
             if (words.isNotEmpty) words,
             if (item.images.isNotEmpty) chinese ? '[图片]' : '[picture]',
           ].join(' ');
-          live(bot, place: privatePlace, who: userName, text: text);
+          // Claude keeps the user item's outgoing UUID on the transcript row.
+          final original = source(session.itemIdAt(i));
+          if (!managed || original != null) {
+            live(
+              bot,
+              place: privatePlace,
+              who: userName,
+              text: text,
+              original: original,
+            );
+          }
           heardUser();
         case AssistantTextItem(:final text):
-          final says = BotLife.saysOf(text);
-          live(bot, place: privatePlace, who: bot.name, text: says, mine: true);
-        // Sent from a group's turn.
-        case final ToolCallItem item when ChatCodec.botSentToUser(item) != null:
+          final itemId = session.itemIdAt(i);
+          final original = source(
+            itemId == null ? null : session.assistantOriginalId(itemId),
+          );
+          // Don't keep a managed copy if the streaming item never acquired a
+          // canonical row. The UI item ID isn't a deletion locator.
+          if (!managed || original != null) {
+            live(
+              bot,
+              place: privatePlace,
+              who: bot.name,
+              text: BotLife.saysOf(text),
+              mine: true,
+              original: original,
+            );
+          }
+        // Older runtimes sent group deliveries in the worker transcript. The
+        // managed path only keeps those with independent delivery IDs.
+        case final ToolCallItem item
+            when !managed && ChatCodec.botSentToUser(item) != null:
           final says = [
             ChatCodec.botSentToUser(item)!,
             if (item.images.isNotEmpty) chinese ? '[图片]' : '[picture]',
@@ -1342,6 +2628,317 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     return bot.writesFirst
         ? null
         : 'the user turned off ${bot.name} writing to them first';
+  }
+
+  bool isActivePrivateSession(Bot bot, ChatSession session) {
+    final live = byId(bot.id);
+    final thread = live == null ? null : threadOf(live);
+    return !_disposed &&
+        live?.created == bot.created &&
+        thread != null &&
+        thread.isOpen &&
+        identical(thread.session, session);
+  }
+
+  /// A host command reply belongs to the user-visible DM only. It is never
+  /// written to the worker's prompt, timeline notes, or review evidence.
+  void recordGroupCommandReply(
+    Bot bot, {
+    required String turn,
+    required String request,
+    required String text,
+    String? recallGroup,
+    List<int> recallHits = const [],
+  }) {
+    final path = p.join(_deliveryFolder(bot), '$turn.json');
+    if (folders.readFile(path, strict: true) != null) return;
+    folders.writeFileAtomically(
+      path,
+      utf8.encode(
+        jsonEncode({
+          'at': now.toIso8601String(),
+          'text': text,
+          'images': [],
+          'hostCommand': request,
+          'recallGroup': ?recallGroup,
+          if (recallGroup != null) ...{
+            'recallGeneration': groups.sourceGeneration(recallGroup),
+            if (recallHits.isNotEmpty) 'recallHits': recallHits,
+          },
+        }),
+      ),
+    );
+    (_unreadDeliveries[bot.id] ??= {}).add(turn);
+    _deliveryPreview.remove(bot.id);
+    notifyListeners();
+  }
+
+  static String privateDeliverySessionId(String botId) =>
+      'bot-dm-deliveries:$botId';
+
+  static const _deletedPrivateDelivery = '{"_deleted":true}';
+  static final _hashedDeliveryId = RegExp(r'^[a-f0-9]{64}$');
+
+  String _deliveryFolder(Bot bot) => p.join(_runtimeRoot(bot), 'deliveries');
+  // Track the exact unread deliveries so deleting a read one leaves other
+  // unread messages alone. As before, persisted deliveries are read at startup.
+  final _unreadDeliveries = <String, Set<String>>{};
+  final Map<String, ({DateTime at, String text})?> _deliveryPreview = {};
+
+  ({DateTime at, String text})? _latestPrivateDelivery(Bot bot) =>
+      _deliveryPreview.putIfAbsent(bot.id, () {
+        final delivery = privateDeliveries(bot).lastOrNull;
+        return delivery == null
+            ? null
+            : (
+                at: delivery.at,
+                text: ChatCodec.botSentToUser(delivery.item) ?? '',
+              );
+      });
+
+  bool _recallIsVisible(Bot bot, String group, Map<String, Object?> reply) =>
+      groups.byId(group)?.members.contains(bot.id) == true &&
+      (reply['recallGeneration'] ?? 0) == groups.sourceGeneration(group);
+
+  /// Opens the original corresponding to a hit in a retained host recall.
+  Future<MemoryHistoryWindow?> openGroupRecallSource(
+    Bot bot,
+    String delivery,
+    int sequence,
+  ) async {
+    final group = _recallGroupForSource(bot, delivery, sequence);
+    if (group == null) return null;
+    final scope = MemoryHistoryScope.group(bot.id, group);
+    return botHistoryIndex(this).browse(
+      MemoryHistoryAccess(
+        current: scope,
+        isAuthorized: (_) =>
+            _recallGroupForSource(bot, delivery, sequence) == group,
+      ),
+      MemoryHistoryReference(
+        scope: scope,
+        sessionId: group,
+        messageId: '$sequence',
+      ),
+      before: 3,
+      after: 3,
+    );
+  }
+
+  bool canOpenGroupRecallSource(Bot bot, String delivery, int sequence) =>
+      _recallGroupForSource(bot, delivery, sequence) != null;
+
+  String? _recallGroupForSource(Bot bot, String delivery, int sequence) {
+    if (_disposed ||
+        byId(bot.id)?.created != bot.created ||
+        delivery.length != 36 ||
+        !RegExp(r'^[a-f0-9-]+$').hasMatch(delivery)) {
+      return null;
+    }
+    try {
+      final data = jsonDecode(
+        _readText(p.join(_deliveryFolder(bot), '$delivery.json')),
+      );
+      if (data case final Map<String, Object?> reply) {
+        if (reply
+            case {
+              'recallGroup': final String group,
+              'recallHits': final List hits,
+            }
+            when hits.contains(sequence) &&
+                _recallIsVisible(bot, group, reply) &&
+                !groups.isOriginalDeleted(group, sequence)) {
+          return group;
+        }
+      }
+    } on FormatException {
+      // A missing or invalid reply cannot authorize navigation.
+    }
+    return null;
+  }
+
+  List<({String id, DateTime at, ToolCallItem item})> privateDeliveries(
+    Bot bot, {
+    bool includeRecallSources = false,
+  }) {
+    final result = <({String id, DateTime at, ToolCallItem item})>[];
+    for (final path in folders.filesIn(_deliveryFolder(bot))) {
+      if (p.extension(path) != '.json') continue;
+      try {
+        final data = jsonDecode(_readText(path)) as Map<String, Object?>;
+        if (data['_deleted'] == true) continue;
+        if (data['recallGroup'] case final String group
+            when !_recallIsVisible(bot, group, data)) {
+          continue;
+        }
+        final id = p.basenameWithoutExtension(path);
+        result.add((
+          id: id,
+          at: DateTime.parse(data['at'] as String),
+          item: ToolCallItem(
+            kind: ToolKind.message,
+            target: ChatCodec.botToUser,
+            tool: ChatCodec.botSendTool,
+            callId: id,
+            input: {
+              'to': ChatCodec.botToUser,
+              'text': data['text'] as String,
+              if (data['hostCommand'] case final String command)
+                'hostCommand': command,
+              if (includeRecallSources && data['recallGroup'] is String)
+                if (data['recallHits'] case final List hits)
+                  'recallHits': hits.whereType<int>().toList(growable: false),
+            },
+            images: [
+              for (final image in (data['images'] as List).cast<Map>())
+                ImageAttachment(
+                  bytes: base64Decode(image['bytes'] as String),
+                  mediaType: image['type'] as String,
+                ),
+            ],
+          ),
+        ));
+      } on Object catch (error) {
+        debugPrint('bots: private delivery record could not be read: $error');
+      }
+    }
+    return result..sort((a, b) {
+      final time = a.at.compareTo(b.at);
+      return time == 0 ? a.id.compareTo(b.id) : time;
+    });
+  }
+
+  bool canDeletePrivateDelivery(MemoryHistoryReference ref) =>
+      _privateDeliveryToDelete(ref) != null;
+
+  (Bot, String, String)? _privateDeliveryToDelete(
+    MemoryHistoryReference ref, {
+    bool strict = false,
+  }) {
+    if (_disposed ||
+        ref.scope != MemoryHistoryScope.dm(ref.scope.botId) ||
+        ref.sessionId != privateDeliverySessionId(ref.scope.botId) ||
+        !_hashedDeliveryId.hasMatch(ref.messageId)) {
+      return null;
+    }
+    final bot = byId(ref.scope.botId);
+    if (bot == null) return null;
+    final path = p.join(_deliveryFolder(bot), '${ref.messageId}.json');
+    final bytes = folders.readFile(path, strict: strict);
+    if (bytes == null) return null;
+    try {
+      // Only deliverPrivate writes this shape to a hashed filename. A host
+      // command reply or an attachment-bearing original is not eligible.
+      final data = jsonDecode(utf8.decode(bytes));
+      if (data is Map<String, Object?> && data.length == 3) {
+        if (data
+            case {
+              'at': final String at,
+              'text': final String text,
+              'images': final List images,
+            }
+            when DateTime.tryParse(at) != null &&
+                text.trim().isNotEmpty &&
+                images.isEmpty) {
+          return (bot, path, text);
+        }
+      }
+    } on FormatException {
+      // An unreadable record cannot authorize deletion.
+    }
+    return null;
+  }
+
+  /// Erase an exact original and retain only its hashed replay key on disk.
+  Future<void> deletePrivateDelivery(MemoryHistoryReference ref) async {
+    final target = _privateDeliveryToDelete(ref, strict: true);
+    if (target == null) {
+      throw StateError('The original private delivery cannot be deleted');
+    }
+    final (bot, path, text) = target;
+    BotLegacyDiary(
+      folders,
+      bot,
+    ).redactOriginal(ref, legacyText: [text], mine: true);
+    folders.writeFileAtomically(path, utf8.encode(_deletedPrivateDelivery));
+    _unreadDeliveries[bot.id]?.remove(ref.messageId);
+    _deliveryPreview.remove(bot.id);
+    final index = botHistoryIndex(this);
+    final cleanup = Future.wait([
+      index.invalidate(ref.scope),
+      index.invalidate(MemoryHistoryScope.bot(bot.id)),
+    ]);
+    notifyListeners();
+    await cleanup;
+  }
+
+  void _clearPrivateDeliveries(Bot bot) {
+    for (final path in folders.filesIn(_deliveryFolder(bot))) {
+      if (p.extension(path) == '.json' &&
+          _hashedDeliveryId.hasMatch(p.basenameWithoutExtension(path)) &&
+          _readText(path) == _deletedPrivateDelivery) {
+        continue;
+      }
+      folders.deleteFile(path);
+    }
+  }
+
+  /// Commit a group-to-private message independently of either worker.
+  String deliverPrivate(
+    Bot bot, {
+    required String group,
+    required String delivery,
+    required String text,
+    String? sessionId,
+    List<ImageAttachment> images = const [],
+  }) {
+    if (groups.byId(group)?.members.contains(bot.id) != true) {
+      throw StateError('Not in the group $group');
+    }
+    final id = sha256.convert(utf8.encode('$group\n$delivery')).toString();
+    final path = p.join(_deliveryFolder(bot), '$id.json');
+    // A tombstone acknowledges a replay without restoring the message.
+    if (folders.readFile(path, strict: true) != null) return id;
+    if (delivery.isEmpty || !groups.acceptsDelivery(group, bot.id, sessionId)) {
+      throw StateError('No active turn in this group');
+    }
+    if (sendsPrivately(bot) case final why?) {
+      throw StateError('Not sent: $why.');
+    }
+    text = text.trim();
+    if (text.isEmpty && images.isEmpty) throw ArgumentError('Nothing to send');
+    folders.writeFileAtomically(
+      path,
+      utf8.encode(
+        jsonEncode({
+          'at': now.toIso8601String(),
+          'text': text,
+          'images': [
+            for (final image in images)
+              {'bytes': base64Encode(image.bytes), 'type': image.mediaType},
+          ],
+        }),
+      ),
+    );
+    (_unreadDeliveries[bot.id] ??= {}).add(id);
+    _deliveryPreview.remove(bot.id);
+    live(
+      bot,
+      place: privatePlace,
+      who: bot.name,
+      mine: true,
+      original: MemoryHistoryReference(
+        scope: MemoryHistoryScope.dm(bot.id),
+        sessionId: privateDeliverySessionId(bot.id),
+        messageId: id,
+      ),
+      text: [
+        if (text.isNotEmpty) text,
+        if (images.isNotEmpty) chinese ? '[图片]' : '[picture]',
+      ].join(' '),
+    );
+    notifyListeners();
+    return id;
   }
 
   // --- The user ---------------------------------------------------------
@@ -1382,26 +2979,198 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     notifyListeners();
   }
 
-  /// [bot]'s memory of the user now [text]: the user's, which it is told
-  /// from its next message; else by itself, as it goes ([restart] false).
-  /// Cleared by the user, what it thinks of them (PEOPLE.md) goes too.
-  void setMemory(Bot bot, String text, {bool restart = true}) {
-    _writeText(p.join(bot.folder, BotFiles.memory), text);
-    if (!restart) return;
+  /// The user's edit of what [bot] remembers. Clearing it also removes
+  /// the user's section from PEOPLE.md.
+  void setMemory(Bot bot, String text) {
+    final previous = userMemory(bot);
+    final current = previous.replaceMarkdown(text);
+    _writeUserMemory(bot, current);
+    _forgetRemovedMemory(bot, previous, current);
     if (text.trim().isEmpty) {
-      final path = p.join(bot.folder, BotLife.people);
-      final had = _readText(path);
-      final left = BotLife.withoutPeople(had, {
-        userName,
-        if (_me.name.isNotEmpty) _me.name,
-        '用户',
-        'the user',
-        'user',
-      });
-      if (left != had) _writeText(path, left);
+      final previous = _privateFacts(bot);
+      final current = previous.withoutOwner(at: _clock());
+      _commitFacts(bot, null, previous, current);
     }
     _restart(bot);
     notifyListeners();
+  }
+
+  bool reviewScopeExists(BotMemoryScope scope) =>
+      byId(scope.botId) != null &&
+      (scope.groupId == null ||
+          groups.byId(scope.groupId!)?.members.contains(scope.botId) == true);
+
+  bool get anyReviewForegroundBusy => _bots.any(
+    (bot) => groups.answering(bot.id) != null || atWork(bot) != null,
+  );
+
+  Future<String?> reviewEvidence(
+    BotMemoryScope scope,
+    String sessionId,
+    BotMemoryReviewEvidence evidence,
+  ) async {
+    if (!reviewScopeExists(scope)) return null;
+    if (scope.groupId case final group?) {
+      if (sessionId != BotGroups.reviewSessionId(group) ||
+          _groupSourceDeleted(group, evidence.messageId)) {
+        return null;
+      }
+      final seq = int.tryParse(evidence.messageId);
+      final message = groups
+          .messages(group)
+          .where((m) => m.seq == seq)
+          .firstOrNull;
+      if (message == null) return null;
+      return switch (evidence.role) {
+        BotMemoryReviewRole.user when message.mine => message.text,
+        BotMemoryReviewRole.assistant when message.from == scope.botId =>
+          BotLife.saysOf(message.text),
+        _ => null,
+      };
+    }
+    bool originalDeleted() =>
+        isManagedOriginalDeleted(scope, null, sessionId, evidence.messageId);
+    if (originalDeleted()) return null;
+    final bot = byId(scope.botId)!;
+    final folder = runtimeFolder(bot);
+    final thread = workspace.threads
+        .where(
+          (thread) => thread.project.path == folder && thread.id == sessionId,
+        )
+        .firstOrNull;
+    if (thread == null) return null;
+    final session = thread.session;
+    if (session.loadingHistory) {
+      final ready = Completer<void>();
+      void changed() {
+        if (!session.loadingHistory && !ready.isCompleted) ready.complete();
+      }
+
+      session.addListener(changed);
+      try {
+        await ready.future.timeout(const Duration(seconds: 5));
+      } on TimeoutException {
+        return null;
+      } finally {
+        session.removeListener(changed);
+      }
+    }
+    while (workspace.threads.contains(thread) && !_disposed) {
+      if (originalDeleted()) return null;
+      for (var i = session.itemCount - 1; i >= 0; i--) {
+        if (session.itemIdAt(i) != evidence.messageId) continue;
+        return _reviewText(session.itemAt(i), evidence.role);
+      }
+      if (!session.hasEarlierHistory) break;
+      final count = session.itemCount;
+      await session.loadEarlier();
+      if (session.itemCount == count) break;
+    }
+    return null;
+  }
+
+  String? _reviewText(ChatItem item, BotMemoryReviewRole role) =>
+      switch ((item, role)) {
+        (final UserMessageItem item, BotMemoryReviewRole.user)
+            when !item.queued &&
+                item.fromAgent == null &&
+                item.fromSession == null &&
+                ChatCodec.botEvent(item) == null =>
+          ChatCodec.withoutBotEvents(
+            item.text.replaceAll(imageReferencePattern, ''),
+          ),
+        (AssistantTextItem(:final text), BotMemoryReviewRole.assistant) =>
+          BotLife.saysOf(text),
+        _ => null,
+      };
+
+  void _reviewInBackground(Future<void>? work) {
+    if (work == null) return;
+    unawaited(
+      work.catchError((Object error) {
+        debugPrint('bots: memory review could not be updated: $error');
+      }),
+    );
+  }
+
+  void _invalidateReview(Bot bot, {String? group}) => _reviewInBackground(
+    memoryReview?.invalidate(
+      scope: BotMemoryScope(botId: bot.id, groupId: group),
+    ),
+  );
+
+  void recordGroupTurn(
+    String group,
+    String member,
+    int userSeq,
+    int? replySeq,
+    int tools,
+  ) {
+    _reviewInBackground(
+      memoryReview?.recordTurn(
+        scope: BotMemoryScope(botId: member, groupId: group),
+        sessionId: BotGroups.reviewSessionId(group),
+        turnId: replySeq == null ? 'user:$userSeq' : 'reply:$replySeq',
+        evidence: [
+          BotMemoryReviewEvidence(
+            messageId: '$userSeq',
+            role: BotMemoryReviewRole.user,
+            occurredAt: groups
+                .messages(group)
+                .where((message) => message.seq == userSeq)
+                .firstOrNull
+                ?.at,
+          ),
+          if (replySeq != null)
+            BotMemoryReviewEvidence(
+              messageId: '$replySeq',
+              role: BotMemoryReviewRole.assistant,
+            ),
+        ],
+        toolIterations: tools,
+      ),
+    );
+  }
+
+  void _recordPrivateTurn(Bot bot, ChatSession session, int from) {
+    final review = memoryReview;
+    final id = session.sessionId;
+    if (review == null || id == null) return;
+    String? turn;
+    var turns = 0;
+    final evidence = <BotMemoryReviewEvidence>[];
+    for (var i = from; i < session.itemCount; i++) {
+      final item = session.itemAt(i);
+      if (item is UserMessageItem && item.queued) break;
+      final itemId = session.itemIdAt(i);
+      if (itemId == null) continue;
+      final role = item is UserMessageItem
+          ? BotMemoryReviewRole.user
+          : BotMemoryReviewRole.assistant;
+      if (_reviewText(item, role)?.trim().isNotEmpty != true) continue;
+      if (role == BotMemoryReviewRole.user) {
+        turn ??= itemId;
+        turns++;
+      }
+      evidence.add(
+        BotMemoryReviewEvidence(
+          messageId: itemId,
+          role: role,
+          occurredAt: item is UserMessageItem ? item.sentAt : null,
+        ),
+      );
+    }
+    if (turn == null) return;
+    _reviewInBackground(
+      review.recordTurn(
+        scope: BotMemoryScope(botId: bot.id),
+        sessionId: id,
+        turnId: turn,
+        evidence: evidence,
+        userTurns: turns,
+        toolIterations: session.lastTurnToolIterations,
+      ),
+    );
   }
 
   // --- Writing first ------------------------------------------------------
@@ -1496,6 +3265,9 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
         if (loading || session.loadingHistory) lived = session.itemCount;
         if (loading && !session.loadingHistory) {
           _seen[bot.id] = (session.itemCount, session.prependedCount);
+          if (_pendingPrivate.containsKey(bot.id)) {
+            scheduleMicrotask(() => dispatchPrivate(bot.id));
+          }
         }
         loading = session.loadingHistory;
         if (session.itemCount != count) {
@@ -1515,14 +3287,29 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
         // Its turn done: what it changed of its files, taken up; what was
         // said with the user, in its timeline.
         if (streaming && !session.isStreaming) {
-          scheduleMicrotask(() => reload(by: byId(bot.id) ?? bot));
-          lived = _livePrivate(byId(bot.id) ?? bot, session, lived);
+          final current = byId(bot.id) ?? bot;
+          if (!_failed(thread)) _recordPrivateTurn(current, session, lived);
+          for (var i = lived; i < session.itemCount; i++) {
+            if (session.itemAt(i) case NoticeItem(compaction: final note?)
+                when !note.systemPromptRefreshed) {
+              _restartWhenIdle.add(thread.project.path);
+              break;
+            }
+          }
+          lived = _livePrivate(current, session, lived);
+          scheduleMicrotask(() {
+            if (_disposed || threadOf(bot)?.session != session) return;
+            final withdrawn = _withdrawalWhenIdle.remove(thread.project.path);
+            if (_restartWhenIdle.remove(thread.project.path) && !withdrawn) {
+              refreshMemory(byId(bot.id) ?? bot);
+            } else if (withdrawn) {
+              _restartAfterWithdrawal(byId(bot.id) ?? bot, null);
+            }
+            reload(by: byId(bot.id) ?? bot);
+            groups.caughtUp(bot.id);
+          });
         }
         streaming = session.isStreaming;
-        if (!session.isStreaming && _restartWhenIdle.remove(bot.id)) {
-          // Not while its session tells of the turn's end.
-          scheduleMicrotask(() => _restart(byId(bot.id) ?? bot));
-        }
         final last = session.itemCount - 1;
         final parts = last >= 0 && session.itemAt(last) is AssistantTextItem
             ? ChatCodec.botParts(
@@ -1715,7 +3502,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     }
   }
 
-  bool isBotThread(AgentThread thread) => botAt(thread.project.path) != null;
+  bool isBotThread(AgentThread thread) => isBotPath(thread.project.path);
 
   static bool _failed(AgentThread thread) => _error(thread) != null;
 
@@ -1813,7 +3600,8 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
       if (pacer == null && waiting.isEmpty) continue;
       final thread = threadFor(bot);
       // Not while it is answering: after.
-      if (thread.isOpen && thread.session.isStreaming) {
+      if (groups.answering(bot.id) != null ||
+          thread.isOpen && thread.session.isStreaming) {
         busy = true;
         continue;
       }

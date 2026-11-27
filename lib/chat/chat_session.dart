@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../kernel/agent_kernel.dart';
+import '../kernel/claude_code/claude_code_kernel.dart';
 import '../kernel/kernel_event.dart';
 import '../kernel/kernel_registry.dart';
 import '../kernel/kernel_types.dart';
@@ -338,14 +339,23 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
   /// Completes once the kernel has stopped, after [dispose].
   Future<void> get stopped => _kernel.stopped;
 
+  /// Releases the idle runtime so a host-owned transcript can be edited.
+  Future<void> releaseIdleRuntime() {
+    _kernel.release();
+    return _kernel.stopped;
+  }
+
   /// Tries the kernel again after it failed.
-  void restart() => _kernel.restart();
+  void restart() {
+    if (!_disposed && !_runtimeSuspended) _kernel.restart();
+  }
 
   int _views = 0;
 
   /// A view shows the conversation: the kernel gets ready.
   void attach() {
     _views++;
+    if (_disposed || _runtimeSuspended) return;
     _kernel.prepare();
     _startReview();
   }
@@ -380,7 +390,12 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
   }
 
   void setKernel(KernelDescriptor descriptor) {
-    if (kernelLocked || descriptor.id == kernel.id) return;
+    if (_disposed ||
+        _runtimeSuspended ||
+        kernelLocked ||
+        descriptor.id == kernel.id) {
+      return;
+    }
     unawaited(_subscription?.cancel());
     _kernel.dispose();
     _transcript = Transcript(
@@ -661,6 +676,12 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
   String? itemIdAt(int index) =>
       index < _transcript.length ? _transcript.idAt(index) : null;
 
+  /// The transcript row for a completed Claude reply, not its streaming ID.
+  String? assistantOriginalId(String itemId) => switch (_kernel) {
+    final ClaudeCodeKernel kernel => kernel.assistantOriginalId(itemId),
+    _ => null,
+  };
+
   // --- Projections ------------------------------------------------------------
 
   // Keep each start distinct, even if the next queued turn starts immediately.
@@ -673,11 +694,22 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
   @override
   bool get isStreaming => _transcript.activeTurn != null;
 
+  /// The host identity of the turn currently running in this session.
+  String? get activeTurnId => _transcript.activeTurn;
+
   @override
   bool get isUnprompted => _transcript.activeTurnUnprompted;
 
+  bool _runtimeSuspended = false;
+
+  /// Prevents new messages while their owning workspace thread is changing.
+  void setRuntimeSuspended(bool suspended) {
+    _runtimeSuspended = suspended;
+  }
+
   /// Whether the composer may send now.
-  bool get canSend => !isStreaming || canQueue;
+  bool get canSend =>
+      !_disposed && !_runtimeSuspended && (!isStreaming || canQueue);
 
   InteractionRequest? get pendingInteraction => _transcript.pendingInteraction;
 
@@ -721,6 +753,8 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
 
   /// Sequence of the last turn to end, to tell whether it was seen.
   int get lastTurnEndSeq => _transcript.lastTurnEndSeq;
+
+  int get lastTurnToolIterations => _transcript.lastTurnToolIterations;
 
   /// What the agent said last, if it said anything after the last message
   /// sent (this run, or in the history read).
@@ -1209,16 +1243,19 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
   /// the user wrote it (null for what the app sends): the agent is told as
   /// that changes ([UserPlace]). [notes] go to the agent with it, not
   /// shown (each a `<system-reminder>`).
-  void send(
+  bool send(
     ComposerMessage message, {
     bool now = false,
     OpenEditor? Function()? editor,
     UserPlace? from,
     List<String> notes = const [],
+    String? turnId,
+    bool preferManagedTranscript = false,
   }) {
-    if (message.isEmpty || !canSend) return;
+    if (message.isEmpty || !canSend) return false;
     final turn = KernelTurn(
-      id: newTurnId(),
+      id: turnId ?? newTurnId(),
+      preferManagedTranscript: preferManagedTranscript,
       // Pastes too long to send, kept in files the agent reads; a remote
       // project's agent cannot, and is sent them.
       text: switch (kernelContext.cwd) {
@@ -1237,6 +1274,7 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
       ],
     );
     _kernel.send(turn);
+    return true;
   }
 
   /// Where the agent finds [images] as files: they reach it as pictures
@@ -1272,6 +1310,9 @@ class ChatSession extends ChangeNotifier implements PagedChatFeed {
     final variant = (8 + _random.nextInt(4)).toRadixString(16);
     return '${hex(8)}-${hex(4)}-4${hex(3)}-$variant${hex(3)}-${hex(12)}';
   }
+
+  /// Includes queued messages shown in place in the conversation.
+  bool get hasQueuedMessages => _transcript.hasQueuedMessages;
 
   /// The messages sent while the agent works, waiting their turn, with
   /// their ids: the next first. Not in the conversation until taken up.

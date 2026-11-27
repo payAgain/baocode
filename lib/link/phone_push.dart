@@ -181,16 +181,13 @@ class PushWatcher {
     final desktop = desktopId();
     final l10n = workspace.l10n();
 
-    final botThreads = {
-      if (bots case final bots?)
-        for (final bot in bots.bots) ?bots.threadOf(bot),
-    };
     final listed = workspace.sidebarProjects.toSet();
     final sessions = <String, ThreadStatus>{};
     final had = _sessions;
     final open = {
       for (final thread in workspace.threads)
-        if (thread.isOpen) thread.session: thread,
+        if (thread.isOpen && bots?.isBotThread(thread) != true)
+          thread.session: thread,
     };
     for (final session in [..._listened.keys]) {
       if (!open.containsKey(session)) {
@@ -211,7 +208,7 @@ class PushWatcher {
     }
     for (final thread in workspace.threads) {
       if (thread.archived ||
-          botThreads.contains(thread) ||
+          bots?.isBotThread(thread) == true ||
           !listed.contains(thread.project) ||
           !workspace.listsInSidebar(thread)) {
         continue;

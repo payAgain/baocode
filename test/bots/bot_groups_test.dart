@@ -3,17 +3,24 @@ import 'dart:math';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:bao_link/bao_link.dart' show linkGroupUser;
+import 'package:bao_link/bao_link.dart' show LinkMethods, linkGroupUser;
 import 'package:baocode/bots/bot.dart';
 import 'package:baocode/bots/bot_folders.dart';
 import 'package:baocode/bots/bot_group_prompt.dart';
 import 'package:baocode/bots/bot_groups.dart';
+import 'package:baocode/bots/bot_history.dart';
+import 'package:baocode/bots/bot_memory.dart' show BotMemoryAction;
+import 'package:baocode/bots/bot_memory_review.dart';
 import 'package:baocode/bots/bot_prompt.dart' show botEventMessage;
 import 'package:baocode/bots/bots.dart';
+import 'package:baocode/link/bot_memory_management.dart';
 import 'package:baocode/link/chat_codec.dart';
+import 'package:baocode/search/memory_history.dart';
 import 'package:baocode/chat/chat_models.dart';
+import 'package:baocode/chat/chat_session.dart' show ComposerMessage;
 import 'package:baocode/kernel/agent_kernel.dart';
 import 'package:baocode/kernel/claude_code/claude_code_kernel.dart';
+import 'package:baocode/kernel/claude_code/claude_code_transport.dart';
 import 'package:baocode/kernel/claude_code/mock_claude_code_transport.dart';
 import 'package:baocode/workspace/preference_store.dart';
 import 'package:baocode/workspace/workspace.dart';
@@ -21,7 +28,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
+import '../kernel_test.dart' show FakeCli;
+
 void main() {
+  late ClaudeTransportFactory startCli;
   late KernelDescriptor kernel;
   kernel = KernelDescriptor(
     id: 'claude-code',
@@ -29,7 +39,7 @@ void main() {
     icon: Icons.auto_awesome_rounded,
     description: '',
     create: (context) =>
-        ClaudeCodeKernel(kernel, context, start: MockClaudeCodeTransport.start),
+        ClaudeCodeKernel(kernel, context, start: (launch) => startCli(launch)),
   );
   late Workspace workspace;
   late Bots bots;
@@ -42,6 +52,7 @@ void main() {
   late List<(String, String)> told;
 
   setUp(() async {
+    startCli = MockClaudeCodeTransport.start;
     final app = Directory.systemTemp.createTempSync('groups-app').path;
     addTearDown(() => Directory(app).deleteSync(recursive: true));
     workspace = Workspace(kernels: [kernel], projects: [Project('app', app)]);
@@ -73,6 +84,274 @@ void main() {
   String name(String id) => bots.byId(id)!.name;
   List<String> toldNames() => [for (final (who, _) in told) name(who)];
   Future<void> wait(int ms) => Future<void>.delayed(Duration(milliseconds: ms));
+
+  test(
+    'original group deletion survives history rebuild and review replay',
+    () async {
+      final group = groups.save(
+        name: 'Source deletion',
+        members: [mia.id, leo.id],
+        lead: mia.id,
+      );
+      final scope = MemoryHistoryScope.group(mia.id, group.id);
+      final reviewScope = BotMemoryScope(botId: mia.id, groupId: group.id);
+      final reviewStore = MemoryPreferenceStore();
+      final reviewSession = BotGroups.reviewSessionId(group.id);
+      var applications = 0;
+      BotMemoryReview makeReview() => BotMemoryReview(
+        store: reviewStore,
+        scopeExists: bots.reviewScopeExists,
+        sourceGeneration: (scope) => groups.sourceGeneration(scope.groupId!),
+        readEvidence: bots.reviewEvidence,
+        readMemory: (scope) =>
+            bots.userMemory(bots.byId(scope.botId)!, group: scope.groupId),
+        applyMemory:
+            (
+              _,
+              _, {
+              required sessionId,
+              required messageId,
+              required operationId,
+              required changeSources,
+            }) {
+              applications++;
+            },
+        ask: (_) async => jsonEncode({
+          'proposals': [
+            {
+              'action': 'add',
+              'text': 'Synthetic proposal',
+              'evidence': ['e1'],
+            },
+          ],
+        }),
+        foregroundBusy: () => false,
+        threshold: 1,
+      );
+      final review = makeReview();
+      await review.configure(reviewScope, memoryApproval: true);
+      final seq = groups.send(
+        group.id,
+        text: 'synthetic deleted words',
+        linkRequest: (
+          key: 'fixture-request',
+          fingerprint: 'fixture-fingerprint',
+        ),
+      );
+      await wait(0);
+      groups.turnEnded(
+        group.id,
+        mia.id,
+        '<bot_say>Surviving neighbor</bot_say>',
+      );
+      final evidence = BotMemoryReviewEvidence(
+        messageId: '$seq',
+        role: BotMemoryReviewRole.user,
+      );
+      await review.recordTurn(
+        scope: reviewScope,
+        sessionId: reviewSession,
+        turnId: '$seq',
+        evidence: [evidence],
+      );
+      await review.runNext();
+      final proposal = (await review.proposals(reviewScope)).single;
+      bots.changeUserMemory(
+        mia,
+        [
+          (
+            action: BotMemoryAction.add,
+            id: null,
+            revision: null,
+            text: 'Source-backed fact',
+          ),
+        ],
+        group: group.id,
+        session: reviewSession,
+        sourceMessage: '$seq',
+      );
+      bots.changeUserMemory(mia, [
+        (
+          action: BotMemoryAction.add,
+          id: null,
+          revision: null,
+          text: 'Independent fact',
+        ),
+      ], group: group.id);
+
+      final ref = MemoryHistoryReference(
+        scope: scope,
+        sessionId: group.id,
+        messageId: '$seq',
+      );
+      final access = MemoryHistoryAccess(
+        current: scope,
+        isAuthorized: (_) => true,
+      );
+      final management = BotMemoryManagement(
+        bots,
+        reviewer: 'local owner',
+        localOwner: true,
+      );
+      const needle = 'synthetic deleted words';
+      final args = {'bot': mia.id, 'group': group.id};
+      final search = await management.call(LinkMethods.botMemorySearch, {
+        ...args,
+        'query': needle,
+      });
+      final hit = (search['hits'] as List).single as Map;
+      final before = await management.call(LinkMethods.botMemorySource, {
+        ...args,
+        'source': hit['reference'],
+      });
+      expect(before['canDeleteOriginal'], isTrue);
+      final anchor = (before['anchor'] as Map)['reference'];
+      await expectLater(
+        management.call(LinkMethods.deleteBotMemorySource, {
+          ...args,
+          'source': anchor,
+        }),
+        throwsA(anything),
+      );
+      expect(await botHistoryIndex(bots).locate(access, ref), isNotNull);
+      expect(
+        await management.call(LinkMethods.deleteBotMemorySource, {
+          ...args,
+          'source': anchor,
+          'confirm': true,
+        }),
+        {'deleted': true},
+      );
+      await expectLater(
+        management.call(LinkMethods.botMemorySource, {
+          ...args,
+          'source': anchor,
+        }),
+        throwsA(anything),
+      );
+      expect(groups.isDeletedLinkRequest('fixture-request'), isTrue);
+      expect(
+        groups.messages(group.id).map((message) => message.seq),
+        isNot(contains(seq)),
+      );
+      final canonical = p.join(
+        p.dirname(groups.chatFile(group.id)),
+        'messages.jsonl',
+      );
+      expect(
+        utf8.decode(folders.readFile(canonical)!),
+        isNot(contains(needle)),
+      );
+      expect(
+        utf8.decode(folders.readFile(groups.chatFile(group.id))!),
+        isNot(contains(needle)),
+      );
+      expect(
+        bots.userMemory(mia, group: group.id).prompt,
+        '- Independent fact',
+      );
+
+      // Construct a fresh index and journal viewer over persisted host state.
+      bots.dispose();
+      workspace.dispose();
+      workspace = Workspace(kernels: [kernel]);
+      bots = Bots(
+        workspace: workspace,
+        folders: folders,
+        clock: () => now,
+        computer: () async => 'Mac',
+      );
+      await bots.start();
+      groups = bots.groups;
+      expect(groups.isDeletedLinkRequest('fixture-request'), isTrue);
+      final index = botHistoryIndex(bots);
+      await index.rebuild(scope);
+      expect(await index.locate(access, ref), isNull);
+      expect(await index.browse(access, ref), isNull);
+      expect(
+        (await index.search(
+          access,
+          const MemoryHistoryQuery(text: needle),
+        )).hits,
+        isEmpty,
+      );
+      expect(
+        (await index.search(
+          access,
+          const MemoryHistoryQuery(text: 'Surviving neighbor'),
+        )).hits,
+        hasLength(1),
+      );
+      expect(
+        await bots.reviewEvidence(reviewScope, reviewSession, evidence),
+        isNull,
+      );
+      final restarted = makeReview();
+      expect(await restarted.proposals(reviewScope), isEmpty);
+      final stale = await restarted.decide(
+        scope: reviewScope,
+        proposalId: proposal.id,
+        approve: true,
+        reviewer: 'owner',
+      );
+      expect(stale.status, BotMemoryReviewProposalStatus.invalid);
+      expect(stale.evidence, isEmpty);
+      expect(stale.after, isNull);
+      expect(applications, 0);
+      final currentBot = bots.byId(mia.id)!;
+      final memory = bots.userMemory(currentBot, group: group.id);
+      final suspended = memory.entries.first;
+      expect(memory.unavailableEntries, {suspended.id});
+      bots.retainUserMemory(
+        currentBot,
+        group.id,
+        suspended.id,
+        suspended.revision,
+      );
+      expect(
+        bots.userMemory(currentBot, group: group.id).prompt,
+        contains('Source-backed fact'),
+      );
+    },
+  );
+
+  test(
+    'queued private messages are restored and dispatched after restart',
+    () async {
+      final group = groups.save(name: 'Queue room', members: [mia.id]);
+      groups.send(group.id, text: '@Mia group prompt');
+      bots.sendPrivate(mia, const ComposerMessage(text: 'saved private input'));
+      expect(
+        bots.pendingPrivateItems(mia).single,
+        isA<UserMessageItem>()
+            .having((item) => item.queued, 'queued', isTrue)
+            .having((item) => item.text, 'text', 'saved private input'),
+      );
+      expect(bots.threadOf(mia)!.session.itemCount, 0);
+      bots.dispose();
+      workspace.dispose();
+
+      workspace = Workspace(kernels: [kernel]);
+      bots = Bots(
+        workspace: workspace,
+        folders: folders,
+        clock: () => now,
+        computer: () async => 'Mac',
+      );
+      await bots.start();
+      await wait(40);
+      final session = bots.threadOf(bots.byId(mia.id)!)!.session;
+      expect(
+        [
+          for (var index = 0; index < session.itemCount; index++)
+            if (session.itemAt(index) case UserMessageItem(:final text)) text,
+        ],
+        ['saved private input'],
+      );
+      expect(bots.pendingPrivateItems(mia), isEmpty);
+      expect(bots.groups.messages(group.id).single.text, '@Mia group prompt');
+    },
+  );
 
   test('a group kept: its members those there are, named after them if '
       'not named', () {
@@ -493,23 +772,35 @@ void main() {
       contains('The latest messages (#6–#25), the new ones marked:'),
     );
     expect(note, isNot(contains('## #5 ·')));
-    expect(note, contains('${'x' * 500}… (cut: all of it at lines'));
+    expect(note, contains('${'x' * 500}… (use bot_history'));
     expect(note, isNot(contains('x' * 501)));
   });
 
-  test('one bot, one conversation: told of its life, its files and how '
-      'groups go, its chats read even if it only chats', () {
+  test('private and each group have separate workers, prompts, and tools', () {
     final group = groups.save(name: '江湖', members: [mia.id, leo.id]);
-    final setup = workspace.agentSetup!(mia.folder)!.workspace();
-    expect(setup.instructions, contains('Your name is Mia.'));
-    expect(setup.instructions, contains('<your_life>'));
-    expect(setup.instructions, contains('<group_chats>'));
-    expect(setup.instructions, contains('/bots/WORLD.md'));
-    expect(
-      setup.instructions,
-      contains('/bots/${mia.id}/timeline/2026-11-12.md'),
-    );
-    expect(setup.tools, contains('Read'));
+    final other = groups.save(name: '别处', members: [mia.id]);
+    bots.setMemory(mia, 'private-only note');
+    final dm = bots.threadFor(mia);
+    final first = bots.threadFor(mia, group: group.id);
+    final second = bots.threadFor(mia, group: other.id);
+    expect({
+      dm.project.path,
+      first.project.path,
+      second.project.path,
+    }, hasLength(3));
+    expect(identical(bots.threadFor(mia, group: group.id), first), isTrue);
+    final setup = workspace.agentSetup!(dm.project.path)!.workspace();
+    final room = workspace.agentSetup!(first.project.path)!.workspace();
+    expect(setup.instructions, contains('private-only note'));
+    expect(room.instructions, contains('Your name is Mia.'));
+    expect(room.instructions, contains('<group_chats>'));
+    expect(room.instructions, isNot(contains('private-only note')));
+    expect(room.instructions, isNot(contains('/bots/WORLD.md')));
+    expect(room.tools, isEmpty);
+    expect(room.userServers, isFalse);
+    expect(bots.offersTool(first.project.path, 'session_read'), isFalse);
+    expect(bots.offersTool(first.project.path, 'bot_history'), isTrue);
+    expect(bots.offersTool(mia.folder, 'bot_history'), isFalse);
     // The world they share: everyone, and who is in which group.
     final world = utf8.decode(folders.files['/bots/WORLD.md']!);
     expect(world, contains('- Mia'));
@@ -518,6 +809,468 @@ void main() {
       world,
       contains('- "江湖": 用户, Mia, Leo. Its chat: ${groups.chatFile(group.id)}'),
     );
+  });
+
+  for (final inGroup in [false, true]) {
+    test(
+      'compaction refreshes only the active ${inGroup ? 'group' : 'private'} '
+      'bot prompt and keeps the session',
+      () async {
+        final launches = <ClaudeLaunch>[];
+        final workers = <FakeCli>[];
+        startCli = (launch) async {
+          launches.add(launch);
+          final cli = FakeCli();
+          workers.add(cli);
+          return cli;
+        };
+        groups.tell = null;
+        final bot = inGroup ? leo : mia;
+        final group = groups.save(name: 'Planning', members: [bot.id]);
+        final other = groups.save(name: 'Research', members: [bot.id]);
+        final scope = inGroup ? group.id : null;
+        final requestedScope = inGroup ? other.id : group.id;
+        void remember(String text, {String? group}) {
+          bots.changeUserMemory(bot, [
+            (action: BotMemoryAction.add, id: null, revision: null, text: text),
+          ], group: group);
+        }
+
+        remember('Private memory');
+        remember('Planning memory', group: group.id);
+        remember('Research memory', group: other.id);
+        final ownMemory = inGroup ? 'Planning memory' : 'Private memory';
+        final session = bots.threadFor(bot, group: scope).session;
+        void send(String text) {
+          if (scope == null) {
+            bots.sendPrivate(bot, ComposerMessage(text: text));
+          } else {
+            groups.send(scope, text: '@${bot.name} $text');
+          }
+        }
+
+        send('First question');
+        await pumpEventQueue();
+        final cli = workers.single;
+        expect(launches.single.ownPrompt, isTrue);
+        expect(launches.single.refreshSystemPromptOnCompaction, isTrue);
+        expect(launches.single.instructions, contains(ownMemory));
+        expect(launches.single.instructions, isNot(contains('Fresh memory')));
+        expect(cli.users, hasLength(1));
+        expect(session.isStreaming, isTrue);
+        const sessionId = '821354b1-8c65-42a1-a205-bbc5254b79f1';
+        cli.push({
+          'type': 'system',
+          'subtype': 'init',
+          'session_id': sessionId,
+        });
+
+        // Written after launch, so the response must use current host memory.
+        remember('Fresh memory', group: scope);
+        cli.push({
+          'type': 'control_request',
+          'request_id': 'refresh',
+          'request': {
+            'subtype': 'refresh_system_prompt',
+            'group_id': requestedScope,
+            'cwd': bots.runtimeFolder(bot, group: requestedScope),
+          },
+        });
+        await pumpEventQueue();
+        final response =
+            cli.written.singleWhere(
+                  (message) => message['type'] == 'control_response',
+                )['response']
+                as Map;
+        expect(response['request_id'], 'refresh');
+        expect(response['subtype'], 'success');
+        final prompt = (response['response'] as Map)['system_prompt'];
+        expect(prompt, contains(ownMemory));
+        expect(prompt, contains('Fresh memory'));
+        for (final note in [
+          'Private memory',
+          'Planning memory',
+          'Research memory',
+        ]) {
+          if (note != ownMemory) expect(prompt, isNot(contains(note)));
+        }
+        expect(session.isStreaming, isTrue);
+        expect(session.sessionId, sessionId);
+        expect(workers, [cli]);
+        expect(cli.users, hasLength(1));
+
+        Future<void> compact({required bool refreshed}) async {
+          cli.push({
+            'type': 'system',
+            'subtype': 'compact_boundary',
+            'uuid': 'compaction-$refreshed',
+            'compact_metadata': {
+              'trigger': 'auto',
+              if (refreshed) ...{
+                'system_prompt_refreshed': true,
+                'prompt_request_id': 'refresh',
+              },
+            },
+          });
+          cli.push({'type': 'result', 'subtype': 'success'});
+          await pumpEventQueue();
+          expect(session.isStreaming, isFalse);
+          expect(bots.threadFor(bot, group: scope).session, same(session));
+          expect(session.sessionId, sessionId);
+        }
+
+        await compact(refreshed: true);
+        if (!inGroup) expect(bots.byId(bot.id)?.chatOnly, isTrue);
+        expect(workers, [cli]);
+        expect(cli.closed, isFalse);
+        send('Second question');
+        await pumpEventQueue();
+        expect(cli.users, hasLength(2));
+        expect(session.isStreaming, isTrue);
+        await compact(refreshed: false);
+        expect(cli.closed, isTrue);
+        expect(launches, hasLength(2));
+        expect(launches.last.resume, sessionId);
+        expect(launches.last.instructions, contains('Fresh memory'));
+      },
+    );
+  }
+
+  for (final inGroup in [false, true]) {
+    test('cold resume freezes ${inGroup ? 'group' : 'private'} bot memory '
+        'until compaction or withdrawal', () async {
+      final launches = <ClaudeLaunch>[];
+      final workers = <FakeCli>[];
+      startCli = (launch) async {
+        launches.add(launch);
+        final cli = FakeCli();
+        workers.add(cli);
+        return cli;
+      };
+      const original = 'Original user note';
+      const edited = 'Edited user note';
+      const later = 'Later user note';
+      const withdrawn = 'Withdrawn user note';
+      const other = 'Note from the other conversation';
+      const sessionId = '821354b1-8c65-42a1-a205-bbc5254b79f1';
+      groups.tell = null;
+      var bot = inGroup ? leo : mia;
+      final group = groups.save(name: 'Planning', members: [bot.id]);
+      final scope = inGroup ? group.id : null;
+      bots.changeUserMemory(bot, [
+        (action: BotMemoryAction.add, id: null, revision: null, text: original),
+        (
+          action: BotMemoryAction.add,
+          id: null,
+          revision: null,
+          text: withdrawn,
+        ),
+      ], group: scope);
+      bots.changeUserMemory(bot, [
+        (action: BotMemoryAction.add, id: null, revision: null, text: other),
+      ], group: inGroup ? null : group.id);
+
+      void editNote(String text) {
+        final entry = bots.userMemory(bot, group: scope).entries.first;
+        bots.changeUserMemory(bot, [
+          (
+            action: BotMemoryAction.update,
+            id: entry.id,
+            revision: entry.revision,
+            text: text,
+          ),
+        ], group: scope);
+      }
+
+      void expectNotes(Object? prompt, String included, {bool pruned = false}) {
+        expect(
+          prompt,
+          allOf([
+            contains(included),
+            for (final note in [original, edited, later, other])
+              if (note != included) isNot(contains(note)),
+            pruned ? isNot(contains(withdrawn)) : contains(withdrawn),
+          ]),
+        );
+      }
+
+      Future<FakeCli> send(String text) async {
+        final launched = workers.length;
+        if (scope == null) {
+          bots.sendPrivate(bot, ComposerMessage(text: text));
+        } else {
+          groups.send(scope, text: '@${bot.name} $text');
+        }
+        await pumpEventQueue();
+        expect(workers, hasLength(launched + 1));
+        expect(workers.last.users, hasLength(1));
+        return workers.last;
+      }
+
+      final initialThread = bots.threadFor(bot, group: scope);
+      final initial = initialThread.session;
+      final first = await send('First question');
+      expect(launches.single.resume, isNull);
+      expectNotes(launches.single.instructions, original);
+      first.push({
+        'type': 'system',
+        'subtype': 'init',
+        'session_id': sessionId,
+      });
+      first.push({'type': 'result', 'subtype': 'success'});
+      await pumpEventQueue();
+      expect(initial.isStreaming, isFalse);
+      expect(initialThread.id, sessionId);
+
+      final record = SessionRecord(
+        id: initialThread.id!,
+        title: 'First question',
+        updatedAt: now,
+        cwd: initialThread.project.path,
+      );
+      final keptKernel = KernelDescriptor(
+        id: kernel.id,
+        label: kernel.label,
+        icon: kernel.icon,
+        description: kernel.description,
+        create: kernel.create,
+        catalog: _KeptSessionCatalog(record),
+      );
+      Future<void> reopen() async {
+        bots.dispose();
+        workspace.dispose();
+        workspace = Workspace(kernels: [keptKernel]);
+        bots = Bots(
+          workspace: workspace,
+          folders: folders,
+          chinese: true,
+          clock: () => now,
+          computer: () async => 'Leo 的 MacBook',
+        );
+        expect(workers.last.closed, isTrue);
+        final loaded = workspace.load();
+        await bots.start();
+        await loaded;
+        groups = bots.groups;
+        bot = bots.byId(bot.id)!;
+        expect(bots.threadFor(bot, group: scope).record, same(record));
+      }
+
+      editNote(edited);
+      await reopen();
+      expect(bots.userMemory(bot, group: scope).entries.first.text, edited);
+      final resumed = bots.threadFor(bot, group: scope).session;
+      expect(resumed, isNot(same(initial)));
+      final second = await send('Resume the conversation');
+      expect(launches.last.resume, sessionId);
+      expectNotes(launches.last.instructions, original);
+      expect(resumed.isStreaming, isTrue);
+      second.push({
+        'type': 'control_request',
+        'request_id': 'refresh',
+        'request': {'subtype': 'refresh_system_prompt'},
+      });
+      await pumpEventQueue();
+      expectNotes(second.responses.single['system_prompt'], edited);
+      expect(resumed.sessionId, sessionId);
+      expect(launches, hasLength(2));
+
+      // Only the notes sent in the refresh response have reached the model.
+      editNote(later);
+      second.push({
+        'type': 'system',
+        'subtype': 'compact_boundary',
+        'uuid': 'compaction',
+        'compact_metadata': {
+          'trigger': 'auto',
+          'system_prompt_refreshed': true,
+          'prompt_request_id': 'refresh',
+        },
+      });
+      second.push({'type': 'result', 'subtype': 'success'});
+      await pumpEventQueue();
+      expect(resumed.isStreaming, isFalse);
+      expect(resumed.sessionId, sessionId);
+      expect(second.closed, isFalse);
+      expect(launches, hasLength(2));
+
+      await reopen();
+      expect(bots.userMemory(bot, group: scope).entries.first.text, later);
+      final third = await send('Resume after compaction');
+      expect(launches.last.resume, sessionId);
+      expectNotes(launches.last.instructions, edited);
+      final active = bots.threadFor(bot, group: scope).session;
+      expect(active.isStreaming, isTrue);
+
+      Future<Map<String, Object?>> checkPrompt(String id) async {
+        third.push({
+          'type': 'control_request',
+          'request_id': id,
+          'request': {'subtype': 'check_system_prompt'},
+        });
+        await pumpEventQueue();
+        return third.responses.last;
+      }
+
+      expect(await checkPrompt('before-withdrawal'), {'valid': true});
+      final snapshotPath = folders.files.keys.singleWhere(
+        (path) => path.contains('/prompt-memory-v1/'),
+      );
+      final earlierSnapshot = utf8.decode(folders.files[snapshotPath]!);
+      expectNotes(earlierSnapshot, edited);
+      final entry = bots.userMemory(bot, group: scope).entries.last;
+      expect(entry.text, withdrawn);
+      bots.changeUserMemory(bot, [
+        (
+          action: BotMemoryAction.remove,
+          id: entry.id,
+          revision: entry.revision,
+          text: null,
+        ),
+      ], group: scope);
+
+      final checked = await checkPrompt('after-withdrawal');
+      expect(checked['valid'], isTrue);
+      expectNotes(checked['system_prompt'], edited, pruned: true);
+      expect(utf8.decode(folders.files[snapshotPath]!), earlierSnapshot);
+      expect(active.isStreaming, isTrue);
+      expect(active.sessionId, sessionId);
+      expect(launches, hasLength(3));
+
+      third.push({
+        'type': 'system',
+        'subtype': 'host_prompt_applied',
+        'prompt_request_id': 'before-withdrawal',
+      });
+      await pumpEventQueue();
+      expect(utf8.decode(folders.files[snapshotPath]!), earlierSnapshot);
+      third.push({
+        'type': 'system',
+        'subtype': 'host_prompt_applied',
+        'prompt_request_id': 'after-withdrawal',
+      });
+      await pumpEventQueue();
+      expectNotes(
+        utf8.decode(folders.files[snapshotPath]!),
+        edited,
+        pruned: true,
+      );
+      third.push({'type': 'result', 'subtype': 'success'});
+      await pumpEventQueue();
+      expect(active.isStreaming, isFalse);
+      expect(third.closed, isFalse);
+      expect(launches, hasLength(3));
+
+      await reopen();
+      expect(bots.userMemory(bot, group: scope).entries.single.text, later);
+      await send('Resume after withdrawal');
+      expect(launches.last.resume, sessionId);
+      expectNotes(launches.last.instructions, edited, pruned: true);
+    });
+  }
+
+  test('external Bot holds a private follow-up until it can resume with pruned memory', () async {
+    final launches = <ClaudeLaunch>[];
+    final workers = <_ExternalCli>[];
+    startCli = (launch) async {
+      launches.add(launch);
+      final worker = _ExternalCli();
+      workers.add(worker);
+      return worker;
+    };
+    const sessionId = '821354b1-8c65-42a1-a205-bbc5254b79f1';
+    const retained = 'Original retained note';
+    const edited = 'New wording of the retained note';
+    const withdrawn = 'Secret note to withdraw';
+    const followUp = 'Follow-up question';
+    bots.changeUserMemory(mia, [
+      for (final text in [retained, withdrawn])
+        (action: BotMemoryAction.add, id: null, revision: null, text: text),
+    ]);
+
+    final thread = bots.threadFor(mia);
+    final session = thread.session;
+    bots.sendPrivate(mia, const ComposerMessage(text: 'First question'));
+    await pumpEventQueue();
+    final first = workers.single;
+    final firstUser = first.users.single;
+    expect(launches.single.resume, isNull);
+    expect(launches.single.instructions, contains(retained));
+    expect(launches.single.instructions, contains(withdrawn));
+    first.push({'type': 'system', 'subtype': 'init', 'session_id': sessionId});
+    await pumpEventQueue();
+    expect(thread.id, sessionId);
+    expect(session.isStreaming, isTrue);
+
+    (String?, bool) followUpState() => [
+      for (var i = 0; i < session.itemCount; i++)
+        if (session.itemAt(i) case UserMessageItem(:final text, :final queued)
+            when text == followUp)
+          (session.itemIdAt(i), queued),
+    ].single;
+
+    bots.sendPrivate(mia, const ComposerMessage(text: followUp));
+    await pumpEventQueue();
+    final (followUpId, queued) = followUpState();
+    expect(followUpId, isNotNull);
+    expect(queued, isTrue);
+    expect(first.users.single, same(firstUser));
+    expect(launches, hasLength(1));
+    bots.sendPrivate(
+      mia,
+      const ComposerMessage(text: 'Later phone message'),
+      linkRequest: (key: 'phone/safe-queue', fingerprint: 'later-phone'),
+    );
+    await pumpEventQueue();
+
+    final notes = bots.userMemory(mia).entries;
+    bots.changeUserMemory(mia, [
+      (
+        action: BotMemoryAction.update,
+        id: notes.first.id,
+        revision: notes.first.revision,
+        text: edited,
+      ),
+      (
+        action: BotMemoryAction.remove,
+        id: notes.last.id,
+        revision: notes.last.revision,
+        text: null,
+      ),
+    ]);
+    await pumpEventQueue();
+    expect(bots.userMemory(mia).activeEntries.single.text, edited);
+    expect(session.isStreaming, isTrue);
+    expect(followUpState(), (followUpId, true));
+    expect(first.users.single, same(firstUser));
+    expect(first.closed, isFalse);
+    expect(launches, hasLength(1));
+
+    first.push({'type': 'result', 'subtype': 'success'});
+    await pumpEventQueue();
+    expect(launches, hasLength(2));
+    expect(first.closed, isTrue);
+    expect(launches.last.resume, sessionId);
+    expect(launches.last.instructions, contains(retained));
+    expect(launches.last.instructions, isNot(contains(edited)));
+    expect(launches.last.instructions, isNot(contains(withdrawn)));
+    expect(first.users.single, same(firstUser));
+    final resumedUser = workers.last.users.single;
+    expect(resumedUser['uuid'], followUpId);
+    expect(resumedUser['session_id'], sessionId);
+    expect((resumedUser['message'] as Map)['content'], [
+      {'type': 'text', 'text': followUp},
+    ]);
+    expect(followUpState(), (followUpId, false));
+    expect(session.isStreaming, isTrue);
+
+    workers.last.push({'type': 'result', 'subtype': 'success'});
+    await pumpEventQueue();
+    expect(launches, hasLength(2));
+    expect(workers.last.users, hasLength(2));
+    expect((workers.last.users.last['message'] as Map)['content'], [
+      {'type': 'text', 'text': 'Later phone message'},
+    ]);
   });
 
   test('told of a group with what is new in it, its first line the '
@@ -529,7 +1282,8 @@ void main() {
     expect(note, startsWith('[group ${group.id}] The group chat "江湖".'));
     expect(note, contains('In it: you (Mia), 用户 (the user), Leo.'));
     expect(note, contains('## #1 · 用户 · 2026-11-12 14:00:00 · new\n@Mia 晚上吃啥'));
-    expect(note, contains(groups.chatFile(group.id)));
+    expect(note, contains('Use bot_history'));
+    expect(note, isNot(contains(groups.chatFile(group.id))));
     expect(
       ChatCodec.botGroupOf(UserMessageItem(text: botEventMessage(note))),
       group.id,
@@ -657,4 +1411,24 @@ void main() {
       isEmpty,
     );
   });
+}
+
+class _ExternalCli extends FakeCli implements ClaudeExternalTransport {}
+
+class _KeptSessionCatalog implements SessionCatalog {
+  _KeptSessionCatalog(this.record);
+
+  final SessionRecord record;
+
+  @override
+  Future<List<ProjectRecord>> projects() async => [
+    ProjectRecord(path: record.cwd, sessions: [record]),
+  ];
+
+  @override
+  Future<List<SessionRecord>> sessionsIn(String cwd) async =>
+      cwd == record.cwd ? [record] : [];
+
+  @override
+  Future<void> delete(String id) async {}
 }

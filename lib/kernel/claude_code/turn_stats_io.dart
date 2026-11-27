@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -14,7 +15,7 @@ import 'turn_stats.dart';
 /// end and writes there, and two writers at once write over each other.
 /// The lock keeps another app out; within this one, every session writes
 /// from the one isolate, a line at a time, in one go.
-class TurnStatsFiles implements TurnStats {
+class TurnStatsFiles implements TurnStats, TurnCompletionStore {
   TurnStatsFiles(this.directory);
 
   final String directory;
@@ -27,7 +28,31 @@ class TurnStatsFiles implements TurnStats {
       : null;
 
   @override
-  void write(String sessionId, String turnId, TurnRecord record) {
+  void write(String sessionId, String turnId, TurnRecord record) =>
+      _append(sessionId, TurnStats.encode(turnId, record));
+
+  @override
+  void writeCompletion(
+    String sessionId,
+    String turnId,
+    TurnRecord? timing,
+    TurnCompletion completion,
+  ) => _append(
+    sessionId,
+    jsonEncode({
+      if (timing != null)
+        ...jsonDecode(TurnStats.encode(turnId, timing)) as Map<String, Object?>,
+      'turn': turnId,
+      'succeeded': completion.succeeded,
+      'toolIterations': completion.toolIterations,
+      'itemIds': completion.itemIds,
+      'successfulCommands': completion.successfulCommands,
+      if (completion.noteDigests.isNotEmpty)
+        'noteDigests': completion.noteDigests.toList(),
+    }),
+  );
+
+  void _append(String sessionId, String line) {
     final file = _fileOf(sessionId);
     if (file == null) return;
     try {
@@ -38,7 +63,7 @@ class TurnStatsFiles implements TurnStats {
         // The end as it is now, another's line written meanwhile.
         open
           ..setPositionSync(open.lengthSync())
-          ..writeStringSync('${TurnStats.encode(turnId, record)}\n')
+          ..writeStringSync('$line\n')
           ..flushSync();
       } finally {
         // Unlocks it too.
@@ -50,16 +75,55 @@ class TurnStatsFiles implements TurnStats {
   }
 
   @override
-  Future<Map<String, TurnRecord>> read(String sessionId) async {
+  Future<Map<String, TurnRecord>> read(String sessionId) async =>
+      TurnStats.decode(await _lines(sessionId));
+
+  @override
+  Future<Map<String, TurnCompletion>> readCompletions(String sessionId) async {
+    final records = <String, TurnCompletion>{};
+    for (final line in await _lines(sessionId)) {
+      try {
+        final value = jsonDecode(line);
+        if (value
+            case final Map<String, Object?> row &&
+                {
+                  'turn': final String turn,
+                  'succeeded': final bool succeeded,
+                  'toolIterations': final int toolIterations,
+                  'itemIds': final List<Object?> itemIds,
+                  'successfulCommands':
+                      final Map<String, Object?> successfulCommands,
+                }) {
+          records[turn] = (
+            succeeded: succeeded,
+            toolIterations: toolIterations,
+            itemIds: itemIds.whereType<String>().toList(),
+            successfulCommands: {
+              for (final entry in successfulCommands.entries)
+                if (entry.value case final String digest) entry.key: digest,
+            },
+            noteDigests: switch (row['noteDigests']) {
+              final List<Object?> notes => notes.whereType<String>().toSet(),
+              _ => const {},
+            },
+          );
+        }
+      } on FormatException {
+        // A process can stop with a partial final line.
+      }
+    }
+    return records;
+  }
+
+  Future<List<String>> _lines(String sessionId) async {
     final file = _fileOf(sessionId);
-    if (file == null) return const {};
+    if (file == null) return const [];
     try {
-      return TurnStats.decode(await file.readAsLines());
+      return await file.readAsLines();
     } on FileSystemException {
-      return const {};
+      return const [];
     } on FormatException {
-      // Not UTF-8: not ours.
-      return const {};
+      return const [];
     }
   }
 }

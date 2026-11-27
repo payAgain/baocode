@@ -92,6 +92,7 @@ class ChatComposer extends StatefulWidget {
     this.initialImages = const [],
     this.onSubmit,
     this.onIntercept,
+    this.preserveText = false,
     this.canSubmit,
     this.canStop,
     this.showSessionControls = true,
@@ -118,6 +119,9 @@ class ChatComposer extends StatefulWidget {
   /// Takes over delivery of a message (a side question, say). Return true
   /// to clear the input and skip the default send.
   final bool Function(ComposerMessage message)? onIntercept;
+
+  /// Keep surrounding whitespace for host commands intercepted from the input.
+  final bool preserveText;
 
   /// An extra submission guard, checked both for the button and at send time.
   final bool Function()? canSubmit;
@@ -1496,7 +1500,9 @@ class ChatComposerState extends State<ChatComposer>
     }
     return ComposerMessage(
       // The lines it refers to after it.
-      text: text.toString().trim() + codeAppendix(code.values),
+      text:
+          (widget.preserveText ? text.toString() : text.toString().trim()) +
+          codeAppendix(code.values),
       mentions: mentions,
       images: [..._images],
     );

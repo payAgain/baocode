@@ -140,6 +140,13 @@ class Compaction {
             '${started.join('\n\n')}\n</system-reminder>',
     ].join('\n\n');
     final after = estimateTokens(text);
+    final entry = store.append({
+      'type': 'user',
+      'message': {'role': 'user', 'content': text},
+      'isCompactSummary': true,
+      'isVisibleInTranscriptOnly': true,
+    });
+    final refreshed = await session.refreshSystemPrompt();
     session.emit({
       'type': 'system',
       'subtype': 'compact_boundary',
@@ -147,16 +154,14 @@ class Compaction {
         'trigger': trigger,
         'pre_tokens': before,
         'post_tokens': after,
+        if (refreshed != null) ...{
+          'system_prompt_refreshed': true,
+          'prompt_request_id': refreshed,
+        },
         if (tooLong) 'reason': 'prompt_too_long',
         if (tooLong) 'context_window': session.contextWindow,
       },
       'uuid': boundary['uuid'],
-    });
-    final entry = store.append({
-      'type': 'user',
-      'message': {'role': 'user', 'content': text},
-      'isCompactSummary': true,
-      'isVisibleInTranscriptOnly': true,
     });
     session.emit({
       'type': 'user',

@@ -99,27 +99,19 @@ class BotGroup {
   };
 }
 
-/// One of a group's messages, as a bot is told it: its heading (number,
-/// who, when), its lines, the lines of the chat's file it is at, and
-/// whether it is new to the bot.
-typedef BotGroupMessage = ({
-  String heading,
-  List<String> lines,
-  (int, int) lineRange,
-  bool fresh,
-});
+/// A group message preview with its sequence number, speaker, and time.
+typedef BotGroupMessage = ({String heading, List<String> lines, bool fresh});
 
 /// What the bot that has [group]'s conversation is told, plainly enough
 /// for a simple model to follow: where it is (a group chat: who is in it,
 /// [me] among them, [user] too), the time [now] and when it last looked
-/// ([looked]), the latest [messages] (each cut past [longest] characters,
-/// the rest in [chat]), how it came to have it ([by]); then what to do,
+/// ([looked]), the latest [messages] (each cut past [longest] characters),
+/// how it came to have it ([by]); then what to do,
 /// what `<bot_next>` means and when to use it, and that the conversation is
 /// in its hands. Whether it may pass it on: [left] times more. Its first
 /// line says the group's ([ChatCodec.botGroupOf]).
 String botGroupTurn({
   required BotGroup group,
-  required String chat,
   required String me,
   required List<String> members,
   required String user,
@@ -135,8 +127,7 @@ String botGroupTurn({
     final text = message.lines.join('\n');
     final head = '## ${message.heading}${message.fresh ? ' · new' : ''}';
     if (text.length <= longest) return '$head\n$text';
-    return '$head\n${text.substring(0, longest)}… (cut: all of it at lines '
-        '${message.lineRange.$1}–${message.lineRange.$2} of the chat\'s file)';
+    return '$head\n${text.substring(0, longest)}… (use bot_history to read the full message)';
   }
 
   final first = messages.isEmpty
@@ -183,7 +174,7 @@ String botGroupTurn({
       for (final message in messages) shown(message),
       '',
     ],
-    'Earlier ones, and all of each: $chat.',
+    'Use bot_history to browse earlier messages or read the full text of a preview.',
     '',
     'Why you are told now: $by.',
     '',
@@ -195,9 +186,8 @@ String botGroupTurn({
         'particular, give its number: <$say $ref="74">…</$say> shows #74 '
         'quoted under yours. Only when it helps to say which one you answer; '
         'most need none.',
-    '2. Narration (<$narrate>…</$narrate>: what you do, how you look, where '
-        'you are) and pictures (generate_image) reach the group too: everyone '
-        'sees them. Use them now and then, when they fit.',
+    '2. Everyone in the group can see optional narration '
+        '(<$narrate>…</$narrate>). Use it when it fits.',
     if (left > 0) ...[
       '3. Then decide who speaks next.',
       '   <$next>name</$next> hands the conversation to one member: they are '

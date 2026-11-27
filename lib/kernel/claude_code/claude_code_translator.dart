@@ -66,8 +66,13 @@ class ClaudeTranslator {
     emit(ActivityReported(nextSeq(), activity));
   }
 
+  // Parallel tool blocks can arrive in separate envelopes for one model reply.
+  final Map<String, String> _toolMessages = {};
+  int get toolIterations => _toolMessages.values.toSet().length;
+
   /// A turn was sent: the agent is at work from now, before the CLI says so.
   void begin() {
+    _toolMessages.clear();
     _resetUsage();
     _report(_waiting());
   }
@@ -125,6 +130,13 @@ class ClaudeTranslator {
   /// The item each block of a whole message landed on, by the message's
   /// uuid and the block's place: delivered again, it lands there again.
   final Map<String, String> _blockIds = {};
+
+  // Live text items can keep the provider's streaming ID after the canonical
+  // message arrives. History identifies the original by its saved row UUID.
+  final Map<String, String> _assistantOriginals = {};
+
+  String? assistantOriginalId(String itemId) => _assistantOriginals[itemId];
+
   final Map<String, StringBuffer> _thoughts = {};
   final Map<String, DateTime> _thinkingStarted = {};
   final Map<String, int> _thinkingTokens = {};
@@ -830,6 +842,12 @@ class ClaudeTranslator {
       switch (block['type']) {
         case 'text':
           final text = block['text'] as String? ?? '';
+          if (message['uuid'] case final String original
+              when !synthetic &&
+                  parent == null &&
+                  message['isSidechain'] != true) {
+            _assistantOriginals[id] = original;
+          }
           if (synthetic) {
             if (parent == null && _goalReply(text)) continue;
             if (text.isNotEmpty) {
@@ -852,6 +870,12 @@ class ClaudeTranslator {
             );
           }
         case 'tool_use':
+          if (parent == null &&
+              message['isSidechain'] != true &&
+              !synthetic &&
+              !replaying) {
+            _toolMessages[block['id'] as String] = messageId;
+          }
           _streamedCalls.remove(block['id']);
           _toolUse(
             block['id'] as String,
@@ -906,6 +930,7 @@ class ClaudeTranslator {
       }
       final id = _blockIds.remove('$uuid:$index');
       if (id == null) continue;
+      _assistantOriginals.remove(id);
       _thoughts.remove(id);
       _thinkingStarted.remove(id);
       _thinkingTokens.remove(id);
@@ -917,6 +942,7 @@ class ClaudeTranslator {
 
   /// The call [id], never made: its card goes.
   void _dropCall(String id) {
+    _toolMessages.remove(id);
     _tools.remove(id);
     _agents.remove(id);
     _unanswered.remove(id);
@@ -1855,6 +1881,7 @@ class ClaudeTranslator {
         final auto = (meta['trigger'] ?? kept['trigger']) == 'auto';
         final note = CompactionNote(
           auto: auto,
+          systemPromptRefreshed: meta['system_prompt_refreshed'] == true,
           // Refused by the API before the window set was full.
           tooLong:
               auto && (meta['reason'] ?? kept['reason']) == 'prompt_too_long',

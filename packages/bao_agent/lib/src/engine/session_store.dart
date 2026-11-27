@@ -25,6 +25,7 @@ class SessionStore {
   });
 
   /// Continues the session kept in [file], on the branch it ended on.
+  /// With [requireFile], a failure to read the file aborts the resume.
   factory SessionStore.resume({
     required String sessionId,
     required String cwd,
@@ -32,6 +33,7 @@ class SessionStore {
     String? gitBranch,
     bool persist = true,
     bool sidechain = false,
+    bool requireFile = false,
   }) {
     final store = SessionStore(
       sessionId: sessionId,
@@ -39,7 +41,7 @@ class SessionStore {
       file: persist ? file : null,
       gitBranch: gitBranch,
     );
-    store._load(file, sidechain: sidechain);
+    store._load(file, sidechain: sidechain, requireFile: requireFile);
     return store;
   }
 
@@ -67,7 +69,11 @@ class SessionStore {
 
   /// Reads [path]: a session's file, or a subagent's ([sidechain]), whose
   /// every message is of its side chain.
-  void _load(String path, {bool sidechain = false}) {
+  void _load(
+    String path, {
+    required bool sidechain,
+    required bool requireFile,
+  }) {
     final entries = <Map<String, Object?>>[];
     try {
       for (final line in const LineSplitter().convert(
@@ -82,6 +88,7 @@ class SessionStore {
         }
       }
     } on FileSystemException {
+      if (requireFile) rethrow;
       return;
     }
     for (final entry in entries) {

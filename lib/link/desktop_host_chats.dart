@@ -45,6 +45,8 @@ class DesktopHostMessage {
     required this.text,
     required this.sender,
     required this.mine,
+    this.queued = false,
+    this.literal = false,
     this.images = const [],
     this.sentAt,
     this.senderEmoji,
@@ -55,6 +57,8 @@ class DesktopHostMessage {
   final String text;
   final String sender;
   final bool mine;
+  final bool queued;
+  final bool literal;
   final List<DesktopRemoteImage> images;
   final DateTime? sentAt;
   final String? senderEmoji;
@@ -878,8 +882,11 @@ class DesktopHostChats extends ChangeNotifier {
   }
 
   Iterable<DesktopHostMessage> _groupMessages(_HostView view) sync* {
-    final partsBySequence = <int, List<({String text, int? ref})>>{};
-    List<({String text, int? ref})> partsOf(LinkGroupMessage item) =>
+    final partsBySequence =
+        <int, List<({String text, int? ref, bool literal})>>{};
+    List<({String text, int? ref, bool literal})> partsOf(
+      LinkGroupMessage item,
+    ) =>
         partsBySequence.putIfAbsent(item.seq, () => _groupParts(item).toList());
     final summaries = <int, DesktopHostGroupQuote>{};
     DesktopHostGroupQuote summarize(LinkGroupMessage item) =>
@@ -905,14 +912,19 @@ class DesktopHostChats extends ChangeNotifier {
       final rows = parts.length + (item.images.isNotEmpty ? 1 : 0);
       for (var index = 0; index < rows; index++) {
         final attachment = index == parts.length;
-        final (:text, :ref) = attachment
-            ? (text: _attachment, ref: parts.isEmpty ? item.ref : null)
+        final (:text, :ref, :literal) = attachment
+            ? (
+                text: _attachment,
+                ref: parts.isEmpty ? item.ref : null,
+                literal: false,
+              )
             : parts[index];
         final quoted = ref == null ? null : view.groupItems[ref];
         yield DesktopHostMessage(
           text: text,
           sender: target.sender,
           mine: item.mine,
+          literal: literal,
           images: attachment ? images : const [],
           sentAt: index == 0 && item.at.millisecondsSinceEpoch != 0
               ? item.at
@@ -935,18 +947,28 @@ class DesktopHostChats extends ChangeNotifier {
     }
   }
 
-  static Iterable<({String text, int? ref})> _groupParts(
+  static Iterable<({String text, int? ref, bool literal})> _groupParts(
     LinkGroupMessage item,
   ) sync* {
     final visible = _visibleText(item.text);
     if (item.mine) {
-      if (visible.isNotEmpty) yield (text: visible, ref: item.ref);
+      if (visible.isNotEmpty) {
+        yield (text: visible, ref: item.ref, literal: false);
+      }
+      return;
+    }
+    if (ChatCodec.literalBotText(item.text) case final literal?) {
+      if (literal.isNotEmpty) {
+        yield (text: literal, ref: item.ref, literal: true);
+      }
       return;
     }
     for (final (:tag, :text, :ref) in ChatCodec.botPartsOf(visible)) {
       if (tag != ChatCodec.botSayTag) continue;
       final shown = _botMarkdown(text);
-      if (shown.isNotEmpty) yield (text: shown, ref: ref ?? item.ref);
+      if (shown.isNotEmpty) {
+        yield (text: shown, ref: ref ?? item.ref, literal: false);
+      }
     }
   }
 
@@ -983,24 +1005,28 @@ class DesktopHostChats extends ChangeNotifier {
           final system =
               ChatCodec.botEvent(user) != null ||
               (text.isEmpty && _hiddenNotes.hasMatch(raw));
+          final queued = item['queued'] == true;
           final sentAt = switch (item['at']) {
             final int at when at > 0 && at <= 8640000000000000 =>
               DateTime.fromMillisecondsSinceEpoch(at),
             _ => null,
           };
-          if (item['queued'] != true) {
+          if (!queued) {
             showReply = !groupNote && !system;
             turnAt = showReply ? sentAt : null;
           }
           if (group || system) continue;
           final from = item['agent'];
-          // The visible words can survive a merged or queued private prompt,
-          // but its media cannot be attributed to the private turn.
-          final showImages = !bot || (showReply && !groupNote);
+          // A split host explicitly marks queued items from its private view.
+          // A merged note from a legacy host cannot establish media routing.
+          final privateQueued = queued && item['privateQueued'] == true;
+          final showImages =
+              !bot || (!groupNote && (showReply || privateQueued));
           yield* _lines(
             [text],
             from is String && from.isNotEmpty ? from : 'You',
             mine: from == null,
+            queued: bot && queued && from == null,
             sentAt: sentAt,
             attachment: showImages && hasImage,
             images: showImages
@@ -1118,16 +1144,20 @@ class DesktopHostChats extends ChangeNotifier {
     Iterable<String> lines,
     String sender, {
     bool mine = false,
+    bool queued = false,
     bool attachment = false,
     DateTime? sentAt,
     List<DesktopRemoteImage> images = const [],
   }) sync* {
+    var shownText = false;
     for (final text in lines) {
       if (text.isNotEmpty) {
+        shownText = true;
         yield DesktopHostMessage(
           text: text,
           sender: sender,
           mine: mine,
+          queued: queued,
           sentAt: sentAt,
         );
       }
@@ -1137,8 +1167,9 @@ class DesktopHostChats extends ChangeNotifier {
         text: _attachment,
         sender: sender,
         mine: mine,
+        queued: queued && !shownText,
         images: List.unmodifiable(images),
-        sentAt: lines.any((text) => text.isNotEmpty) ? null : sentAt,
+        sentAt: shownText ? null : sentAt,
       );
     }
   }

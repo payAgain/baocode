@@ -26,6 +26,7 @@ import '../usage/usage_ledger.dart';
 import '../usage/usage_prices.dart';
 import '../usage/usage_query.dart';
 import '../usage/usage_record.dart';
+import 'agent_view.dart';
 import 'chat_column.dart';
 import 'chat_feed.dart';
 import 'selection/chat_selection.dart';
@@ -856,7 +857,7 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
 
   void _findChanged() {
     if (_find.visible != _findShown) {
-      _findShown = _find.visible;
+      setState(() => _findShown = _find.visible);
       if (!_findShown) widget.onFindClosed?.call();
     }
     if (_find.reveals == _findReveals) return;
@@ -4015,12 +4016,17 @@ class _ChatHistoryViewState extends State<ChatHistoryView>
                 ),
                 // Over the history's top right, as the editor's; over the
                 // side panel's rail too, where it floats there.
-                Positioned(
-                  top: 0,
-                  left: _gutter,
-                  right: _gutter,
-                  child: _inset > 0 ? _OverRail(child: _findBar()) : _findBar(),
-                ),
+                // Mount the portal only while searching. Even an empty
+                // portal contributes a semantics node to the conversation.
+                if (_findShown && ConversationLayer.isInteractive(context))
+                  Positioned(
+                    top: 0,
+                    left: _gutter,
+                    right: _gutter,
+                    child: _inset > 0
+                        ? _OverRail(child: _findBar())
+                        : _findBar(),
+                  ),
               ],
             ),
           ),

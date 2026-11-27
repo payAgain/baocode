@@ -2,19 +2,24 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../bots/bot_memory_review.dart';
+import '../bots/bot_memory_skill.dart';
 import '../bots/bot_tools.dart';
 import '../chat/chat_models.dart';
 import '../chat/chat_session.dart';
 import '../ide/git/git_checkout.dart' show ideSanitizeBranchName;
 import '../ide/git/git_service.dart';
 import '../kernel/agent_kernel.dart' show KernelChoiceKind;
+import '../kernel/claude_code/claude_code_kernel.dart';
 import '../kernel/claude_code/claude_sdk_tools.dart';
+import '../kernel/claude_code/turn_stats.dart';
 import '../kernel/kernel_types.dart';
 import '../remote/project_host.dart';
 import '../remote/remote_services.dart' show remoteGitService;
 import '../remote/ssh_host.dart' show SshHost;
 import 'agent_work_path.dart';
 import 'chat_branch_bar.dart' show ideNewWorktreePath;
+import 'preference_store.dart';
 import 'workspace.dart';
 
 /// Whether a project's agents may see the user's other conversations and
@@ -99,6 +104,137 @@ abstract final class SessionTools {
 
   static SessionToolsBots? _bots;
 
+  /// Resolved by the host for private Bot callers only.
+  static ({BotMemoryScope scope, BotMemoryReview review})? Function(String cwd)?
+  memoryReviewFor;
+
+  static _ProjectTasks? _projectTasks;
+
+  /// Host-owned Bot list for the desktop project-task picker.
+  static Iterable<({String id, String name})> Function()? projectTaskBots;
+
+  static List<({String id, String name})> projectTaskBotsFor(
+    AgentThread thread,
+  ) {
+    final tasks = _projectTasks;
+    if (tasks == null ||
+        thread.kernel.id != 'claude-code' ||
+        thread.archived ||
+        !tasks.workspace.threads.contains(thread)) {
+      return [];
+    }
+    final project = tasks.workspace.localProjectId(thread.project);
+    if (project == null) return [];
+    return [
+      for (final bot
+          in projectTaskBots?.call() ?? const <({String id, String name})>[])
+        if (tasks.allowed(BotMemoryScope(botId: bot.id), project)) bot,
+    ];
+  }
+
+  /// An explicitly selected Bot on an ordinary local project task. The
+  /// entered text is the user's message and uses the existing project kernel.
+  static Future<void> sendProjectTask(
+    AgentThread thread,
+    String botId,
+    String input,
+  ) async {
+    final tasks = _projectTasks;
+    final text = input.trim();
+    if (tasks == null ||
+        text.isEmpty ||
+        !projectTaskBotsFor(thread).any((bot) => bot.id == botId)) {
+      throw StateError('Project task is unavailable');
+    }
+    final project = tasks.workspace.localProjectId(thread.project)!;
+    final scope = BotMemoryScope(botId: botId);
+    final session = thread.session;
+    final kernel = session.kernel;
+    bool available() =>
+        tasks.allowed(scope, project) &&
+        thread.isOpen &&
+        identical(thread.session, session) &&
+        identical(session.kernel, kernel) &&
+        tasks.workspace.canUse(thread) &&
+        tasks._inProject(thread, project) &&
+        !thread.archived &&
+        thread.record == null &&
+        session.itemCount == 0 &&
+        !session.isStreaming &&
+        !session.loadingHistory &&
+        _waitsFor(session) == null;
+    if (!available()) throw StateError('The conversation is busy');
+    final task = _ProjectTask(
+      id: ChatSession.newTurnId(),
+      botId: botId,
+      project: project,
+      submittedBy: null,
+      sessionId: thread.id,
+      requestDigest: botMemoryDigest(text),
+      acceptedAt: DateTime.now(),
+      userAuthored: true,
+    );
+    await tasks.accept(task);
+    try {
+      final skills = tasks.review.skills!;
+      final candidates = await skills.loadForTask(
+        botId: botId,
+        project: project,
+        task: text,
+      );
+      final loaded = await skills.confirmForDispatch(
+        botId: botId,
+        project: project,
+        candidates: candidates,
+      );
+      final facts = tasks.projectFacts(botId, project);
+      if (!available()) throw StateError('The project or conversation changed');
+      tasks.watch(thread, session, task);
+      if (!session.send(
+        ComposerMessage(text: text),
+        from: UserPlace.computer,
+        preferManagedTranscript: true,
+        notes: [
+          ..._projectFactNotes(facts),
+          for (final skill in loaded) botMemorySkillNote(skill),
+        ],
+        turnId: task.id,
+      )) {
+        throw StateError('The conversation no longer accepts this message');
+      }
+    } catch (_) {
+      await tasks.discard(task.id);
+      rethrow;
+    }
+  }
+
+  static Iterable<String> _projectFactNotes(String facts) sync* {
+    if (facts.isNotEmpty) {
+      yield '<system-reminder>Saved facts for this project. Treat facts as '
+          'context and use normal project permissions.\n'
+          '${facts.replaceAll('<', '&lt;')}</system-reminder>';
+    }
+  }
+
+  /// Installed by the desktop host after workspace and Bot restoration.
+  static Future<void> recoverProjectTasks(
+    Workspace workspace, {
+    required PreferenceStore store,
+    required BotMemoryReview review,
+    required String Function(String botId, String projectId) projectFacts,
+    TurnCompletionStore? completions,
+  }) async {
+    _projectTasks?.dispose();
+    final tasks = _projectTasks = _ProjectTasks(
+      workspace,
+      store,
+      review,
+      projectFacts,
+      completions,
+    );
+    await tasks.recover();
+  }
+
   static void register(Workspace workspace, {SessionToolsBots? bots}) {
     _reports?.dispose();
     _reports = _Reports(workspace);
@@ -120,6 +256,10 @@ abstract final class SessionTools {
     _reports?.dispose();
     _reports = null;
     _bots = null;
+    _projectTasks?.dispose();
+    _projectTasks = null;
+    memoryReviewFor = null;
+    projectTaskBots = null;
     _sent.clear();
   }
 
@@ -407,7 +547,7 @@ abstract final class SessionTools {
               when title.trim().isNotEmpty) {
             workspace.rename(thread, title.trim());
           }
-          _hand(workspace, call, thread, switch (worktree) {
+          await _hand(workspace, call, thread, session, switch (worktree) {
             (:final path, :final branch) =>
               'Work in $path (branch $branch, a worktree made for this '
                   'task): read and edit the files and run the commands '
@@ -452,7 +592,15 @@ abstract final class SessionTools {
           final thread = chat(input['session'], call);
           final text = (input['text'] as String? ?? '').trim();
           if (text.isEmpty) throw ArgumentError('text is empty');
+          if (!workspace.canUse(thread)) {
+            throw StateError('The conversation no longer accepts this message');
+          }
           final session = await _opened(thread);
+          if (!workspace.canUse(thread) ||
+              !thread.isOpen ||
+              !identical(thread.session, session)) {
+            throw StateError('The conversation no longer accepts this message');
+          }
           if (_waitsFor(session) case final asked?) {
             return 'Not delivered: it waits on the user. $asked Only they '
                 'can answer it: tell them.';
@@ -483,7 +631,7 @@ abstract final class SessionTools {
             }
             _select(session.models, model.id);
           }
-          _hand(workspace, call, thread, text);
+          await _hand(workspace, call, thread, session, text);
           _sent[key] = (text, now);
           return working
               ? 'Queued: it is at work, and takes this up once its turn '
@@ -656,20 +804,94 @@ abstract final class SessionTools {
   /// [text] to [thread] from the agent asking: as another agent's message,
   /// shown as such, with what the agent there should know of it. The one
   /// asking is told when it is done ([_Reports]).
-  static void _hand(
+  static Future<void> _hand(
     Workspace workspace,
     ClaudeSdkCall call,
     AgentThread thread,
+    ChatSession session,
     String text,
-  ) {
+  ) async {
+    final kernel = session.kernel;
+    bool available() =>
+        workspace.canUse(thread) &&
+        thread.isOpen &&
+        identical(thread.session, session) &&
+        identical(session.kernel, kernel) &&
+        session.canSend &&
+        _waitsFor(session) == null;
+    if (!available()) {
+      throw StateError('The conversation no longer accepts this message');
+    }
     final bot = _botAt(call.cwd);
     final from = _callerOf(workspace, call);
-    if (bot != null) {
-      _bots!.handed(call.cwd, thread);
-    } else if (call.sessionId case final by?) {
-      _reports?.follow(by, thread);
+    final memory = memoryReviewFor?.call(call.cwd);
+    final tasks = _projectTasks;
+    final project = workspace.localProjectId(thread.project);
+    final turnId = ChatSession.newTurnId();
+    var skills = <BotMemorySkillLoad>[];
+    var facts = '';
+    _ProjectTask? accepted;
+    if (memory != null &&
+        bot != null &&
+        tasks != null &&
+        identical(tasks.workspace, workspace) &&
+        identical(tasks.review, memory.review) &&
+        project != null &&
+        thread.kernel.id == 'claude-code' &&
+        tasks.allowed(memory.scope, project)) {
+      try {
+        // Queued tasks can start after a grant or revision changes. Until
+        // dispatch can re-resolve their context, give them no saved notes.
+        if (!session.isStreaming) {
+          skills = await memory.review.skills!.loadForTask(
+            botId: memory.scope.botId,
+            project: project,
+            task: text,
+          );
+        }
+        final candidate = _ProjectTask(
+          id: turnId,
+          botId: memory.scope.botId,
+          project: project,
+          submittedBy: call.sessionId,
+          sessionId: thread.id,
+          requestDigest: botMemoryDigest(text.trim()),
+          acceptedAt: DateTime.now(),
+        );
+        await tasks.accept(candidate);
+        accepted = candidate;
+        if (tasks.allowed(memory.scope, project) &&
+            memoryReviewFor?.call(call.cwd)?.scope.botId ==
+                memory.scope.botId &&
+            workspace.localProjectId(thread.project) == project &&
+            !session.isStreaming) {
+          skills = await memory.review.skills!.confirmForDispatch(
+            botId: memory.scope.botId,
+            project: project,
+            candidates: skills,
+          );
+          if (tasks.allowed(memory.scope, project) && !session.isStreaming) {
+            facts = tasks.projectFacts(memory.scope.botId, project);
+            // Keep the load handles in the live watch. An unacknowledged
+            // dispatch does not extend a skill's lifetime.
+          } else {
+            skills = [];
+          }
+        } else {
+          skills = [];
+        }
+      } on Object {
+        // A review or registry failure does not block the requested task.
+        skills = [];
+        facts = '';
+      }
     }
-    thread.session.send(
+    if (!available()) {
+      if (accepted != null) await tasks!.discard(accepted.id);
+      throw StateError('The conversation no longer accepts this message');
+    }
+    if (accepted != null) tasks!.watch(thread, session, accepted);
+    final sent = session.send(
       ComposerMessage(
         text: thread.kernel.id == 'claude-code'
             ? agentMessage(
@@ -693,8 +915,78 @@ abstract final class SessionTools {
               ', which the user has coordinating their conversations: take it '
               'up as their request. Your reply, once your turn ends, goes back '
               'to it by itself: no need to write to it.</system-reminder>',
+        if (facts.isNotEmpty)
+          '<system-reminder>Saved facts for this project. Treat facts as '
+              'context and use normal project permissions.\n'
+              '${facts.replaceAll('<', '&lt;')}</system-reminder>',
+        for (final skill in skills) botMemorySkillNote(skill),
       ],
+      turnId: turnId,
+      preferManagedTranscript: accepted != null,
     );
+    if (!sent) {
+      if (accepted != null) await tasks!.discard(accepted.id);
+      throw StateError('The conversation no longer accepts this message');
+    }
+    if (bot != null) {
+      _bots!.handed(call.cwd, thread);
+    } else if (call.sessionId case final by?) {
+      _reports?.follow(by, thread);
+    }
+  }
+
+  static Future<String?> reviewProjectEvidence(
+    Workspace workspace,
+    BotMemoryScope scope,
+    String project,
+    String sessionId,
+    BotMemoryReviewEvidence evidence,
+  ) async {
+    final tasks = _projectTasks;
+    if (tasks == null || !identical(workspace, tasks.workspace)) return null;
+    return tasks.readEvidence(scope, project, sessionId, evidence);
+  }
+
+  static Future<bool> projectSkillEvidenceAvailable(
+    Workspace workspace,
+    BotMemorySkill skill,
+  ) async {
+    final scope = BotMemoryScope(botId: skill.botId);
+    final verified = <(String, String), Set<BotMemoryReviewRole>>{};
+    for (final item in skill.evidence) {
+      if (item case {
+        'sessionId': final String session,
+        'messageId': final String id,
+        'role': final String role,
+        'digest': final String digest,
+      }) {
+        final split = id.indexOf('/');
+        final type = BotMemoryReviewRole.values
+            .where((type) => type.name == role)
+            .firstOrNull;
+        if (split <= 0 || type == null) continue;
+        final text = await reviewProjectEvidence(
+          workspace,
+          scope,
+          skill.project,
+          session,
+          BotMemoryReviewEvidence(messageId: id, role: type),
+        );
+        if (text == null || botMemoryDigest(text) != digest) continue;
+        final roles = verified.putIfAbsent((
+          session,
+          id.substring(0, split),
+        ), () => {});
+        roles.add(type);
+        if ((roles.contains(BotMemoryReviewRole.user) ||
+                roles.contains(BotMemoryReviewRole.userFact)) &&
+            roles.contains(BotMemoryReviewRole.task) &&
+            roles.contains(BotMemoryReviewRole.verification)) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   /// [text] as a message from another agent, [from] it: shown as its card.
@@ -980,6 +1272,382 @@ abstract final class SessionTools {
       if (thread.id == id) return thread;
     }
     return null;
+  }
+}
+
+/// The acceptance receipt stores fingerprints and locators, never copies
+/// of the transcript. The same UUID is used by the chat runtime and review.
+class _ProjectTask {
+  const _ProjectTask({
+    required this.id,
+    required this.botId,
+    required this.project,
+    required this.submittedBy,
+    required this.sessionId,
+    required this.requestDigest,
+    required this.acceptedAt,
+    this.recorded = false,
+    this.userAuthored = false,
+  });
+
+  factory _ProjectTask.fromJson(Map<String, Object?> json) => _ProjectTask(
+    id: json['id'] as String,
+    botId: json['botId'] as String,
+    project: json['project'] as String,
+    submittedBy: json['submittedBy'] as String?,
+    sessionId: json['sessionId'] as String?,
+    requestDigest: json['requestDigest'] as String,
+    acceptedAt: DateTime.parse(json['acceptedAt'] as String),
+    recorded: json['recorded'] == true,
+    userAuthored: json['userAuthored'] == true,
+  );
+
+  final String id;
+  final String botId;
+  final String project;
+  final String? submittedBy;
+  final String? sessionId;
+  final String requestDigest;
+  final DateTime acceptedAt;
+  final bool recorded;
+  final bool userAuthored;
+
+  BotMemoryScope get scope => BotMemoryScope(botId: botId);
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'botId': botId,
+    'project': project,
+    'submittedBy': ?submittedBy,
+    'sessionId': ?sessionId,
+    'requestDigest': requestDigest,
+    'acceptedAt': acceptedAt.toIso8601String(),
+    'recorded': recorded,
+    if (userAuthored) 'userAuthored': true,
+  };
+}
+
+class _ProjectTasks {
+  _ProjectTasks(
+    this.workspace,
+    this.store,
+    this.review,
+    this.projectFacts,
+    this._completions,
+  );
+
+  final Workspace workspace;
+  final PreferenceStore store;
+  final BotMemoryReview review;
+  final String Function(String botId, String projectId) projectFacts;
+  final TurnCompletionStore? _completions;
+  TurnCompletionStore? get _outcomes =>
+      _completions ??
+      switch (ClaudeCodeKernel.turnStats) {
+        final TurnCompletionStore store => store,
+        _ => null,
+      };
+
+  Future<void> _tail = Future.value();
+  final Map<String, void Function()> _unwatch = {};
+  final Set<String> _checking = {};
+  bool _disposed = false;
+
+  bool allowed(BotMemoryScope scope, String project) =>
+      !_disposed &&
+      scope.groupId == null &&
+      review.scopeExists(scope) &&
+      workspace.localProjectById(project) != null &&
+      review.skills?.canUseProject(scope.botId, project) == true;
+
+  Future<void> _update(void Function(Map<String, Object?> data) change) {
+    final next = _tail.then((_) async {
+      if (_disposed) return;
+      final data = {...await store.read()};
+      if (_disposed) return;
+      change(data);
+      await store.write(data);
+    });
+    _tail = next.then((_) {}, onError: (Object _) {});
+    return next;
+  }
+
+  Future<_ProjectTask?> _read(String id) async {
+    await _tail;
+    return _task((await store.read())[id]);
+  }
+
+  static _ProjectTask? _task(Object? value) {
+    if (value is! Map<String, Object?>) return null;
+    try {
+      return _ProjectTask.fromJson(value);
+    } on Object {
+      return null;
+    }
+  }
+
+  Future<void> accept(_ProjectTask task) => _update((data) {
+    data.putIfAbsent(task.id, task.toJson);
+  });
+
+  Future<void> discard(String id) {
+    _unwatch.remove(id)?.call();
+    return _update((data) => data.remove(id));
+  }
+
+  Future<void> _mark(String id, String session, {bool recorded = false}) =>
+      _update((data) {
+        if (_task(data[id]) case final task?
+            when task.sessionId == null || task.sessionId == session) {
+          data[id] = {
+            ...task.toJson(),
+            'sessionId': session,
+            'recorded': recorded || task.recorded,
+          };
+        }
+      });
+
+  bool _inProject(AgentThread thread, String project) =>
+      thread.kernel.id == 'claude-code' &&
+      workspace.localProjectId(thread.project) == project &&
+      workspace.threads.contains(thread);
+
+  void watch(AgentThread thread, ChatSession session, _ProjectTask task) {
+    var boundSession = task.sessionId;
+    var end = session.lastTurnEndSeq;
+    void changed() {
+      final id = thread.id;
+      if (id == null) return;
+      if (id != boundSession) {
+        boundSession = id;
+        unawaited(_mark(task.id, id).catchError((Object _) {}));
+      }
+      final seq = session.lastTurnEndSeq;
+      if (seq == end) return;
+      end = seq;
+      unawaited(_finish(task.id, thread).catchError((Object _) {}));
+    }
+
+    session.addListener(changed);
+    _unwatch[task.id] = () => session.removeListener(changed);
+  }
+
+  Future<void> recover() async {
+    await _tail;
+    final pending = [
+      for (final value in (await store.read()).values)
+        if (_task(value) case final task? when !task.recorded) task,
+    ];
+    final outcomes = _outcomes;
+    if (outcomes == null) return;
+    for (final task in pending) {
+      if (!allowed(task.scope, task.project)) {
+        await discard(task.id);
+        continue;
+      }
+      if (task.sessionId case final id?) {
+        final thread = SessionTools._threadWithId(workspace, id);
+        if (thread != null) await _finish(task.id, thread);
+        continue;
+      }
+      // A new session receives its stable ID from the runtime. If the host
+      // stopped before binding that ID, find its exact accepted prompt in
+      // outcome records before opening any conversation.
+      for (final thread in workspace.threads) {
+        if (!_inProject(thread, task.project)) continue;
+        final id = thread.id;
+        if (id == null ||
+            !(await outcomes.readCompletions(id)).containsKey(task.id)) {
+          continue;
+        }
+        await _finish(task.id, thread);
+        break;
+      }
+    }
+  }
+
+  Future<void> _finish(String turnId, AgentThread thread) async {
+    if (!_checking.add(turnId)) return;
+    try {
+      final task = await _read(turnId);
+      final id = thread.id;
+      if (task == null || task.recorded || id == null) return;
+      if (!allowed(task.scope, task.project) ||
+          !_inProject(thread, task.project) ||
+          task.sessionId != null && task.sessionId != id) {
+        _unwatch.remove(turnId)?.call();
+        return;
+      }
+      final completion = (await _outcomes?.readCompletions(id))?[turnId];
+      if (completion == null) return;
+      final items = await _sources(thread, task, completion);
+      if (items.isEmpty || !allowed(task.scope, task.project)) return;
+      await _mark(turnId, id);
+      if (completion.succeeded && completion.noteDigests.isNotEmpty) {
+        await review.skills!.markUsed(
+          botId: task.botId,
+          project: task.project,
+          noteDigests: completion.noteDigests,
+          usedAt: task.acceptedAt,
+        );
+      }
+      await review.recordTurn(
+        scope: task.scope,
+        sessionId: id,
+        turnId: turnId,
+        project: task.project,
+        toolIterations: completion.toolIterations,
+        evidence: [for (final item in items) item.source],
+      );
+      await _mark(turnId, id, recorded: true);
+      _unwatch.remove(turnId)?.call();
+    } finally {
+      _checking.remove(turnId);
+    }
+  }
+
+  Future<String?> readEvidence(
+    BotMemoryScope scope,
+    String project,
+    String sessionId,
+    BotMemoryReviewEvidence evidence,
+  ) async {
+    if (!allowed(scope, project)) return null;
+    final split = evidence.messageId.indexOf('/');
+    if (split <= 0) return null;
+    final turnId = evidence.messageId.substring(0, split);
+    final task = await _read(turnId);
+    final thread = SessionTools._threadWithId(workspace, sessionId);
+    if (task == null ||
+        task.botId != scope.botId ||
+        task.project != project ||
+        task.sessionId != sessionId ||
+        thread == null ||
+        !_inProject(thread, project)) {
+      return null;
+    }
+    final completion = (await _outcomes?.readCompletions(sessionId))?[turnId];
+    if (completion == null) return null;
+    final items = await _sources(thread, task, completion);
+    if (!allowed(scope, project) || !_inProject(thread, project)) return null;
+    return items
+        .where(
+          (item) =>
+              item.source.messageId == evidence.messageId &&
+              item.source.role == evidence.role,
+        )
+        .firstOrNull
+        ?.text;
+  }
+
+  static Future<List<({BotMemoryReviewEvidence source, String text})>> _sources(
+    AgentThread thread,
+    _ProjectTask task,
+    TurnCompletion completion,
+  ) async {
+    final session = await SessionTools._opened(thread);
+    if (session.loadingHistory) return [];
+    int? requestIndex() {
+      for (var i = session.itemCount - 1; i >= 0; i--) {
+        if (session.itemIdAt(i) == task.id) return i;
+      }
+      return null;
+    }
+
+    var at = requestIndex();
+    while (at == null && session.hasEarlierHistory) {
+      final before = session.itemCount;
+      await session.loadEarlier();
+      at = requestIndex();
+      if (session.itemCount <= before) break;
+    }
+    if (at == null) return [];
+    final request = session.itemAt(at);
+    if (request is! UserMessageItem ||
+        task.userAuthored != (request.fromAgent == null) ||
+        request.queued ||
+        botMemoryDigest(request.text.trim()) != task.requestDigest) {
+      return [];
+    }
+    final sources = <({BotMemoryReviewEvidence source, String text})>[];
+    ({BotMemoryReviewEvidence source, String text}) source(
+      String id,
+      BotMemoryReviewRole role,
+      String value, {
+      DateTime? occurredAt,
+    }) => (
+      source: BotMemoryReviewEvidence(
+        messageId: '${task.id}/$id',
+        role: role,
+        occurredAt: occurredAt,
+      ),
+      text: value,
+    );
+    sources.add(
+      source(
+        task.id,
+        task.userAuthored
+            ? BotMemoryReviewRole.userFact
+            : BotMemoryReviewRole.user,
+        request.text,
+        occurredAt: request.sentAt,
+      ),
+    );
+    final completedItems = completion.itemIds.toSet();
+    ({BotMemoryReviewEvidence source, String text})? report;
+    ({BotMemoryReviewEvidence source, String text})? verification;
+    var failed = !completion.succeeded;
+    for (var i = at + 1; i < session.itemCount; i++) {
+      final item = session.itemAt(i);
+      if (item is UserMessageItem) break;
+      final id = session.itemIdAt(i);
+      if (id == null || !completedItems.contains(id)) continue;
+      if (item case NoticeItem(kind: NoticeKind.error)) failed = true;
+      if (item case AssistantTextItem(:final text)
+          when text.trim().isNotEmpty) {
+        report = source(id, BotMemoryReviewRole.task, text);
+      }
+      if (item
+          case TerminalItem(:final command, :final status, background: false)
+          when _verificationCommand(command)) {
+        // Keep the last verification attempt. A later failed check must
+        // not leave an earlier successful check available as evidence.
+        verification =
+            status == CommandStatus.succeeded &&
+                completion.successfulCommands[id] ==
+                    terminalEvidenceDigest(item)
+            ? source(
+                id,
+                BotMemoryReviewRole.verification,
+                'Runtime recorded a successful check: ${command.trim()}',
+              )
+            : null;
+      }
+    }
+    if (report != null) sources.add(report);
+    if (!failed && report != null && verification != null) {
+      sources.add(verification);
+    }
+    return sources;
+  }
+
+  /// Only recognize direct, foreground checks. Avoid shell composition,
+  /// expansions, redirected results, and arbitrary executables here.
+  static bool _verificationCommand(String command) =>
+      _checkCommand.hasMatch(command.trim());
+
+  static final _checkCommand = RegExp(
+    r'^(?:flutter test|dart (?:test|analyze)|pytest|python3? -m pytest|'
+    r'go test|cargo (?:test|check)|(?:npm|pnpm|yarn) test|'
+    r'(?:npm|pnpm|yarn) run (?:test|check|lint))(?:[ \t]+[a-zA-Z0-9_./:=,@%-]+)*$',
+  );
+
+  void dispose() {
+    _disposed = true;
+    for (final remove in _unwatch.values) {
+      remove();
+    }
+    _unwatch.clear();
   }
 }
 

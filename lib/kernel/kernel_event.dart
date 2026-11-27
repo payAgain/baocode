@@ -38,6 +38,7 @@ final class TurnEnded extends KernelEvent {
     this.interrupted = false,
     this.worked,
     this.usage,
+    this.toolIterations = 0,
   });
 
   final String turnId;
@@ -49,6 +50,9 @@ final class TurnEnded extends KernelEvent {
 
   /// What it spent, when known: kept with [worked].
   final TurnUsage? usage;
+
+  /// Top-level model replies that requested at least one tool call.
+  final int toolIterations;
 }
 
 /// Adds the item [id], or replaces it. A [streaming] item is still being

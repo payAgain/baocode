@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 
 import '../bots/desktop_bot_message_row.dart';
 import '../chat/widgets/markdown_view.dart';
+import '../l10n/l10n.dart';
+import '../settings/pages/settings_widgets.dart' show SettingsText;
 import 'desktop_host_chats.dart';
 import 'desktop_remote_media_preview.dart';
 
@@ -60,8 +62,15 @@ class DesktopHostMessageRow extends StatelessWidget {
           if (message.text.isNotEmpty)
             if (message.mine)
               DesktopBotMessageText(message.text, inlineCode: true)
+            else if (message.literal)
+              DesktopBotMessageText(message.text)
             else
               MarkdownView(message.text, textOnly: true),
+          if (message.queued)
+            Text(
+              context.l10n.queuedMessages(1),
+              style: SettingsText.description,
+            ),
         ],
         media: media,
       ),

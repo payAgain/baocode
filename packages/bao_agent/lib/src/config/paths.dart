@@ -8,6 +8,7 @@ class AgentPaths {
   AgentPaths({
     required this.home,
     required this.configDir,
+    this.transcriptProjectsDir,
     String? tempDir,
     this._uid,
   }) : tempDir =
@@ -18,6 +19,7 @@ class AgentPaths {
   factory AgentPaths.from(
     Map<String, String> environment, {
     String? configDir,
+    String? transcriptProjectsDir,
     String? tempDir,
   }) {
     final home = homeOf(environment);
@@ -28,7 +30,12 @@ class AgentPaths {
           environment['CLAUDE_CONFIG_DIR'],
         ].whereType<String>().where((dir) => dir.isNotEmpty).firstOrNull ??
         p.join(home, '.claude');
-    return AgentPaths(home: home, configDir: config, tempDir: tempDir);
+    return AgentPaths(
+      home: home,
+      configDir: config,
+      transcriptProjectsDir: transcriptProjectsDir,
+      tempDir: tempDir,
+    );
   }
 
   /// The user's home directory as [environment] says.
@@ -46,6 +53,9 @@ class AgentPaths {
 
   /// `~/.claude`, unless moved.
   final String configDir;
+
+  /// A host's separate root for persisted transcripts, when provided.
+  final String? transcriptProjectsDir;
 
   /// Where tasks' output goes.
   final String tempDir;
@@ -85,19 +95,52 @@ class AgentPaths {
     return '${dashed.substring(0, 200)}-${hash.toRadixString(36)}';
   }
 
-  String sessionFile(String cwd, String sessionId) =>
-      p.join(projectDir(cwd), '$sessionId.jsonl');
+  String sessionFile(String cwd, String sessionId) => p.join(
+    transcriptProjectsDir ?? projectsDir,
+    projectDirName(cwd),
+    _sessionFilename(sessionId),
+  );
 
-  /// The session [sessionId]'s file, wherever its project is; null when
-  /// there is none.
-  String? findSession(String sessionId) {
-    final projects = Directory(projectsDir);
-    if (!projects.existsSync()) return null;
-    for (final project in projects.listSync().whereType<Directory>()) {
-      final file = File(p.join(project.path, '$sessionId.jsonl'));
-      if (file.existsSync()) return file.path;
+  /// Finds [sessionId]'s transcript, restricted to its project when [cwd]
+  /// is given. A host's transcript root never falls back to config projects.
+  String? findSession(String sessionId, {String? cwd}) {
+    final managed = transcriptProjectsDir != null;
+    final name = _sessionFilename(sessionId);
+    final projects = Directory(transcriptProjectsDir ?? projectsDir);
+    if (managed ? !_isDirectory(projects.path) : !projects.existsSync()) {
+      return null;
+    }
+    final dirs = cwd == null
+        ? projects.listSync(followLinks: !managed).whereType<Directory>()
+        : [Directory(p.join(projects.path, projectDirName(cwd)))];
+    for (final project in dirs) {
+      final file = File(p.join(project.path, name));
+      if (managed) {
+        if (_isDirectory(project.path) &&
+            FileSystemEntity.typeSync(file.path, followLinks: false) ==
+                FileSystemEntityType.file) {
+          return file.path;
+        }
+      } else if (file.existsSync()) {
+        return file.path;
+      }
     }
     return null;
+  }
+
+  static bool _isDirectory(String path) =>
+      FileSystemEntity.typeSync(path, followLinks: false) ==
+      FileSystemEntityType.directory;
+
+  String _sessionFilename(String sessionId) {
+    if (transcriptProjectsDir != null &&
+        (sessionId.isEmpty ||
+            sessionId == '.' ||
+            sessionId == '..' ||
+            sessionId.contains(RegExp(r'[/\\:\x00]')))) {
+      throw ArgumentError.value(sessionId, 'sessionId', 'Invalid session ID');
+    }
+    return '$sessionId.jsonl';
   }
 
   /// Where the tasks of [sessionId], run in [cwd], write what they print.

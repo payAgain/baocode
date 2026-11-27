@@ -1,6 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:baocode/bots/bot_folders.dart';
+import 'package:baocode/bots/bot_memory.dart';
+import 'package:baocode/bots/bot_memory_review.dart';
+import 'package:baocode/bots/bot_memory_skill.dart';
 import 'package:baocode/chat/chat_models.dart';
 import 'package:baocode/chat/chat_session.dart';
 import 'package:baocode/kernel/agent_kernel.dart';
@@ -8,6 +13,8 @@ import 'package:baocode/kernel/claude_code/claude_code_kernel.dart';
 import 'package:baocode/kernel/claude_code/claude_code_transport.dart';
 import 'package:baocode/kernel/claude_code/claude_sdk_tools.dart';
 import 'package:baocode/kernel/claude_code/mock_claude_code_transport.dart';
+import 'package:baocode/kernel/claude_code/turn_stats_io.dart';
+import 'package:baocode/workspace/preference_store.dart';
 import 'package:baocode/workspace/session_tools.dart';
 import 'package:baocode/workspace/workspace.dart';
 import 'package:flutter/material.dart';
@@ -74,13 +81,14 @@ void main() {
     String tool,
     Map<String, Object?> arguments, {
     String? from,
+    String? cwd,
   }) async {
     final answer = await ClaudeSdkTools.handle({
       'jsonrpc': '2.0',
       'id': 2,
       'method': 'tools/call',
       'params': {'name': tool, 'arguments': arguments},
-    }, ClaudeSdkCall(cwd: app, sessionId: from));
+    }, ClaudeSdkCall(cwd: cwd ?? app, sessionId: from));
     final result = answer['result'] as Map;
     return ((result['content'] as List).single as Map)['text'] as String;
   }
@@ -419,6 +427,192 @@ void main() {
     );
   });
 
+  test(
+    'project task recovery binds verified output to the accepted Bot turn',
+    () async {
+      final previous = ClaudeCodeKernel.turnStats;
+      final stats = TurnStatsFiles(p.join(app, 'outcomes'));
+      ClaudeCodeKernel.turnStats = stats;
+      addTearDown(() => ClaudeCodeKernel.turnStats = previous);
+      final project = workspace.localProjectId(workspace.projectAt(app))!;
+      final botCwd = p.join(app, 'bots', 'mia');
+      final bot = _TaskBot(botCwd);
+      const scope = BotMemoryScope(botId: 'mia');
+      const other = BotMemoryScope(botId: 'other');
+      final tasks = _GatedTaskStore(p.join(app, 'project-tasks.json'));
+      final skills = BotMemorySkills(
+        store: MemoryPreferenceStore(),
+        folders: MemoryBotFolders(),
+        root: '/skills',
+        canUseProject: (_, id) => id == project,
+      );
+      final requests = <List<Object?>>[];
+      final review = BotMemoryReview(
+        store: MemoryPreferenceStore(),
+        scopeExists: (id) => id == scope || id == other,
+        foregroundBusy: () => false,
+        readMemory: (_) => BotMemory.fromMarkdown(''),
+        readEvidence: (_, _, _) async => null,
+        readProjectEvidence: (scope, project, session, source) =>
+            SessionTools.reviewProjectEvidence(
+              workspace,
+              scope,
+              project,
+              session,
+              source,
+            ),
+        applyMemory: (
+          _,
+          changes, {
+          required sessionId,
+          required messageId,
+          required operationId,
+          required changeSources,
+        }) => fail('Unexpected facts'),
+        skills: skills,
+        ask: (request) async {
+          requests.add(
+            (jsonDecode(request.prompt) as Map)['conversation']
+                as List<Object?>,
+          );
+          return '{"proposals": []}';
+        },
+      );
+      Future<void> restore() async {
+        SessionTools.register(workspace, bots: bot);
+        SessionTools.memoryReviewFor = (cwd) =>
+            cwd == botCwd ? (scope: scope, review: review) : null;
+        SessionTools.projectTaskBots = () => [(id: scope.botId, name: 'Mia')];
+        await SessionTools.recoverProjectTasks(
+          workspace,
+          store: tasks,
+          review: review,
+          projectFacts: (_, _) => '',
+          completions: stats,
+        );
+      }
+
+      await restore();
+      final removed = workspace.startAgent(workspace.projectAt(app));
+      final stale = removed.session;
+      final accepting = Completer<void>();
+      final resumeAccept = Completer<void>();
+      tasks.beforeWrite = () async {
+        accepting.complete();
+        await resumeAccept.future;
+      };
+      final handoff = call(
+        'session_send',
+        {'session': SessionTools.idOf(removed), 'text': 'stale request'},
+        from: 'bot-session',
+        cwd: botCwd,
+      );
+      await accepting.future;
+      await workspace.delete(removed);
+      resumeAccept.complete();
+      expect(await handoff, contains('no longer accepts this message'));
+      expect(await tasks.read(), isEmpty);
+      expect(stale.itemCount, 0);
+      expect(launches, isEmpty);
+
+      Future<AgentThread> delegate(String text) async => started(
+        await call(
+          'session_new',
+          {'project': app, 'text': text},
+          from: 'bot-session',
+          cwd: botCwd,
+        ),
+      );
+      final checked = await delegate('Run verification (quick) (verified)');
+      final asserted = await delegate('Only report success (quick)');
+      final ordinary = workspace.startAgent(workspace.projectAt(app));
+      await expectLater(
+        SessionTools.sendProjectTask(ordinary, other.botId, 'Unbound task'),
+        throwsStateError,
+      );
+      const userText = 'Project preflight is mandatory. Check it (quick)';
+      await SessionTools.sendProjectTask(ordinary, scope.botId, userText);
+      expect(await tasks.read(), hasLength(3));
+      SessionTools.unregister();
+      await until(
+        () =>
+            !checked.session.isStreaming &&
+            !asserted.session.isStreaming &&
+            !ordinary.session.isStreaming,
+      );
+      await restore();
+      await restore();
+      await review.refine(
+        scope: scope,
+        sessionId: checked.id,
+        project: project,
+      );
+      await review.refine(
+        scope: scope,
+        sessionId: asserted.id,
+        project: project,
+      );
+      await review.runNext();
+      await review.runNext();
+      final evidence = [for (final request in requests) ...request.cast<Map>()];
+      expect(
+        evidence.where((item) => item['role'] == 'verification').single['text'],
+        'Runtime recorded a successful check: flutter test',
+      );
+      expect(evidence.where((item) => item['role'] == 'user'), hasLength(2));
+      final accepted = (await tasks.read()).values.cast<Map>().singleWhere(
+        (row) => row['sessionId'] == checked.id,
+      );
+      final id = accepted['id'] as String;
+      expect(accepted['submittedBy'], 'bot-session');
+      expect(accepted['recorded'], true);
+      final ordinaryRow = (await tasks.read()).values.cast<Map>().singleWhere(
+        (row) => row['sessionId'] == ordinary.id,
+      );
+      final ordinaryTurn = ordinaryRow['id'] as String;
+      final userFact = BotMemoryReviewEvidence(
+        messageId: '$ordinaryTurn/$ordinaryTurn',
+        role: BotMemoryReviewRole.userFact,
+      );
+      expect(
+        await SessionTools.reviewProjectEvidence(
+          workspace,
+          scope,
+          project,
+          ordinary.id!,
+          userFact,
+        ),
+        userText,
+      );
+      expect(
+        await SessionTools.reviewProjectEvidence(
+          workspace,
+          scope,
+          project,
+          checked.id!,
+          BotMemoryReviewEvidence(
+            messageId: '$id/$id',
+            role: BotMemoryReviewRole.userFact,
+          ),
+        ),
+        isNull,
+      );
+      expect(
+        await SessionTools.reviewProjectEvidence(
+          workspace,
+          other,
+          project,
+          checked.id!,
+          BotMemoryReviewEvidence(
+            messageId: '$id/$id',
+            role: BotMemoryReviewRole.user,
+          ),
+        ),
+        isNull,
+      );
+    },
+  );
+
   test('turned off, an agent at work can no longer act on the others, '
       'and those it handed work report nothing', () async {
     final boss = await lead();
@@ -436,6 +630,43 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 300));
     expect(fromAgents(boss), isEmpty);
   });
+}
+
+class _GatedTaskStore implements PreferenceStore {
+  _GatedTaskStore(String path) : _store = PreferenceStore.file(path);
+
+  final PreferenceStore _store;
+  Future<void> Function()? beforeWrite;
+
+  @override
+  Future<Map<String, Object?>> read() => _store.read();
+
+  @override
+  Future<void> write(Map<String, Object?> preferences) async {
+    final gate = beforeWrite;
+    beforeWrite = null;
+    if (gate != null) await gate();
+    await _store.write(preferences);
+  }
+}
+
+class _TaskBot implements SessionToolsBots {
+  _TaskBot(this.cwd);
+
+  final String cwd;
+  final _handed = <AgentThread>{};
+
+  @override
+  String? botNameAt(String path) => path == cwd ? 'Mia' : null;
+
+  @override
+  void handed(String cwd, AgentThread thread) => _handed.add(thread);
+
+  @override
+  Set<AgentThread> handedBy(String cwd) => _handed;
+
+  @override
+  String toldOf(String cwd) => 'Project task.';
 }
 
 /// The mock's, each launch under a session id of its own. A message with
@@ -529,6 +760,37 @@ class _OwnSession implements ClaudeCodeTransport {
       Timer(const Duration(milliseconds: 100), () {
         if (!_running) return;
         _running = false;
+        if (text.contains('(verified)')) {
+          final callId = 'toolu_check${++_count}';
+          _emit({
+            'type': 'assistant',
+            'message': {
+              'id': 'msg_check$_count',
+              'content': [
+                {
+                  'type': 'tool_use',
+                  'id': callId,
+                  'name': 'Bash',
+                  'input': {'command': 'flutter test'},
+                },
+              ],
+            },
+          });
+          _emit({
+            'type': 'user',
+            'message': {
+              'role': 'user',
+              'content': [
+                {
+                  'type': 'tool_result',
+                  'tool_use_id': callId,
+                  'content': '1 test passed',
+                  'is_error': false,
+                },
+              ],
+            },
+          });
+        }
         _emit({
           'type': 'assistant',
           'message': {

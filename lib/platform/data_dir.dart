@@ -99,6 +99,9 @@ class DataDirectory {
   /// summaries of Claude Code's sessions).
   String get cacheDir => p.join(path, 'cache');
 
+  /// Private search index shards rebuilt from bot conversation history.
+  String get botHistoryIndexDir => p.join(cacheDir, 'bot-history');
+
   /// The pastes too long to go in a message, which it names for the agent
   /// to read instead (see paste_store.dart): kept, as the conversations
   /// that name them are.

@@ -51,12 +51,15 @@ class EngineOptions {
     this.environment = const {},
     this.rootCertificates = const [],
     this.configDir,
+    this.transcriptProjectsDir,
     this.productName = 'BaoCode',
     this.systemPrompt,
+    this.refreshSystemPromptOnCompaction = false,
     this.coreSystemPrompt,
     this.tools,
     this.maxTurns,
     this.strictMcpConfig = false,
+    this.restrictedContext = false,
     this.slashCommands = true,
     this.canAsk = true,
   });
@@ -82,14 +85,18 @@ class EngineOptions {
     },
     rootCertificates: [...asList(json['rootCertificates']).whereType<String>()],
     configDir: asText(json['configDir']),
+    transcriptProjectsDir: asString(json['transcriptProjectsDir']),
     productName: asText(json['productName']) ?? 'BaoCode',
     systemPrompt: asString(json['systemPrompt']),
+    refreshSystemPromptOnCompaction:
+        json['refreshSystemPromptOnCompaction'] == true,
     coreSystemPrompt: asString(json['coreSystemPrompt']),
     tools: json['tools'] is List
         ? [...asList(json['tools']).whereType<String>()]
         : null,
     maxTurns: asInt(json['maxTurns']),
     strictMcpConfig: json['strictMcpConfig'] == true,
+    restrictedContext: json['restrictedContext'] == true,
     slashCommands: json['slashCommands'] != false,
     canAsk: json['canAsk'] != false,
   );
@@ -138,11 +145,16 @@ class EngineOptions {
   /// Where Claude Code's files are, if not where the environment says.
   final String? configDir;
 
+  /// A trusted host's projects directory for persisted session transcripts.
+  /// The user's configuration and memory still use [configDir].
+  final String? transcriptProjectsDir;
+
   /// What the agent is built into, as the system prompt names it.
   final String productName;
 
   /// The system prompt in place of the agent's own (`--system-prompt`).
   final String? systemPrompt;
+  final bool refreshSystemPromptOnCompaction;
 
   /// Replaces the agent's own default core instructions while keeping memory,
   /// output style, budget, and any appended host instructions.
@@ -156,6 +168,9 @@ class EngineOptions {
 
   /// Only the servers given here, none of the user's (`--strict-mcp-config`).
   final bool strictMcpConfig;
+
+  /// Whether this host-owned session skips local plugins and instructions.
+  final bool restrictedContext;
 
   /// Whether `/name` runs a command (`--disable-slash-commands` when not).
   final bool slashCommands;
@@ -183,12 +198,15 @@ class EngineOptions {
     'environment': environment,
     'rootCertificates': rootCertificates,
     'configDir': ?configDir,
+    'transcriptProjectsDir': ?transcriptProjectsDir,
     'productName': productName,
     'systemPrompt': ?systemPrompt,
+    'refreshSystemPromptOnCompaction': refreshSystemPromptOnCompaction,
     'coreSystemPrompt': ?coreSystemPrompt,
     'tools': ?tools,
     'maxTurns': ?maxTurns,
     'strictMcpConfig': strictMcpConfig,
+    'restrictedContext': restrictedContext,
     'slashCommands': slashCommands,
     'canAsk': canAsk,
   };
@@ -216,10 +234,15 @@ class AgentSession {
     required this.options,
     required this._emit,
     required this.hostRequest,
+    this._readSystemPrompt,
     ModelClient Function(ApiConfig config)? clientFactory,
   }) : cwd = p.normalize(options.cwd),
        _clientFactory = clientFactory ?? AnthropicClient.new {
-    paths = AgentPaths.from(options.environment, configDir: options.configDir);
+    paths = AgentPaths.from(
+      options.environment,
+      configDir: options.configDir,
+      transcriptProjectsDir: options.transcriptProjectsDir,
+    );
     settings = AgentSettings(
       paths: paths,
       cwd: cwd,
@@ -250,6 +273,27 @@ class AgentSession {
     Map<String, Object?> fields,
   )
   hostRequest;
+
+  final Future<({String text, String requestId})?> Function({
+    required bool onlyWithdrawn,
+  })?
+  _readSystemPrompt;
+  String? _systemPromptOverride;
+  String? get systemPrompt => _systemPromptOverride ?? options.systemPrompt;
+
+  Future<String?> refreshSystemPrompt({bool onlyWithdrawn = false}) async {
+    final read = _readSystemPrompt;
+    if (read == null || options.systemPrompt == null) return null;
+    final prompt = await read(onlyWithdrawn: onlyWithdrawn);
+    if (prompt == null) return null;
+    _systemPromptOverride = prompt.text;
+    if (onlyWithdrawn) {
+      emitSystem('host_prompt_applied', {
+        'prompt_request_id': prompt.requestId,
+      });
+    }
+    return prompt.requestId;
+  }
 
   late final PermissionEngine permissions;
   late final FileCheckpoints checkpoints;

@@ -3,11 +3,13 @@ library;
 
 import 'dart:io';
 
+import 'package:bao_remote/local.dart' show ClaudeRuntime, ManagedClaude;
 import 'package:baocode/kernel/claude_code/claude_code_transport.dart';
 import 'package:baocode/kernel/claude_code/claude_core_setting.dart';
 import 'package:baocode/kernel/claude_code/claude_environment.dart';
 import 'package:baocode/kernel/claude_code/claude_path_setting.dart';
 import 'package:baocode/kernel/claude_code/dart_core_transport_io.dart';
+import 'package:baocode/kernel/claude_code/local_claude_io.dart';
 import 'package:baocode/kernel/claude_code/process_transport_io.dart';
 import 'package:baocode/network/network_proxy_io.dart';
 import 'package:baocode/network/proxy_settings.dart';
@@ -120,6 +122,45 @@ void main() {
         containsAllInOrder(['-p', '--input-format', 'stream-json']),
       );
     });
+
+    for (final (version, supportsSnapshotFlag) in [
+      ('2.1.256', false),
+      ('2.1.257', true),
+    ]) {
+      test('CLI $version Bot resume selects the supported prompt flags', () async {
+        environment();
+        LocalClaude.runtime = ClaudeRuntime(
+          managed: ManagedClaude(p.join(root.path, 'managed')),
+          platform: 'darwin-arm64',
+          named: (_) => (path: p.join(root.path, 'claude'), undo: 'test'),
+        );
+        addTearDown(() => LocalClaude.runtime = null);
+        File(p.join(root.path, 'claude')).writeAsStringSync(
+          '#!/bin/sh\n'
+          'if [ "\$1" = --version ]; then echo "$version (Claude Code)"; exit; fi\n'
+          'printf "%s\\n" "\$@" > "${args.path}"\n',
+        );
+        final transport = await ProcessTransport.start(
+          ClaudeLaunch(
+            cwd: cwd,
+            resume: 'bot-session',
+            instructions: 'Refreshed bot prompt',
+            ownPrompt: true,
+            refreshSystemPromptOnCompaction: true,
+          ),
+        );
+        await transport.exited.timeout(const Duration(seconds: 10));
+        final arguments = args.readAsLinesSync();
+        expect(arguments, containsAllInOrder(['--resume', 'bot-session']));
+        expect(arguments, contains('--system-prompt-file'));
+        expect(
+          arguments,
+          supportsSnapshotFlag
+              ? containsAllInOrder(['--system-prompt-snapshot', 'off'])
+              : isNot(contains('--system-prompt-snapshot')),
+        );
+      });
+    }
 
     test('built-in core custom system prompt modes wire into engineOptions', () async {
       environment();

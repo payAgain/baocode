@@ -60,6 +60,28 @@ void main() {
     expect(messages.every((m) => m['session_id'] != null), isTrue);
   });
 
+  test('tool iterations count responses containing tools', () async {
+    h = await Harness.start(
+      files: {'a.txt': 'A', 'b.txt': 'B', 'c.txt': 'C'},
+      script: [
+        Reply([
+          for (final name in ['a', 'b'])
+            {
+              'type': 'tool_use',
+              'id': 'toolu_$name',
+              'name': 'Read',
+              'input': {'file_path': '$name.txt'},
+            },
+        ]),
+        Reply.tool('Read', {'file_path': 'c.txt'}),
+        Reply.text('Read all three files.'),
+      ],
+    );
+    await h.turn('Read the files');
+    expect(h.lastResult['num_turns'], 3);
+    expect(h.lastResult['tool_iterations'], 2);
+  });
+
   test(
     'the session file: a chain of lines as Claude Code writes them',
     () async {
@@ -169,6 +191,56 @@ void main() {
     expect(jsonDecode(session.apiConfig().userId!), {
       'session_id': session.sessionId,
     });
+  });
+
+  test('restricted host sessions omit workspace memory and hooks', () async {
+    h = await Harness.start(
+      files: {'CLAUDE.md': 'The workspace memory must not reach this room.'},
+      settings: {
+        'hooks': {
+          'UserPromptSubmit': [
+            {
+              'hooks': [
+                {'type': 'command', 'command': 'echo unexpected-hook-result'},
+              ],
+            },
+          ],
+        },
+      },
+      systemPrompt: 'You are an agent. Reply in this room.',
+      restrictedContext: true,
+      strictMcpConfig: true,
+      tools: [],
+      script: [Reply.text('Hello.')],
+    );
+    await h.turn('Room message');
+    final request = h.model.turns.single;
+    final body = jsonEncode(request.body);
+    expect(body, contains('Reply in this room.'));
+    expect(body, isNot(contains('The workspace memory')));
+    expect(body, isNot(contains('unexpected-hook-result')));
+    expect(request.body['tools'] ?? const [], isEmpty);
+  });
+
+  test('restricted host sessions leave @ mentions as plain text', () async {
+    h = await Harness.start(
+      files: {'notes/private.txt': 'Private workspace contents'},
+      systemPrompt: 'You are an agent. Reply in this room.',
+      restrictedContext: true,
+      strictMcpConfig: true,
+      tools: [],
+      script: [Reply.text('Hello.')],
+    );
+    const message = 'Look at @notes/private.txt and @notes/';
+    await h.turn(message);
+    final sent = requestText(h.model.turns.single);
+    expect(sent, contains(message));
+    expect(sent, isNot(contains('Private workspace contents')));
+    expect(sent, isNot(contains('The user mentioned the folder')));
+    expect(
+      h.engine.session.mainRun.readFiles[p.join(h.cwd, 'notes/private.txt')],
+      isNull,
+    );
   });
 
   test('images and @-mentioned files go to the model', () async {
@@ -418,6 +490,90 @@ void main() {
     expect(asked, contains('The answer is 42.'));
     expect(h.lastResult['session_id'], id);
   });
+
+  test(
+    'managed transcripts share configuration but resume only in their project',
+    () async {
+      const id = 'a3da19b6-9c8c-4a2b-92b5-f267b398bddc';
+      h = await Harness.start(
+        sessionId: id,
+        settings: {
+          'env': {'ANTHROPIC_BASE_URL': 'https://shared-settings.invalid'},
+        },
+        script: [Reply.text('Legacy answer')],
+      );
+      await h.turn('Legacy question');
+      await h.engine.close();
+      final legacy = File(h.sessionFile);
+      final legacyText = legacy.readAsStringSync();
+      File(p.join(h.config, 'skills', 'shared-config', 'SKILL.md'))
+        ..createSync(recursive: true)
+        ..writeAsStringSync('Say hello from the shared config.');
+      final projects = p.join(h.root, 'managed', 'projects');
+
+      final managed = await Harness.start(
+        from: h,
+        sessionId: id,
+        transcriptProjectsDir: projects,
+        script: [Reply.text('Managed answer')],
+      );
+      addTearDown(managed.dispose);
+      await managed.turn('Managed question');
+      expect(managed.lastResult['session_id'], id);
+      final session = managed.engine.session;
+      final path = p.join(
+        projects,
+        p.basename(legacy.parent.path),
+        '$id.jsonl',
+      );
+      expect(session.store.file, path);
+      expect(File(path).readAsStringSync(), contains('Managed answer'));
+      expect(session.apiConfig().baseUrl, 'https://shared-settings.invalid');
+      expect(
+        session.promptCommands.map((command) => command.name),
+        contains('shared-config'),
+      );
+      expect(session.autoMemoryDir, p.join(legacy.parent.path, 'memory'));
+      expect(session.paths.findSession(id), path);
+      final options = EngineOptions.fromJson(managed.engine.options.toJson());
+      expect(options.transcriptProjectsDir, projects);
+      expect(options.configDir, h.config);
+      expect(options.sessionId, id);
+      await managed.engine.close();
+
+      final resumed = await Harness.start(
+        from: h,
+        resume: id,
+        transcriptProjectsDir: projects,
+        script: [Reply.text('Managed followup')],
+      );
+      addTearDown(resumed.dispose);
+      await resumed.turn('What did you say?');
+      final asked = requestText(resumed.model.turns.single);
+      expect(asked, contains('Managed question'));
+      expect(asked, contains('Managed answer'));
+      expect(asked, isNot(contains('Legacy')));
+      await resumed.engine.close();
+      expect(legacy.readAsStringSync(), legacyText);
+
+      final otherProject = Directory(p.join(projects, 'other-project'))
+        ..createSync();
+      File(path).renameSync(p.join(otherProject.path, '$id.jsonl'));
+      final missing = await Harness.start(
+        from: h,
+        resume: id,
+        transcriptProjectsDir: projects,
+      );
+      addTearDown(missing.dispose);
+      await expectLater(missing.request('initialize'), throwsStateError);
+      await missing.turn('Do not fall back');
+      expect(missing.lastResult['is_error'], isTrue);
+      expect(missing.lastResult['result'], contains('Managed transcript'));
+      expect(missing.model.turns, isEmpty);
+      expect(File(path).existsSync(), isFalse);
+      expect(legacy.readAsStringSync(), legacyText);
+    },
+  );
 
   test('prompt suggestions and a title, when asked for', () async {
     h = await Harness.start(

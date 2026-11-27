@@ -23,6 +23,8 @@ class Harness {
     Map<String, Object?> flagSettings = const {},
     String? permissionMode,
     String? resume,
+    String? sessionId,
+    String? transcriptProjectsDir,
     Harness? from,
     bool promptSuggestions = false,
     Map<String, String> environment = const {},
@@ -32,6 +34,9 @@ class Harness {
     String? effort,
     String? thinkingDisplay,
     bool strictMcpConfig = false,
+    bool restrictedContext = false,
+    bool refreshSystemPromptOnCompaction = false,
+    List<String>? tools,
     bool firstParty = true,
     String? systemPrompt,
     String? coreSystemPrompt,
@@ -60,6 +65,8 @@ class Harness {
       EngineOptions(
         cwd: cwd,
         resume: resume,
+        sessionId: sessionId,
+        transcriptProjectsDir: transcriptProjectsDir,
         permissionMode: permissionMode,
         flagSettings: flagSettings,
         promptSuggestions: promptSuggestions,
@@ -69,6 +76,9 @@ class Harness {
         effort: effort,
         thinkingDisplay: thinkingDisplay,
         strictMcpConfig: strictMcpConfig,
+        restrictedContext: restrictedContext,
+        refreshSystemPromptOnCompaction: refreshSystemPromptOnCompaction,
+        tools: tools,
         systemPrompt: systemPrompt,
         coreSystemPrompt: coreSystemPrompt,
         appendSystemPrompt: appendSystemPrompt,
@@ -111,6 +121,9 @@ class Harness {
   Future<Map<String, Object?>> Function(Map<String, Object?> request)?
   onRequest;
 
+  /// How the host confirms a Bot prompt before each request.
+  Future<Map<String, Object?>> Function()? onPromptCheck;
+
   /// The permission requests the engine made.
   final List<Map<String, Object?>> permissionRequests = [];
 
@@ -135,9 +148,16 @@ class Harness {
                       'updatedInput': request['input'],
                     }));
           } else {
-            response =
-                await (onRequest?.call(request) ??
-                    Future.value(const <String, Object?>{}));
+            final check = request['subtype'] == 'check_system_prompt';
+            final answer = await (check
+                ? onPromptCheck?.call()
+                : onRequest?.call(request));
+            response = {
+              if (check) 'valid': true,
+              ...?answer,
+              if (answer?.containsKey('system_prompt') == true)
+                'prompt_request_id': id,
+            };
           }
         } on Object catch (error) {
           engine.receive({

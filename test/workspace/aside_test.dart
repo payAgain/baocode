@@ -9,10 +9,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:bao_markdown/bao_markdown.dart';
+import 'package:baocode/chat/chat_history_view.dart';
 import 'package:baocode/chat/chat_models.dart';
 import 'package:baocode/chat/chat_session.dart';
 import 'package:baocode/chat/composer/composer_controller.dart';
 import 'package:baocode/chat/widgets/agent_step.dart';
+import 'package:baocode/ide/ide_find_widget.dart';
 import 'package:baocode/ide/ide_hover.dart';
 import 'package:baocode/ide/ide_list.dart';
 import 'package:baocode/kernel/agent_kernel.dart';
@@ -258,12 +260,23 @@ void main() {
     final kept = await _showKept(tester, workspace);
     final aside = await _askBeside(tester, workspace, kept, 'First aside');
 
+    // The parent's search stays open when returning, but its floating bar
+    // must not outlive the visible conversation in the overlay.
+    final history = tester.widget<ChatHistoryView>(
+      find.byType(ChatHistoryView),
+    );
+    ChatHistoryView.find(history.key! as GlobalKey, query: 'First');
+    await tester.pumpAndSettle();
+    final searchBar = find.byType(IdeFindWidget);
+    expect(searchBar, findsOneWidget);
+
     // From its card.
     await tester.tap(find.widgetWithText(AgentStep, 'First aside'));
     await tester.pumpAndSettle(const Duration(milliseconds: 50));
     expect(workspace.current, same(aside));
     expect(workspace.grid.contains(aside), isTrue);
     expect(workspace.grid.contains(kept), isFalse);
+    expect(searchBar, findsNothing);
 
     // Asked from the aside: beside the same parent.
     for (var i = 0; i < 20 && aside.session.forkEndsAt == null; i++) {
@@ -282,6 +295,10 @@ void main() {
     expect(workspace.current, same(kept));
     expect(workspace.grid.contains(kept), isTrue);
     expect(workspace.grid.contains(aside), isFalse);
+    expect(
+      tester.widget<IdeFindWidget>(searchBar).findController.text,
+      'First',
+    );
     await _stopAll(tester, workspace);
   });
 
@@ -392,8 +409,7 @@ void main() {
     expect(workspace.current, same(kept));
     workspace.setArchived(deleted, false);
 
-    workspace.delete(kept);
-    await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+    await tester.runAsync(() => workspace.delete(kept));
     expect(workspace.threads, isNot(contains(deleted)));
     expect(workspace.threads, contains(detached));
     await tester.runAsync(

@@ -25,11 +25,15 @@ abstract interface class BotFolders {
   /// The files right in [folder]; none when there is no such folder.
   List<String> filesIn(String folder);
 
-  /// The file at [path]; null when there is none.
-  Uint8List? readFile(String path);
+  /// The file at [path], or null when it does not exist. Strict reads
+  /// propagate other filesystem errors.
+  Uint8List? readFile(String path, {bool strict = false});
 
   /// [bytes] at [path], over what is there.
   void writeFile(String path, Uint8List bytes);
+
+  /// Replaces a file in one step; throws if the new contents could not be kept.
+  void writeFileAtomically(String path, Uint8List bytes);
   void deleteFile(String path);
 }
 
@@ -65,13 +69,17 @@ class MemoryBotFolders implements BotFolders {
   ]..sort();
 
   @override
-  Uint8List? readFile(String path) => files[path];
+  Uint8List? readFile(String path, {bool strict = false}) => files[path];
 
   @override
   void writeFile(String path, Uint8List bytes) {
     made.add(p.dirname(path));
     files[path] = bytes;
   }
+
+  @override
+  void writeFileAtomically(String path, Uint8List bytes) =>
+      writeFile(path, bytes);
 
   @override
   void deleteFile(String path) => files.remove(path);

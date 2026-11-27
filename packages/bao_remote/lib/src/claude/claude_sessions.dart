@@ -125,12 +125,22 @@ class ClaudeSessions {
   /// host asks as the app starts), it is listed once more after, for all
   /// who asked. A listing each had every long session read as many times
   /// at once, and took a server's memory whole.
-  Future<List<ClaudeProjectSummary>> projects() async {
-    final root = '${await _config()}/projects';
-    final cache = cacheFile;
-    final key = '$cache\n$root';
-    Future<List<ClaudeProjectSummary>> scan() =>
-        _scanning[key] = Isolate.run(() => _scan(root, cache)).whenComplete(() {
+  Future<List<ClaudeProjectSummary>> projects() async =>
+      _projects('${await _config()}/projects', followLinks: true);
+
+  /// Lists a host-owned root without following links or writing titles and
+  /// summaries to a separate cache.
+  Future<List<ClaudeProjectSummary>> projectsAt(String root) =>
+      _projects(root, followLinks: false);
+
+  Future<List<ClaudeProjectSummary>> _projects(
+    String root, {
+    required bool followLinks,
+  }) async {
+    final cache = followLinks ? cacheFile : null;
+    final key = '$cache\n$root\n$followLinks';
+    Future<List<ClaudeProjectSummary>> scan() => _scanning[key] =
+        Isolate.run(() => _scan(root, cache, followLinks)).whenComplete(() {
           // Not returned: it is this very future, which would be waited for.
           _scanning.remove(key);
         });
@@ -219,6 +229,62 @@ class ClaudeSessions {
     return Isolate.run(() => _fork(id, into, config, before, title));
   }
 
+  /// Reads goal lines from the exact transcript selected by the host.
+  static Future<List<Map<String, Object?>>> goalAt(String path) =>
+      Isolate.run(() => _goalFile(File(path)));
+
+  /// Forks the exact transcript selected by the host into [target]. The host
+  /// must hold both writer leases and validate both paths under its own root.
+  static Future<String> forkAt(
+    String path,
+    String target,
+    String into, {
+    String? before,
+    String? title,
+  }) {
+    _checkId(into);
+    return Isolate.run(
+      () => _forkFile(File(path), into, before, title, target),
+    );
+  }
+
+  /// The recorded working directory, even if the folder has moved.
+  static Future<String?> cwdAt(String path) => Isolate.run(() {
+    final file = File(path);
+    return file.existsSync() ? _cwdOf(file.readAsStringSync()) : null;
+  });
+
+  /// Relocates one host-owned transcript under the caller's writer lease.
+  static Future<void> moveAt(
+    String path,
+    String target,
+    String from,
+    String to,
+  ) => Isolate.run(() {
+    final file = File(path);
+    final text = file.readAsStringSync();
+    final cwd = _cwdOf(text);
+    if (cwd == null || !p.equals(cwd, from)) {
+      throw StateError('The transcript does not belong to $from');
+    }
+    final same = p.equals(path, target);
+    final relocated = _relocate(text, from, to);
+    if (same) {
+      _writeTranscript(target, relocated, replace: true);
+      return;
+    }
+    final type = FileSystemEntity.typeSync(target, followLinks: false);
+    if (type == FileSystemEntityType.notFound) {
+      _writeTranscript(target, relocated, replace: false);
+    } else if (type != FileSystemEntityType.file ||
+        !_sameBytes(File(target).readAsBytesSync(), utf8.encode(relocated))) {
+      throw StateError('A different transcript already exists at $target');
+    }
+    // If interrupted here, retry only retires the source when the full
+    // destination matches the expected rewrite.
+    file.deleteSync();
+  });
+
   /// Has the sessions that ran in [from] run in [to] (a project's folder
   /// moved, or the project pointed elsewhere): their files go to [to]'s
   /// folder of sessions, the folder they name rewritten, with what is kept
@@ -228,6 +294,14 @@ class ClaudeSessions {
     final config = await _config();
     return Isolate.run(() => _move(from, to, config));
   }
+}
+
+bool _sameBytes(List<int> a, List<int> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
 }
 
 /// Moves the sessions of [from] to [to] (see [ClaudeSessions.move]).
@@ -323,6 +397,17 @@ String _fork(
             .firstOrNull
       : null;
   if (file == null) throw StateError('No session $id');
+  return _forkFile(file, into, before, title);
+}
+
+String _forkFile(
+  File file,
+  String into,
+  String? before,
+  String? title, [
+  String? target,
+]) {
+  final id = p.basenameWithoutExtension(file.path);
   final entries = [
     for (final line in const LineSplitter().convert(file.readAsStringSync()))
       ?_decode(line),
@@ -395,13 +480,26 @@ String _fork(
       }),
     );
   }
-  final forked = File('${file.parent.path}/$into.jsonl');
-  // Whole or not at all: a half-written one would resume as a broken
-  // conversation.
-  final temp = File('${forked.path}.$pid.tmp');
-  temp.writeAsStringSync(out.toString(), flush: true);
-  temp.renameSync(forked.path);
-  return forked.path;
+  final forked = target ?? '${file.parent.path}/$into.jsonl';
+  _writeTranscript(forked, out.toString(), replace: target == null);
+  return forked;
+}
+
+void _writeTranscript(String path, String text, {required bool replace}) {
+  if (!replace &&
+      FileSystemEntity.typeSync(path, followLinks: false) !=
+          FileSystemEntityType.notFound) {
+    throw StateError('A transcript already exists at $path');
+  }
+  final folder = File(path).parent..createSync(recursive: true);
+  final temporary = folder.createTempSync('.transcript-');
+  try {
+    final file = File(p.join(temporary.path, 'write'));
+    file.writeAsStringSync(text, flush: true);
+    file.renameSync(path);
+  } finally {
+    temporary.deleteSync(recursive: true);
+  }
 }
 
 /// The `goal_status` lines of the session [id], wherever its project is.
@@ -410,21 +508,20 @@ List<Map<String, Object?>> _goal(String id, String config) {
   if (!projects.existsSync()) return const [];
   for (final project in projects.listSync().whereType<Directory>()) {
     final file = File('${project.path}/$id.jsonl');
-    if (!file.existsSync()) continue;
-    return [
-      // Most lines are not: only these are decoded. Asked again as each
-      // turn ends, of a session that may be hundreds of MB: looked for in
-      // its bytes, not its text.
-      for (final line in _linesWith(file.readAsBytesSync(), _goalStatus))
-        if (_decode(line) case final entry?
-            when entry['type'] == 'attachment' &&
-                entry['attachment'] is Map &&
-                (entry['attachment'] as Map)['type'] == 'goal_status')
-          entry,
-    ];
+    if (file.existsSync()) return _goalFile(file);
   }
   return const [];
 }
+
+List<Map<String, Object?>> _goalFile(File file) => [
+  // Look in the bytes so only goal lines have to be decoded.
+  for (final line in _linesWith(file.readAsBytesSync(), _goalStatus))
+    if (_decode(line) case final entry?
+        when entry['type'] == 'attachment' &&
+            entry['attachment'] is Map &&
+            (entry['attachment'] as Map)['type'] == 'goal_status')
+      entry,
+];
 
 final _goalStatus = utf8.encode('"goal_status"');
 
@@ -509,25 +606,45 @@ void _delete(String id, String config, String temp) {
     try {
       entity.deleteSync(recursive: true);
     } on FileSystemException {
-      // Gone meanwhile.
+      // Idempotent when another process removed it, not when it still exists.
+      if (FileSystemEntity.typeSync(entity.path, followLinks: false) !=
+          FileSystemEntityType.notFound) {
+        rethrow;
+      }
     }
   }
 }
 
-List<ClaudeProjectSummary> _scan(String root, String cachePath) {
+List<ClaudeProjectSummary> _scan(
+  String root,
+  String? cachePath,
+  bool followLinks,
+) {
   final dir = Directory(root);
-  if (!dir.existsSync()) return const [];
-  final cache = _SummaryCache.load(cachePath, root);
+  if (FileSystemEntity.typeSync(root, followLinks: followLinks) !=
+      FileSystemEntityType.directory) {
+    return const [];
+  }
+  final cache = cachePath == null ? null : _SummaryCache.load(cachePath, root);
   final byCwd = <String, List<ClaudeSessionSummary>>{};
-  for (final project in dir.listSync().whereType<Directory>()) {
-    for (final file in project.listSync().whereType<File>()) {
+  for (final project
+      in dir.listSync(followLinks: followLinks).whereType<Directory>()) {
+    for (final file
+        in project.listSync(followLinks: followLinks).whereType<File>()) {
       if (!file.path.endsWith('.jsonl')) continue;
-      final session = cache.summarize(file);
+      final session = cache == null
+          ? _Summary.readOn(file, const _Summary())
+                ?.at(
+                  size: 0,
+                  modified: file.lastModifiedSync().microsecondsSinceEpoch,
+                )
+                .session(file.path)
+          : cache.summarize(file);
       if (session == null) continue;
       (byCwd[session.cwd] ??= []).add(session);
     }
   }
-  cache.save();
+  cache?.save();
   final projects = [
     for (final MapEntry(key: cwd, value: sessions) in byCwd.entries)
       if (Directory(cwd).existsSync())

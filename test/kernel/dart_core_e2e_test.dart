@@ -12,6 +12,7 @@ import 'package:baocode/kernel/claude_code/claude_code_kernel.dart';
 import 'package:baocode/kernel/claude_code/claude_core_setting.dart';
 import 'package:baocode/kernel/claude_code/claude_environment.dart';
 import 'package:baocode/kernel/claude_code/claude_storage_io.dart';
+import 'package:baocode/kernel/claude_code/managed_transcripts_io.dart';
 import 'package:baocode/kernel/kernel_event.dart';
 import 'package:baocode/kernel/kernel_types.dart';
 import 'package:baocode/kernel/kernel_registry.dart';
@@ -20,6 +21,7 @@ import 'package:baocode/models/model_provider.dart';
 import 'package:baocode/models/model_providers.dart';
 import 'package:baocode/network/network_proxy_io.dart';
 import 'package:baocode/network/proxy_settings.dart';
+import 'package:baocode/platform/data_dir.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -271,6 +273,97 @@ void main() {
       expect(sent, allOf(contains('Ask me for a color'), contains('and now?')));
       resumed.kernel.dispose();
       await resumed.kernel.stopped;
+    },
+    timeout: const Timeout(Duration(minutes: 2)),
+  );
+
+  test(
+    'first Bot project turn switches storage and resumes after redaction',
+    () async {
+      final directory = DataDirectory.current;
+      addTearDown(() => DataDirectory.current = directory);
+      DataDirectory.current = DataDirectory(p.join(root, 'app-data'));
+      const turn = '33333333-3333-4333-8333-333333333333';
+      const secret = 'Forget this completely synthetic project sentence';
+      api.model.script.add(Reply.text('accepted'));
+      final first = open(KernelContext(cwd: cwd));
+      addTearDown(first.kernel.dispose);
+      first.kernel.prepare();
+      await until(() => first.kernel.health.status == KernelHealthStatus.ready);
+      expect(first.kernel.sessionId, isNull);
+      first.kernel.send(
+        const KernelTurn(id: turn, text: secret, preferManagedTranscript: true),
+      );
+      await until(() => first.transcript.lastTurnEndSeq > 0);
+      final id = first.kernel.sessionId!;
+      first.kernel.release();
+      await until(() => first.kernel.health.status == KernelHealthStatus.idle);
+      await first.kernel.stopped;
+
+      final storage = ClaudeStorage(configDir: config);
+      final session = (await storage.sessionsIn(cwd)).single;
+      expect(session.cwd, cwd);
+      expect(session.id, id);
+      expect(session.path, ManagedTranscripts.transcriptPath(cwd, id));
+      final file = File(session.path!);
+      final backup = file.readAsBytesSync();
+      expect(ManagedTranscripts.deleteOriginal(cwd, id, turn), isTrue);
+      expect(file.readAsStringSync(), isNot(contains(secret)));
+
+      ClaudeCore.current = () => ClaudeCore.cli;
+      api.model.script.add(Reply.text('resumed'));
+      final resumed = open(KernelContext(resume: session));
+      addTearDown(resumed.kernel.dispose);
+      await until(() => !resumed.kernel.loadingHistory);
+      expect(shown(resumed.transcript).join('\n'), isNot(contains(secret)));
+      final priorEnd = resumed.transcript.lastTurnEndSeq;
+      final priorRequests = api.model.requests.length;
+      resumed.kernel.send(
+        const KernelTurn(
+          id: '44444444-4444-4444-8444-444444444444',
+          text: 'Continue at the same project',
+        ),
+      );
+      await until(
+        () =>
+            resumed.transcript.lastTurnEndSeq > priorEnd &&
+            api.model.requests.length > priorRequests,
+      );
+      expect(resumed.kernel.health.status, KernelHealthStatus.ready);
+      expect(resumed.kernel.sessionId, id);
+      final messages = jsonEncode(api.model.requests.last.body['messages']);
+      expect(
+        messages,
+        allOf(
+          contains('Continue at the same project'),
+          contains('accepted'),
+          isNot(contains(secret)),
+        ),
+      );
+      resumed.kernel.release();
+      await until(
+        () => resumed.kernel.health.status == KernelHealthStatus.idle,
+      );
+      await resumed.kernel.stopped;
+      expect((await storage.sessionsIn(cwd)).single.path, session.path);
+
+      file.writeAsBytesSync(backup, flush: true);
+      expect(await storage.sessionsIn(cwd), isEmpty);
+      expect(await ClaudeStorage.read(session), isEmpty);
+      await expectLater(
+        storage.fork(id, '55555555-5555-4555-8555-555555555555', cwd: cwd),
+        throwsStateError,
+      );
+      final restored = open(KernelContext(resume: session));
+      addTearDown(restored.kernel.dispose);
+      restored.kernel.prepare();
+      await until(
+        () => restored.kernel.health.status == KernelHealthStatus.failed,
+      );
+      expect(
+        restored.kernel.health.message,
+        'The managed transcript is unavailable',
+      );
     },
     timeout: const Timeout(Duration(minutes: 2)),
   );

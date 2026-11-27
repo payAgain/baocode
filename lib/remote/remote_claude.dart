@@ -9,9 +9,11 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:bao_agent/bao_agent.dart' show newUuid;
 import 'package:bao_remote/claude.dart';
 import 'package:bao_remote/client.dart';
 import 'package:bao_remote/files.dart' show IdeFileNotFoundException;
+import 'package:path/path.dart' as p;
 
 import '../kernel/agent_kernel.dart';
 import '../kernel/claude_code/claude_code_transport.dart';
@@ -20,6 +22,7 @@ import '../kernel/claude_code/claude_haiku.dart';
 import '../kernel/claude_code/claude_storage_io.dart';
 import '../kernel/antigravity/agy_transport.dart';
 import '../kernel/claude_code/dart_core_transport.dart';
+import '../kernel/claude_code/managed_transcripts_io.dart';
 import '../kernel/claude_code/process_transport.dart';
 import '../models/launch_environment.dart';
 import 'remote_claude_install.dart';
@@ -36,19 +39,83 @@ const remoteClaudeInstallCommand =
 /// BaoCode's own core only on an upstream's model ([ClaudeLaunch.env]):
 /// never on what the machine's Claude Code setup names; always on one
 /// only it runs on ([ClaudeLaunch.builtinCore]).
-Future<ClaudeCodeTransport> startClaude(ClaudeLaunch launch) async {
+Future<ClaudeCodeTransport> startClaude(
+  ClaudeLaunch launch, {
+  ClaudeTransportFactory startBuiltin = startDartCore,
+  ClaudeTransportFactory startCli = startClaudeProcess,
+  ClaudeCore Function()? localCore,
+}) async {
   final host = RemoteLocation.hostOf(launch.cwd);
   if (host == null) {
-    if (launch.agy) return startAgy(launch);
-    if (launch.builtinCore && launch.env != null) return startDartCore(launch);
-    // On this machine: BaoCode's own core, unless the CLI is picked.
-    return switch (ClaudeCore.current()) {
-      ClaudeCore.builtin when launch.env == null => throw const ClaudeNoModel(
-        ClaudeCore.noModel,
-      ),
-      ClaudeCore.builtin => startDartCore(launch),
-      ClaudeCore.cli => startClaudeProcess(launch),
-    };
+    final root = ManagedTranscripts.projectsDir;
+    final resume = launch.resume;
+    final source = launch.resumePath;
+    final managed =
+        launch.managedTranscript ??
+        (resume != null &&
+                (ManagedTranscripts.isManagedSessionId(resume) ||
+                    (source != null
+                        ? ClaudeStorage.isManagedPath(source)
+                        : ManagedTranscripts.exists(launch.cwd, resume)))
+            ? (projectsDir: root, sessionId: resume)
+            : null);
+    if (managed == null && launch.agy) return startAgy(launch);
+    final builtin =
+        managed != null ||
+        (launch.builtinCore && launch.env != null) ||
+        (localCore ?? ClaudeCore.current)() == ClaudeCore.builtin;
+    if (!builtin) return startCli(launch);
+    if (managed != null && (launch.agy || !launch.persist)) {
+      throw const ClaudeUnavailable(
+        'This managed conversation requires the local built-in core',
+      );
+    }
+    if (launch.env == null) throw const ClaudeNoModel(ClaudeCore.noModel);
+    final transcript =
+        managed ??
+        (resume == null && launch.persist && launch.preferManagedTranscript
+            ? (projectsDir: root, sessionId: newUuid())
+            : null);
+    if (transcript == null) {
+      return _LocalBuiltinTransport(await startBuiltin(launch), null);
+    }
+    final id = transcript.sessionId;
+    if (!p.equals(root, transcript.projectsDir) ||
+        (resume != null && id != resume) ||
+        (source != null &&
+            !p.equals(
+              source,
+              ManagedTranscripts.transcriptPath(launch.cwd, id),
+            ))) {
+      throw const ClaudeUnavailable(
+        'The managed transcript location is invalid',
+      );
+    }
+    final lease = ManagedTranscripts.acquire(id);
+    try {
+      if (!ManagedTranscripts.isManagedPathSafe(launch.cwd, id) ||
+          ManagedTranscripts.exists(launch.cwd, id) != (resume != null) ||
+          (resume != null &&
+              (!ManagedTranscripts.isUniqueLocation(
+                    id,
+                    ManagedTranscripts.transcriptPath(launch.cwd, id),
+                  ) ||
+                  ManagedTranscripts.hasUnappliedRedactions(launch.cwd, id)))) {
+        throw const ClaudeUnavailable('The managed transcript is unavailable');
+      }
+      final transport = await startBuiltin(
+        launch.copyWith(managedTranscript: transcript),
+      );
+      return _LocalBuiltinTransport(transport, transcript, lease: lease);
+    } on Object {
+      lease.close();
+      rethrow;
+    }
+  }
+  if (launch.managedTranscript != null) {
+    throw const ClaudeUnavailable(
+      'This managed conversation requires the local built-in core',
+    );
   }
   if (launch.agy) {
     throw const ClaudeUnavailable(
@@ -57,6 +124,39 @@ Future<ClaudeCodeTransport> startClaude(ClaudeLaunch launch) async {
     );
   }
   return RemoteClaudeTransport.start(SshHosts.instance[host], launch);
+}
+
+/// Releases the writer's lease when the engine actually exits, even when
+/// the consumer closes during launch or never subscribes to its messages.
+class _LocalBuiltinTransport implements LocalBuiltinClaudeTransport {
+  _LocalBuiltinTransport(
+    this._transport,
+    this.managedTranscript, {
+    ManagedTranscriptLease? lease,
+  }) : exited = lease == null
+           ? _transport.exited
+           : _transport.exited.whenComplete(lease.close) {
+    if (lease != null) {
+      unawaited(exited.then<void>((_) {}, onError: (Object _) {}));
+    }
+  }
+
+  final ClaudeCodeTransport _transport;
+
+  @override
+  final ({String projectsDir, String sessionId})? managedTranscript;
+
+  @override
+  final Future<void> exited;
+
+  @override
+  Stream<Map<String, Object?>> get messages => _transport.messages;
+
+  @override
+  void write(Map<String, Object?> message) => _transport.write(message);
+
+  @override
+  void close() => _transport.close();
 }
 
 /// What runs Claude Code on [host]: as its server saved in the app says;
@@ -147,7 +247,7 @@ Future<ClaudeHistoryPage> readClaudeHistoryPage(
 /// was kept (see ClaudeSessions.goal).
 Future<List<Map<String, Object?>>> readClaudeGoal(String cwd, String id) async {
   final host = RemoteLocation.hostOf(cwd);
-  if (host == null) return const ClaudeStorage().goal(id);
+  if (host == null) return const ClaudeStorage().goal(id, cwd: cwd);
   final client = await SshHosts.instance[host].ready;
   return client.claudeGoal(id);
 }
@@ -163,7 +263,13 @@ Future<String> forkClaudeSession(
 }) async {
   final host = RemoteLocation.hostOf(cwd);
   if (host == null) {
-    return const ClaudeStorage().fork(id, into, before: before, title: title);
+    return const ClaudeStorage().fork(
+      id,
+      into,
+      cwd: cwd,
+      before: before,
+      title: title,
+    );
   }
   final client = await SshHosts.instance[host].ready;
   return client.claudeFork(id, into, before: before, title: title);
@@ -339,7 +445,7 @@ Future<String> askRemoteHaiku(
 
 /// Claude Code on a remote host, over its server: the same lines as a
 /// local process's ([ProcessTransport]).
-class RemoteClaudeTransport implements ClaudeCodeTransport {
+class RemoteClaudeTransport implements ClaudeExternalTransport {
   RemoteClaudeTransport._(this._process) {
     _live.add(this);
     _process.stdout

@@ -10,6 +10,9 @@ import 'package:baocode/chat/chat_models.dart';
 import 'package:baocode/chat/reply_suggestions.dart';
 import 'package:baocode/bots/bot_folders.dart';
 import 'package:baocode/bots/bot_groups.dart';
+import 'package:baocode/bots/bot_memory.dart';
+import 'package:baocode/bots/bot_memory_review.dart';
+import 'package:baocode/bots/bot_memory_skill.dart';
 import 'package:baocode/bots/bots.dart';
 import 'package:baocode/kernel/agent_kernel.dart';
 import 'package:baocode/kernel/claude_code/claude_code_kernel.dart';
@@ -20,6 +23,8 @@ import 'package:baocode/link/desktop_remote_git_client.dart';
 import 'package:baocode/link/link_quota.dart';
 import 'package:baocode/link/link_platform_io.dart';
 import 'package:baocode/link/workspace_bridge.dart';
+import 'package:baocode/platform/data_dir.dart';
+import 'package:baocode/workspace/preference_store.dart';
 import 'package:baocode/workspace/workspace.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1560,7 +1565,7 @@ void main() {
     addTearDown(withBots.dispose);
     final assistant = bots.bots.single;
     final thread = bots.threadFor(assistant);
-    final session = WorkspaceBridge.idOf(thread);
+    final session = bots.privateSessionId(assistant);
     expect(
       withBots.handle(LinkMethods.choose, {
         'session': session,
@@ -1586,6 +1591,763 @@ void main() {
     expect(
       withBots.state().bots.single,
       isA<LinkBot>().having((b) => b.model, 'model', other.label),
+    );
+  });
+
+  test(
+    'bot chat aliases expose the DM projection and hide all workers',
+    () async {
+      final workspace = Workspace();
+      addTearDown(workspace.dispose);
+      final bots = Bots(workspace: workspace, folders: MemoryBotFolders());
+      await bots.start();
+      addTearDown(bots.dispose);
+      final (_, desktop) = await peers();
+      final withBots = WorkspaceBridge(
+        workspace: workspace,
+        peer: desktop,
+        device: () =>
+            const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
+        bots: bots,
+      );
+      addTearDown(withBots.dispose);
+      final bot = bots.bots.single;
+      final first = bots.groups.save(name: 'First', members: [bot.id]);
+      final second = bots.groups.save(name: 'Second', members: [bot.id]);
+      final workers = [
+        bots.threadFor(bot),
+        bots.threadFor(bot, group: first.id),
+        bots.threadFor(bot, group: second.id),
+      ];
+      final state = withBots.state();
+      final alias = state.bots.single.session!;
+      expect(state.sessions, isEmpty);
+      expect(state.botMemoryOptions, contains(LinkMethods.botMemoryEntries));
+      final forbidden = throwsA(
+        isA<LinkRemoteException>().having(
+          (e) => e.code,
+          'code',
+          LinkErrors.notFound,
+        ),
+      );
+      for (final worker in workers) {
+        final id = WorkspaceBridge.idOf(worker);
+        expect(id, isNot(alias));
+        for (final method in [
+          LinkMethods.open,
+          LinkMethods.stop,
+          LinkMethods.archive,
+          LinkMethods.delete,
+          LinkMethods.output,
+        ]) {
+          await expectLater(
+            withBots.handle(method, {'session': id}),
+            forbidden,
+          );
+        }
+      }
+      final opened = await withBots.handle(LinkMethods.open, {
+        'session': alias,
+        'window': 1,
+      }) as Map;
+      expect(opened['session'], alias);
+      expect(opened['items'], isEmpty);
+      bots.groups.tell = (_, _, _) {};
+      await withBots.handle(LinkMethods.sendGroup, {
+        'group': first.id,
+        'text': 'group turn',
+      });
+      expect(bots.groups.answering(bot.id), first.id);
+      expect(
+        await withBots.handle(LinkMethods.send, {
+          'bot': bot.id,
+          'text': 'pending direct message',
+        }),
+        {'session': alias},
+      );
+      final pending = await withBots.handle(LinkMethods.open, {
+        'session': alias,
+        'window': 1,
+      }) as Map;
+      expect(
+        (pending['items'] as List).single,
+        allOf(
+          containsPair('text', 'pending direct message'),
+          containsPair('queued', true),
+          containsPair('privateQueued', true),
+        ),
+      );
+      await expectLater(
+        withBots.handle(LinkMethods.delete, {'session': alias}),
+        forbidden,
+      );
+      await withBots.handle(LinkMethods.clearBotChat, {'bot': bot.id});
+      expect(withBots.state().bots.single.session, isNot(alias));
+      expect(withBots.state().groups.map((group) => group.id).toSet(), {
+        first.id,
+        second.id,
+      });
+      await expectLater(
+        withBots.handle(LinkMethods.open, {'session': alias}),
+        forbidden,
+      );
+    },
+  );
+
+  test('old DM windows stay read-only after A to B to restored A', () async {
+    const folder = '/bots/runtime/assistant/private';
+    const internal = 'private-worker-a';
+    final runners = <FakeCli>[];
+    final record = SessionRecord(
+      id: internal,
+      title: 'Archive A',
+      updatedAt: DateTime(2026),
+      cwd: folder,
+    );
+    late final KernelDescriptor descriptor;
+    descriptor = KernelDescriptor(
+      id: 'claude-code',
+      label: 'Claude Code',
+      icon: Icons.auto_awesome_rounded,
+      description: '',
+      catalog: _KeptCatalog([
+        ProjectRecord(path: folder, sessions: [record]),
+      ]),
+      create: (context) => ClaudeCodeKernel(
+        descriptor,
+        context,
+        start: (_) async {
+          final cli = FakeCli();
+          runners.add(cli);
+          return cli;
+        },
+        readHistoryPage: (_, {required turns, before}) async =>
+            page(['a1', 'a2']),
+      ),
+    );
+    final workspace = Workspace(kernels: [descriptor]);
+    final folders = MemoryBotFolders();
+    final bots = Bots(workspace: workspace, folders: folders);
+    addTearDown(workspace.dispose);
+    addTearDown(bots.dispose);
+    await workspace.refresh();
+    await bots.start();
+    final bot = bots.bots.single;
+    final a = bots.threadOf(bot)!;
+    expect(a.id, internal);
+
+    late final WorkspaceBridge host;
+    final (phone, desktop) = await peers(
+      onRequest: (m, p) => host.handle(m, p),
+    );
+    host = WorkspaceBridge(
+      workspace: workspace,
+      peer: desktop,
+      device: () => const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
+      bots: bots,
+      throttle: const Duration(milliseconds: 5),
+    )..start();
+    addTearDown(host.dispose);
+    addTearDown(phone.close);
+    Future<LinkSessionUpdate> openDm(
+      String alias, [
+      List<String> have = const [],
+    ]) async => LinkSessionUpdate.fromJson(
+      await phone.call(LinkMethods.open, {
+        'session': alias,
+        'window': 1,
+        'have': have,
+      }) as Map<String, Object?>,
+    );
+
+    final first = host.state().bots.single.session!;
+    final openedA = await openDm(first);
+    expect(texts(openedA.items), ['a2']);
+    final have = [for (final item in openedA.items) linkDigest(item)];
+    final changed = phone.events.firstWhere(
+      (event) => event.name == LinkEvents.state,
+    );
+    final made = await phone.call(LinkMethods.newBotConversation, {
+      'bot': bot.id,
+    }) as Map;
+    final second = made['session'] as String;
+    expect(second, isNot(first));
+    final stateEvent =
+        (await changed.timeout(const Duration(seconds: 5))).data as Map;
+    expect(
+      (stateEvent['bots'] as List).single,
+      containsPair('session', second),
+    );
+    expect(bots.threadOf(bot), isNot(same(a)));
+    expect((await openDm(first)).items, openedA.items);
+    expect(
+      await phone.call(LinkMethods.earlier, {'session': first}),
+      containsPair('items', hasLength(1)),
+    );
+    expect((await openDm(second)).actions?['edit'], isNotNull);
+
+    expect(bots.activateConversation(bot, a), same(a));
+    final restored = host.state().bots.single.session!;
+    expect(restored, isNot(isIn([first, second, internal])));
+    expect(bots.threadOf(bot)?.id, internal);
+    final openedAgain = await openDm(restored, have);
+    expect(openedAgain.start, 0);
+    expect(openedAgain.items, openedA.items);
+    expect((await openDm(first)).actions, isNull);
+    final stale = throwsA(
+      isA<LinkRemoteException>().having((e) => e.code, 'code', 'stale'),
+    );
+    for (final alias in [first, second]) {
+      for (final method in [
+        LinkMethods.edit,
+        LinkMethods.stop,
+        LinkMethods.send,
+      ]) {
+        await expectLater(
+          phone.call(method, {
+            'session': alias,
+            'text': 'must not run',
+            'index': 0,
+            'expectedWindow': linkDigest(openedAgain.items),
+          }),
+          stale,
+        );
+      }
+    }
+    await phone.call(LinkMethods.stop, {'session': restored});
+    expect(bots.privateSessionId(bot), restored);
+    await phone.call(LinkMethods.refreshBotMemory, {'bot': bot.id});
+    expect(bots.privateSessionId(bot), restored);
+    final reloadedWorkspace = Workspace(kernels: [descriptor]);
+    final reloaded = Bots(workspace: reloadedWorkspace, folders: folders);
+    await reloadedWorkspace.refresh();
+    // Read the persisted alias state with a fresh host, independently of
+    // workspace archive metadata. The original alias stays historical.
+    addTearDown(reloadedWorkspace.dispose);
+    addTearDown(reloaded.dispose);
+    expect(reloaded.privateSessionId(bot), restored);
+    expect(reloaded.threadOf(bot)?.id, internal);
+
+    await phone.call(LinkMethods.close, {'session': restored});
+    Future<Object?> edit({int index = 0, String? digest}) =>
+        phone.call(LinkMethods.edit, {
+          'session': restored,
+          'index': index,
+          'expectedWindow': ?digest,
+          'text': '', // Exercise address resolution without starting a turn.
+        });
+    await expectLater(edit(), stale);
+    final legacy = await openDm(restored);
+    expect(legacy.actions, containsPair('editRequiresWindow', false));
+    expect(await edit(), isNull);
+    final earlier = await phone.call(LinkMethods.earlier, {
+      'session': restored,
+      'count': 1,
+    }) as Map;
+    final window = [...earlier['items'] as List, ...legacy.items];
+    await expectLater(edit(index: 1), stale);
+    expect(await edit(index: 1, digest: linkDigest(window)), isNull);
+
+    await openDm(restored);
+    await phone.call(LinkMethods.edit, {
+      'session': restored,
+      'index': 0,
+      'text': 'a2 revised',
+    });
+    await settle();
+    expect(
+      runners.expand((cli) => cli.requests('rewind_conversation')).single,
+      containsPair('target_message_uuid', 'a2'),
+    );
+  });
+
+  test(
+    'private and group stable send receipts survive a host restart',
+    () async {
+      final folders = MemoryBotFolders();
+      final phoneId = LinkIdentity.generate().id;
+      final stale = throwsA(
+        isA<LinkRemoteException>().having((e) => e.code, 'code', 'stale'),
+      );
+      final conflict = throwsA(
+        isA<LinkRemoteException>().having((e) => e.code, 'code', 'conflict'),
+      );
+      Future<
+        ({Workspace workspace, Bots bots, WorkspaceBridge host, LinkPeer phone})
+      >
+      startHost() async {
+        final workspace = Workspace();
+        final bots = Bots(workspace: workspace, folders: folders);
+        await bots.start();
+        bots.groups.tell = (_, _, _) {};
+        late final WorkspaceBridge host;
+        final (phone, desktop) = await peers(
+          phoneId: phoneId,
+          onRequest: (m, p) => host.handle(m, p),
+        );
+        host = WorkspaceBridge(
+          workspace: workspace,
+          peer: desktop,
+          device: () =>
+              const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
+          bots: bots,
+        )..start();
+        return (workspace: workspace, bots: bots, host: host, phone: phone);
+      }
+
+      final first = await startHost();
+      final bot = first.bots.bots.single;
+      final other = first.bots.save(name: 'Other', identity: '', abilities: {});
+      final group = first.bots.groups.save(name: 'Room', members: [bot.id]);
+      final otherGroup = first.bots.groups.save(
+        name: 'Other room',
+        members: [other.id],
+      );
+      final alias = first.bots.privateSessionId(bot);
+      final groupSend = {
+        'group': group.id,
+        'id': 'same-id',
+        'text': 'group message',
+      };
+      final directSend = {
+        'bot': bot.id,
+        'id': 'same-id',
+        'text': 'private message',
+      };
+      expect(await first.phone.call(LinkMethods.sendGroup, groupSend), {
+        'seq': 1,
+      });
+      await settle();
+      expect(await first.phone.call(LinkMethods.send, directSend), {
+        'session': alias,
+      });
+      expect(first.bots.pendingPrivateItems(bot).map((item) => item.text), [
+        'private message',
+      ]);
+
+      final cancelledSend = {
+        ...directSend,
+        'id': 'cancel-me',
+        'text': 'withdraw this',
+      };
+      await first.phone.call(LinkMethods.send, cancelledSend);
+      final queue =
+          await first.phone.call(LinkMethods.open, {'session': alias}) as Map;
+      expect(queue['actions'], containsPair('cancelQueued', true));
+      final item = (queue['items'] as List).cast<Map>().singleWhere(
+        (item) => item['text'] == 'withdraw this',
+      );
+      final cancel = {'session': alias, 'queueId': item['queueId']};
+      await expectLater(
+        first.phone.call(LinkMethods.cancelQueued, {
+          ...cancel,
+          'session': 'retired-window',
+        }),
+        stale,
+      );
+      await first.phone.call(LinkMethods.cancelQueued, cancel);
+      await expectLater(
+        first.phone.call(LinkMethods.cancelQueued, cancel),
+        stale,
+      );
+      expect(first.bots.pendingPrivateItems(bot).map((item) => item.text), [
+        'private message',
+      ]);
+
+      await first.phone.close();
+      first.host.dispose();
+      first.bots.dispose();
+      first.workspace.dispose();
+      final next = await startHost();
+      addTearDown(next.workspace.dispose);
+      addTearDown(next.bots.dispose);
+      addTearDown(next.host.dispose);
+      addTearDown(next.phone.close);
+      expect(next.bots.privateSessionId(bot), alias);
+      expect(await next.phone.call(LinkMethods.sendGroup, groupSend), {
+        'seq': 1,
+      });
+      expect(next.bots.groups.messages(group.id), hasLength(1));
+      await expectLater(
+        next.phone.call(LinkMethods.send, cancelledSend),
+        stale,
+      );
+      expect(await next.phone.call(LinkMethods.send, directSend), {
+        'session': alias,
+      });
+      await expectLater(
+        next.phone.call(LinkMethods.send, {...directSend, 'bot': other.id}),
+        conflict,
+      );
+      await expectLater(
+        next.phone.call(LinkMethods.send, {...directSend, 'text': 'changed'}),
+        conflict,
+      );
+      await expectLater(
+        next.phone.call(LinkMethods.sendGroup, {
+          ...groupSend,
+          'group': otherGroup.id,
+        }),
+        conflict,
+      );
+      await expectLater(
+        next.phone.call(LinkMethods.sendGroup, {
+          ...groupSend,
+          'text': 'changed',
+        }),
+        conflict,
+      );
+      await next.phone.call(LinkMethods.clearBotChat, {'bot': bot.id});
+      await expectLater(next.phone.call(LinkMethods.send, directSend), stale);
+      await next.phone.call(LinkMethods.deleteGroup, {'group': group.id});
+      await expectLater(
+        next.phone.call(LinkMethods.sendGroup, {
+          ...groupSend,
+          'group': otherGroup.id,
+        }),
+        stale,
+      );
+    },
+  );
+
+  test('structured bot memory is revision checked and group scoped', () async {
+    final workspace = Workspace();
+    addTearDown(workspace.dispose);
+    final bots = Bots(workspace: workspace, folders: MemoryBotFolders());
+    await bots.start();
+    addTearDown(bots.dispose);
+    final (_, desktop) = await peers();
+    final withBots = WorkspaceBridge(
+      workspace: workspace,
+      peer: desktop,
+      device: () => const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
+      bots: bots,
+    );
+    addTearDown(withBots.dispose);
+    final bot = bots.bots.single;
+    final group = bots.groups.save(name: 'Group', members: [bot.id]);
+    expect(
+      await withBots.handle(LinkMethods.refreshBotMemory, {'bot': bot.id}),
+      {'refreshed': false, 'status': 'onOpen'},
+    );
+    final snapshot = await withBots.handle(LinkMethods.changeBotMemory, {
+      'bot': bot.id,
+      'changes': [
+        {'action': 'add', 'text': '红茶'},
+      ],
+    }) as Map;
+    final entry = (snapshot['entries'] as List).single as Map;
+    expect(entry['text'], '红茶');
+    expect(entry['injected'], true);
+    final groupMemory = await withBots.handle(LinkMethods.botMemoryEntries, {
+      'bot': bot.id,
+      'group': group.id,
+    }) as Map;
+    expect(groupMemory['entries'], isEmpty);
+    await expectLater(
+      withBots.handle(LinkMethods.changeBotMemory, {
+        'bot': bot.id,
+        'changes': [
+          {'action': 'remove', 'id': entry['id'], 'revision': 0},
+        ],
+      }),
+      throwsA(
+        isA<LinkRemoteException>().having((e) => e.code, 'code', 'stale'),
+      ),
+    );
+  });
+
+  test('bot memory review batches require RPC opt-in', () async {
+    final workspace = Workspace();
+    addTearDown(workspace.dispose);
+    final bots = Bots(workspace: workspace, folders: MemoryBotFolders());
+    await bots.start();
+    addTearDown(bots.dispose);
+    final bot = bots.bots.single;
+    final scope = BotMemoryScope(botId: bot.id);
+    const sessionId = 'internal-review-session';
+    const firstMessageId = 'internal-release-notes-message';
+    const secondMessageId = 'internal-smoke-tests-message';
+    const first = 'Prefers concise release notes';
+    const second = 'Runs smoke tests before tagging a release';
+    const evidence = {firstMessageId: '$first.', secondMessageId: '$second.'};
+    final review = bots.memoryReview = BotMemoryReview(
+      store: MemoryPreferenceStore(),
+      scopeExists: bots.reviewScopeExists,
+      readEvidence: (_, _, source) async => evidence[source.messageId],
+      readMemory: (_) => bots.userMemory(bot),
+      applyMemory:
+          (
+            _,
+            changes, {
+            required sessionId,
+            required messageId,
+            required operationId,
+            required changeSources,
+          }) {
+            bots.changeUserMemory(
+              bot,
+              changes,
+              session: sessionId,
+              sourceMessage: messageId,
+              operationId: operationId,
+              changeSources: changeSources,
+            );
+          },
+      ask: (_) async => jsonEncode({
+        'proposals': [
+          // Review references are numbered from the newest turn.
+          for (final (text, ref) in [(first, 'e2'), (second, 'e1')])
+            {
+              'action': 'add',
+              'text': text,
+              'evidence': [ref],
+            },
+        ],
+      }),
+      foregroundBusy: () => false,
+      threshold: evidence.length,
+    );
+    await review.configure(scope, memoryApproval: true);
+    for (final messageId in evidence.keys) {
+      await review.recordTurn(
+        scope: scope,
+        sessionId: sessionId,
+        turnId: messageId,
+        evidence: [
+          BotMemoryReviewEvidence(
+            messageId: messageId,
+            role: BotMemoryReviewRole.user,
+          ),
+        ],
+      );
+    }
+    expect(await review.runNext(), isTrue);
+
+    final (_, desktop) = await peers();
+    final bridge = WorkspaceBridge(
+      workspace: workspace,
+      peer: desktop,
+      device: () => const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
+      bots: bots,
+    );
+    addTearDown(bridge.dispose);
+    Future<Map<String, Object?>> call(
+      String method, [
+      Map<String, Object?> args = const {},
+    ]) async =>
+        await bridge.handle(method, {'bot': bot.id, ...args})
+            as Map<String, Object?>;
+
+    expect((await call(LinkMethods.botMemoryReview))['proposals'], isEmpty);
+    final listed = await call(LinkMethods.botMemoryReview, {'batch': true});
+    final batch = (listed['proposals'] as List).single as Map;
+    expect(batch['action'], 'batch');
+    expect(batch['status'], 'pending');
+    expect(
+      (batch['changes'] as List).cast<Map>().map(
+        (row) => (row['action'], row['before'], row['after']),
+      ),
+      [('add', null, first), ('add', null, second)],
+    );
+
+    final decision = {'proposal': batch['id'], 'approve': true};
+    await expectLater(
+      call(LinkMethods.decideBotMemory, decision),
+      throwsA(
+        isA<LinkRemoteException>().having(
+          (error) => error.code,
+          'code',
+          'stale',
+        ),
+      ),
+    );
+    expect(bots.userMemory(bot).entries, isEmpty);
+    final applied = await call(LinkMethods.decideBotMemory, {
+      ...decision,
+      'batch': true,
+    });
+    expect(applied['status'], 'applied');
+    expect(
+      bots
+          .userMemory(bot)
+          .entries
+          .map((entry) => (entry.text, entry.sourceMessage)),
+      [(first, firstMessageId), (second, secondMessageId)],
+    );
+    for (final proposal in [batch, applied]) {
+      final sources = (proposal['evidence'] as List).cast<Map>();
+      expect(sources.map((source) => source['role']), ['user', 'user']);
+      final tokens = [
+        for (final source in sources) (source['source'] as Map)['token'],
+      ];
+      expect(tokens, everyElement(isA<String>()));
+      expect(tokens.toSet(), hasLength(2));
+      expect(
+        (proposal['changes'] as List).cast<Map>().map((row) => row['evidence']),
+        [
+          [sources.first],
+          [sources.last],
+        ],
+      );
+
+      final wire = jsonEncode(proposal);
+      expect(wire, isNot(contains(sessionId)));
+      for (final source in evidence.entries) {
+        expect(wire, isNot(contains(source.key)));
+        expect(wire, isNot(contains(botMemoryDigest(source.value))));
+      }
+    }
+  });
+
+  test('learned skill RPCs authorize project and revision', () async {
+    final workspace = Workspace();
+    addTearDown(workspace.dispose);
+    final folders = MemoryBotFolders();
+    final bots = Bots(workspace: workspace, folders: folders);
+    await bots.start();
+    addTearDown(bots.dispose);
+    workspace.importFolders(['/release', '/other']);
+    final bot = bots.bots.single;
+    final skills = BotMemorySkills(
+      store: MemoryPreferenceStore(),
+      folders: folders,
+      root: '/bots/skills',
+      canUseProject: (id, project) => id == bot.id && project == '/release',
+    );
+    bots.memoryReview = BotMemoryReview(
+      store: MemoryPreferenceStore(),
+      scopeExists: bots.reviewScopeExists,
+      readEvidence: (_, _, _) async => null,
+      readMemory: (_) => BotMemory.fromMarkdown(''),
+      applyMemory: (
+        _,
+        _, {
+        required sessionId,
+        required messageId,
+        required operationId,
+        required changeSources,
+      }) {},
+      ask: (_) async => '',
+      foregroundBusy: () => false,
+      skills: skills,
+    );
+    for (var revision = 1; revision <= 2; revision++) {
+      await skills.apply(
+        botId: bot.id,
+        project: '/release',
+        draft: BotMemorySkillDraft(
+          name: 'release-preflight',
+          trigger: 'When cutting a release',
+          steps: ['Check the version $revision', 'Check the release notes'],
+          verification: 'Both checks passed',
+          expectedRevision: revision == 1 ? null : revision - 1,
+        ),
+        proposalId: 'proposal-$revision',
+        evidence: [
+          {'sessionId': 'internal-worker'},
+        ],
+      );
+    }
+    final (_, desktop) = await peers();
+    final bridge = WorkspaceBridge(
+      workspace: workspace,
+      peer: desktop,
+      device: () => const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
+      bots: bots,
+    );
+    addTearDown(bridge.dispose);
+    Future<Map<String, Object?>> call(
+      String method, [
+      Map<String, Object?> args = const {},
+    ]) async =>
+        await bridge.handle(method, {'bot': bot.id, ...args})
+            as Map<String, Object?>;
+    expect(
+      bridge.state().botMemoryOptions,
+      contains(LinkMethods.maintainBotMemorySkill),
+    );
+    final listed = await call(LinkMethods.botMemorySkills);
+    expect(listed['project'], '/release');
+    expect((listed['projects'] as List).single, containsPair('id', '/release'));
+    final address = {'project': '/release', 'name': 'release-preflight'};
+    final history = await call(LinkMethods.botMemorySkillRevisions, address);
+    final versions = (history['revisions'] as List).cast<Map>();
+    expect(versions.map((version) => version['revision']), [2, 1]);
+    expect(versions.first['markdown'], contains('Check the version 2'));
+    expect(jsonEncode(history), isNot(contains('internal-worker')));
+    await expectLater(
+      call(LinkMethods.maintainBotMemorySkill, {
+        ...address,
+        'revision': 1,
+        'archived': true,
+      }),
+      throwsA(
+        isA<LinkRemoteException>().having(
+          (error) => error.code,
+          'code',
+          'stale',
+        ),
+      ),
+    );
+    await call(LinkMethods.maintainBotMemorySkill, {
+      ...address,
+      'revision': 2,
+      'archived': true,
+      'locked': true,
+      'pinned': true,
+    });
+    expect((await call(LinkMethods.botMemorySkills))['skills'], isEmpty);
+    final archived = await call(LinkMethods.botMemorySkills, {
+      'includeArchived': true,
+    });
+    expect(
+      (archived['skills'] as List).single,
+      allOf(
+        containsPair('revision', 3),
+        containsPair('archived', true),
+        containsPair('locked', true),
+        containsPair('pinned', true),
+      ),
+    );
+    await expectLater(
+      call(LinkMethods.maintainBotMemorySkill, {
+        ...address,
+        'revision': 3,
+        'archived': false,
+      }),
+      throwsA(isA<LinkRemoteException>()),
+    );
+    await call(LinkMethods.maintainBotMemorySkill, {
+      ...address,
+      'revision': 3,
+      'locked': false,
+    });
+    await call(LinkMethods.maintainBotMemorySkill, {
+      ...address,
+      'revision': 4,
+      'archived': false,
+    });
+    expect(
+      ((await call(LinkMethods.botMemorySkills))['skills'] as List).single,
+      containsPair('archived', false),
+    );
+    final group = bots.groups.save(name: 'Team', members: [bot.id]);
+    await expectLater(
+      call(LinkMethods.botMemorySkills, {'group': group.id}),
+      throwsA(isA<LinkRemoteException>()),
+    );
+    await expectLater(
+      call(LinkMethods.botMemorySkillRevisions, {
+        ...address,
+        'project': '/other',
+      }),
+      throwsA(isA<LinkRemoteException>()),
+    );
+    workspace.hideProject(workspace.projectAt('/release'));
+    await expectLater(
+      call(LinkMethods.botMemorySkills, {'project': '/release'}),
+      throwsA(isA<LinkRemoteException>()),
     );
   });
 
@@ -1700,7 +2462,8 @@ void main() {
     // Sent again, as when the link dropped: once.
     expect(await withBots.handle(LinkMethods.sendGroup, send), {'seq': 1});
     expect(withBots.state().groups.single.unread, 0);
-    // Mia has its conversation, as the phone sees.
+    // The reply to Send follows the durable log write. Dispatch runs next.
+    await settle();
     final room = withBots.state().groups.single;
     expect(['assistant', mia.id], contains(room.holder));
     expect(room.passesLeft, BotGroups.passes);
@@ -1789,6 +2552,55 @@ void main() {
     );
   });
 
+  test('the history index is private even without bot RPCs', () async {
+    final root = Directory.systemTemp.createTempSync('bridge_data');
+    final previous = DataDirectory.current;
+    final data = DataDirectory(root.path);
+    DataDirectory.current = data;
+    addTearDown(() {
+      DataDirectory.current = previous;
+      root.deleteSync(recursive: true);
+    });
+    Directory(data.botHistoryIndexDir).createSync(recursive: true);
+    File('${data.botHistoryIndexDir}/shard.json').writeAsStringSync('{}');
+    File('${data.cacheDir}/ordinary.json').writeAsStringSync('{}');
+    final workspace = Workspace(
+      projects: [
+        Project('Cache', data.cacheDir),
+        Project('Private data', data.botHistoryIndexDir),
+      ],
+    );
+    addTearDown(workspace.dispose);
+    final (phone, desktop) = await peers();
+    addTearDown(phone.close);
+    final host = WorkspaceBridge(
+      workspace: workspace,
+      peer: desktop,
+      device: () => const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
+    );
+    addTearDown(host.dispose);
+
+    expect(host.state().projects.map((p) => p.id), [data.cacheDir]);
+    final folder = await host.handle(LinkMethods.folder, {
+      'project': data.cacheDir,
+    });
+    expect(folder, {
+      'folders': <Object?>[],
+      'files': ['ordinary.json'],
+    });
+    expect(
+      await host.handle(LinkMethods.files, {'project': data.cacheDir}),
+      containsPair('paths', ['ordinary.json']),
+    );
+    expect(
+      await host.handle(LinkMethods.read, {
+        'project': data.cacheDir,
+        'path': 'ordinary.json',
+      }),
+      containsPair('text', '{}'),
+    );
+  });
+
   test('a file from the phone: kept for the agent, by its name', () async {
     final workspace = Workspace();
     addTearDown(workspace.dispose);
@@ -1870,32 +2682,41 @@ void main() {
 }
 
 /// A phone's end and a desktop's, connected.
-Future<(LinkPeer, LinkPeer)> peers() async {
+Future<(LinkPeer, LinkPeer)> peers({
+  String? phoneId,
+  LinkRequestHandler? onRequest,
+}) async {
   final (a, b) = MemoryLinkConnection.pair(
-    a: LinkIdentity.generate().id,
+    a: phoneId ?? LinkIdentity.generate().id,
     b: LinkIdentity.generate().id,
   );
-  final accepted = LinkPeer.accept(b);
+  final accepted = LinkPeer.accept(b, onRequest: onRequest);
   final connected = await LinkPeer.connect(a);
   return (connected, await accepted);
 }
 
 /// Lists one kept session in the project.
 class _KeptCatalog implements SessionCatalog {
+  _KeptCatalog([this.kept]);
+
+  final List<ProjectRecord>? kept;
+
   @override
-  Future<List<ProjectRecord>> projects() async => [
-    ProjectRecord(
-      path: '/p',
-      sessions: [
-        SessionRecord(
-          id: 'k',
-          title: 'kept',
-          updatedAt: DateTime(2026),
-          cwd: '/p',
+  Future<List<ProjectRecord>> projects() async =>
+      kept ??
+      [
+        ProjectRecord(
+          path: '/p',
+          sessions: [
+            SessionRecord(
+              id: 'k',
+              title: 'kept',
+              updatedAt: DateTime(2026),
+              cwd: '/p',
+            ),
+          ],
         ),
-      ],
-    ),
-  ];
+      ];
 
   @override
   Future<List<SessionRecord>> sessionsIn(String cwd) async => const [];

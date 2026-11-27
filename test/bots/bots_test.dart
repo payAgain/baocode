@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:baocode/bots/bot.dart';
 import 'package:baocode/bots/bot_files.dart';
 import 'package:baocode/bots/bot_folders.dart';
+import 'package:baocode/bots/bot_memory.dart';
 import 'package:baocode/bots/bot_pacer.dart';
 import 'package:baocode/bots/bot_permissions.dart';
 import 'package:baocode/bots/bot_prompt.dart';
@@ -199,8 +200,10 @@ void main() {
       final told = botAbilities(bot);
       expect(told, contains('session_list'));
       expect(told, contains('session_stop'));
-      // All an agent has, unless it only chats.
-      expect(told, contains('You can work on the computer as an agent does'));
+      expect(
+        told,
+        contains('limited to separately authorized project sessions'),
+      );
       expect(
         botAbilities(
           Bot(
@@ -211,20 +214,18 @@ void main() {
             chatOnly: true,
           ),
         ),
-        contains('You do not change files nor run commands'),
+        contains('limited to separately authorized project sessions'),
       );
       expect(
         botAbilities(const Bot(id: 'q', name: 'Q', folder: '/bots/q')),
         contains("You cannot see the user's agents"),
       );
-      expect(told, contains('You cannot use the browser.'));
+      expect(told, contains('You cannot use the browser in this chat.'));
       // Pictures, every bot's.
       expect(told, contains('generate_image'));
     });
 
-    test('what of Claude Code\'s it has: an agent\'s but what waits on the '
-        'user at the computer; only chatting, the web\'s, the browser\'s by '
-        'the tool search, no files, no commands', () {
+    test('isolated chat workers have no ambient tools', () {
       Bot bot(Set<BotAbility> abilities, {bool chatOnly = false}) => Bot(
         id: 'b1',
         name: 'Mia',
@@ -232,35 +233,7 @@ void main() {
         abilities: abilities,
         chatOnly: chatOnly,
       );
-      // An agent's, but for what would wait on someone at the computer.
-      final agent = BotPermissions.tools(bot({}));
-      expect(agent, containsAll(['Bash', 'Read', 'Edit', 'ToolSearch']));
-      for (final waits in [
-        'AskUserQuestion',
-        'EnterPlanMode',
-        'ExitPlanMode',
-        'Workflow',
-        'EnterWorktree',
-        'CronCreate',
-        'ScheduleWakeup',
-        'SendMessage',
-      ]) {
-        expect(agent, isNot(contains(waits)));
-      }
-      for (final abilities in [
-        <BotAbility>{},
-        {BotAbility.agents},
-      ]) {
-        expect(BotPermissions.tools(bot(abilities, chatOnly: true)), [
-          'WebSearch',
-          'WebFetch',
-        ]);
-      }
-      expect(BotPermissions.tools(bot({BotAbility.browser}, chatOnly: true)), [
-        'WebSearch',
-        'WebFetch',
-        'ToolSearch',
-      ]);
+      expect(BotPermissions.chatTools, isEmpty);
       // Kept on its card; not said, all of it.
       final card = BotFiles.cardText(bot({}, chatOnly: true));
       expect(card, contains('chat_only: true'));
@@ -289,7 +262,7 @@ void main() {
       expect(botAbilities(painter), contains('generate_image'));
       expect(
         botAbilities(painter, imageModel: false),
-        contains('no image model turned on'),
+        contains('Image generation is unavailable in this chat'),
       );
       // Emoji, not the app's stickers; pictures of its own.
       expect(botChatStyle, contains('emoji'));
@@ -459,7 +432,10 @@ void main() {
       expect(workspace.isHidden(thread.project), isTrue);
       expect(workspace.listsInSidebar(thread), isFalse);
       expect(bots.threadFor(bot), same(thread));
-      expect(workspace.agentSetup!(bot.folder)!.settings, Bots.settings);
+      expect(
+        workspace.agentSetup!(bots.runtimeFolder(bot))!.settings,
+        Bots.settings,
+      );
       // A folder left behind, its bot gone: still the app's own, no
       // project of the sidebar's (nor of the phone's).
       expect(workspace.isAppFolder('/bots/left-behind'), isTrue);
@@ -572,7 +548,7 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 20));
       }
       final launch = launches.single;
-      expect(launch.cwd, bot.folder);
+      expect(launch.cwd, bots.runtimeFolder(bot));
       expect(launch.instructions, contains('<bot_rules>'));
       expect(launch.instructions, contains('小宝'));
       // Its prompt in place of a coding agent's: none of the chat's notes
@@ -583,22 +559,24 @@ void main() {
       expect(launch.arguments.join(' '), isNot(contains('<citing_code>')));
       // What the user writes meanwhile, taken up as it talks.
       expect(
-        workspace.agentSetup!(bot.folder)!.workspace().queuedMessages,
+        workspace.agentSetup!(bots.runtimeFolder(bot))!
+            .workspace()
+            .queuedMessages,
         QueuedMessages.duringTurn,
       );
       // Full access, nothing asked: the CLI accepting edits, the rest
       // approved by the kernel, what the CLI would ask about too.
       expect(launch.permissionMode, 'acceptEdits');
       expect(
-        workspace.agentSetup!(bot.folder)!.workspace().approvesAll,
+        workspace.agentSetup!(bots.runtimeFolder(bot))!.workspace().approvesAll,
         isTrue,
       );
       expect(launch.sdkServers, [ClaudeSdkTools.server]);
       // An agent's tools, but for what would wait on the user at the
       // computer; the user's MCP servers too, as an agent's.
-      expect(launch.tools, BotPermissions.agentTools);
+      expect(launch.tools, BotPermissions.chatTools);
       expect(launch.arguments, contains('--tools'));
-      expect(launch.arguments, isNot(contains('--strict-mcp-config')));
+      expect(launch.arguments, contains('--strict-mcp-config'));
       // Nothing it is made to ask about.
       expect(
         (launch.settings['permissions'] as Map?)?.containsKey('ask'),
@@ -612,7 +590,7 @@ void main() {
       'a bot is offered its abilities\' tools; a project\'s agent none',
       () async {
         final assistant = bots.bots.single;
-        final its = await offered(assistant.folder);
+        final its = await offered(bots.runtimeFolder(assistant));
         expect(its, containsAll(['session_list', 'session_stop']));
         // Its tools as well as its files: they keep the same.
         for (final tool in [
@@ -637,17 +615,19 @@ void main() {
           identity: '',
           abilities: {BotAbility.agents},
         );
-        final hers = await offered(mia.folder);
+        final hers = await offered(bots.runtimeFolder(mia));
         expect(
           hers,
           containsAll(['session_list', 'session_read', 'session_stop']),
         );
         expect(hers, contains('bot_remember'));
         final none = bots.save(name: 'Quiet', identity: '', abilities: {});
-        expect(await offered(none.folder), [
+        expect(await offered(bots.runtimeFolder(none)), [
           'bot_later',
           'bot_cancel_later',
           'bot_send_image',
+          'bot_history',
+          'bot_refine',
           'bot_remember',
           'bot_send',
           'bot_my_picture',
@@ -655,14 +635,17 @@ void main() {
           'bot_edit_me',
         ]);
         // The assistant's alone: its contacts looked after.
-        expect(await offered(mia.folder), isNot(contains('bot_list_bots')));
+        expect(
+          await offered(bots.runtimeFolder(mia)),
+          isNot(contains('bot_list_bots')),
+        );
         // Nor called, though named.
         final refused = await ClaudeSdkTools.handle({
           'jsonrpc': '2.0',
           'id': 2,
           'method': 'tools/call',
           'params': {'name': 'session_list', 'arguments': <String, Object?>{}},
-        }, ClaudeSdkCall(cwd: none.folder));
+        }, ClaudeSdkCall(cwd: bots.runtimeFolder(none)));
         expect((refused['result'] as Map)['isError'], isTrue);
       },
     );
@@ -704,7 +687,7 @@ void main() {
         ('female', 'Tea first.', 'Short.'),
       );
       bots.setModel(mia, 'opus');
-      expect(workspace.agentSetup!(mia.folder)!.settings, {
+      expect(workspace.agentSetup!(bots.runtimeFolder(mia))!.settings, {
         ...Bots.settings,
         'model': 'opus',
       });
@@ -774,7 +757,7 @@ void main() {
       expect(bots.avatarImage(emoji), isNull);
     });
 
-    test('pictures are made by those that may, the model not asked', () async {
+    test('private workers cannot load ambient image tools', () async {
       ClaudeSdkTools.register(
         ClaudeSdkTool(
           name: ImageTools.name,
@@ -785,11 +768,17 @@ void main() {
       );
       addTearDown(() => ClaudeSdkTools.unregister(ImageTools.name));
       final assistant = bots.bots.single;
-      expect(await offered(assistant.folder), contains(ImageTools.name));
+      expect(
+        await offered(bots.runtimeFolder(assistant)),
+        isNot(contains(ImageTools.name)),
+      );
       final mia = bots.save(name: 'Mia', identity: '', abilities: {});
-      expect(await offered(mia.folder), contains(ImageTools.name));
+      expect(
+        await offered(bots.runtimeFolder(mia)),
+        isNot(contains(ImageTools.name)),
+      );
       // No one at the computer to pick the model for it.
-      expect(ClaudeSdkTools.asksUser(assistant.folder), isFalse);
+      expect(ClaudeSdkTools.asksUser(bots.runtimeFolder(assistant)), isFalse);
       expect(ClaudeSdkTools.asksUser(app), isTrue);
     });
 
@@ -804,12 +793,12 @@ void main() {
                 'id': 4,
                 'method': 'tools/call',
                 'params': {'name': tool, 'arguments': input},
-              }, ClaudeSdkCall(cwd: bot.folder)))['result']
+              }, ClaudeSdkCall(cwd: bots.runtimeFolder(bot))))['result']
               as Map;
       final assistant = bots.bots.single;
       // No stickers of the app's now: emoji in its messages.
       expect(
-        await offered(assistant.folder),
+        await offered(bots.runtimeFolder(assistant)),
         isNot(contains('bot_send_sticker')),
       );
       expect(
@@ -832,7 +821,7 @@ void main() {
               'id': 5,
               'method': 'tools/call',
               'params': {'name': tool, 'arguments': input},
-            }, ClaudeSdkCall(cwd: bot.folder)))['result']
+            }, ClaudeSdkCall(cwd: bots.runtimeFolder(bot))))['result']
             as Map;
 
     test('it looks after the agents with the session tools', () async {
@@ -845,7 +834,7 @@ void main() {
         'jsonrpc': '2.0',
         'id': 1,
         'method': 'tools/list',
-      }, ClaudeSdkCall(cwd: assistant.folder));
+      }, ClaudeSdkCall(cwd: bots.runtimeFolder(assistant)));
       final tools = ((listed['result'] as Map)['tools'] as List).cast<Map>();
       expect(tools.firstWhere((t) => t['name'] == 'session_new')['_meta'], {
         'anthropic/alwaysLoad': true,
@@ -914,13 +903,13 @@ void main() {
       expect(loading.threads, isEmpty);
       listed.complete([
         ProjectRecord(
-          path: '/bots/assistant',
+          path: '/bots/runtime/assistant/private',
           sessions: [
             SessionRecord(
               id: 'kept',
               title: '在吗',
               updatedAt: now.subtract(const Duration(hours: 1)),
-              cwd: '/bots/assistant',
+              cwd: '/bots/runtime/assistant/private',
             ),
           ],
         ),
@@ -930,7 +919,7 @@ void main() {
       expect(later.threadOf(assistant)!.record?.id, 'kept');
       expect([
         for (final t in loading.threads)
-          if (t.project.path == assistant.folder) t,
+          if (t.project.path == later.runtimeFolder(assistant)) t,
       ], hasLength(1));
     });
 
@@ -958,13 +947,13 @@ void main() {
         catalog: _Catalog(
           Future.value([
             ProjectRecord(
-              path: '/bots/assistant',
+              path: '/bots/runtime/assistant/private',
               sessions: [
                 SessionRecord(
                   id: 'kept',
                   title: '在吗',
                   updatedAt: now.subtract(const Duration(hours: 1)),
-                  cwd: '/bots/assistant',
+                  cwd: '/bots/runtime/assistant/private',
                 ),
               ],
             ),
@@ -1073,7 +1062,7 @@ void main() {
       bots.deliver();
       expect(bots.laters(soon), isEmpty);
       // Every bot may: none is set up for it.
-      expect(await offered(bot.folder), contains('bot_later'));
+      expect(await offered(bots.runtimeFolder(bot)), contains('bot_later'));
     });
 
     test('it keeps notes of itself, and sees its own picture', () async {
@@ -1164,7 +1153,7 @@ void main() {
               'name': 'bot_remember',
               'arguments': {'action': action, 'text': text},
             },
-          }, ClaudeSdkCall(cwd: bot.folder));
+          }, ClaudeSdkCall(cwd: bots.runtimeFolder(bot)));
       await remember('add', 'Name is Leo');
       await remember('add', 'Likes tea');
       expect(bots.memory(bot), '- Name is Leo\n- Likes tea');
@@ -1177,6 +1166,154 @@ void main() {
       bots.setMemory(bot, '');
       expect(bots.memory(bot), '');
       expect(folders.files, isNot(contains('${bot.folder}/MEMORY.md')));
+    });
+
+    test(
+      'user memory migrates legacy notes and checks entry revisions',
+      () async {
+        final bot = bots.save(name: 'Mia', identity: '', abilities: {});
+        final path = '${bot.folder}/MEMORY.md';
+        folders.writeFile(path, utf8.encode('- 喜欢乌龙茶\n- 名字是 Leo\n'));
+        Future<List<Map>> entries() async {
+          final reply = await call(bot, 'bot_remember', {'action': 'list'});
+          final text =
+              ((reply['content'] as List).single as Map)['text'] as String;
+          return (jsonDecode(text)['entries'] as List).cast<Map>();
+        }
+
+        final before = await entries();
+        expect(before.map((e) => e['text']), ['喜欢乌龙茶', '名字是 Leo']);
+        final correction = {
+          'action': 'update',
+          'id': before.first['id'],
+          'revision': before.first['revision'],
+          'text': '现在喝红茶',
+        };
+        expect(
+          (await call(bot, 'bot_remember', correction))['isError'],
+          isNull,
+        );
+        expect(
+          (await call(bot, 'bot_remember', correction))['isError'],
+          isTrue,
+        );
+        final after = await entries();
+        expect(after.first['id'], before.first['id']);
+        expect(after.first['revision'], 2);
+        expect(after.last, before.last);
+        expect(bots.memory(bot), '- 现在喝红茶\n- 名字是 Leo');
+        expect(utf8.decode(folders.files[path]!), '- 现在喝红茶\n- 名字是 Leo\n');
+        final prompt = workspace.agentSetup!(bots.runtimeFolder(bot))!
+            .workspace()
+            .instructions;
+        expect(prompt, contains('现在喝红茶'));
+        expect(prompt, isNot(contains('喜欢乌龙茶')));
+
+        await call(bot, 'bot_remember', {
+          'action': 'remove',
+          'id': after.first['id'],
+          'revision': after.first['revision'],
+        });
+        await call(bot, 'bot_remember', {'text': '喜欢普洱'});
+        expect((await entries()).last['id'], isNot(before.first['id']));
+      },
+    );
+
+    test('user memory batches check final size and commit together', () async {
+      final bot = bots.save(name: 'Mia', identity: '', abilities: {});
+      final full = '茶' * 1373;
+      await call(bot, 'bot_remember', {'text': full});
+      final entry = bots.userMemory(bot).entries.single;
+      final addition = {'action': 'add', 'text': 'Chinese'};
+      final rejected = await call(bot, 'bot_remember', addition);
+      expect(rejected['isError'], isTrue);
+      expect(bots.userMemory(bot).entries.single.text, full);
+
+      final accepted = await call(bot, 'bot_remember', {
+        'operations': [
+          addition,
+          {'action': 'remove', 'id': entry.id, 'revision': entry.revision},
+        ],
+      });
+      expect(accepted['isError'], isNull);
+      await call(bot, 'bot_remember', addition);
+      expect(bots.memory(bot), '- Chinese');
+    });
+
+    test(
+      'user memory can be reduced one entry at a time when over budget',
+      () async {
+        final bot = bots.save(name: 'Mia', identity: '', abilities: {});
+        final large = '茶' * 1375;
+        bots.setMemory(bot, '- Old note\n- $large\n- Another note');
+        final initial = bots.userMemory(bot);
+        expect(initial.markdown.runes.length, greaterThan(1375));
+        final first = initial.entries.first;
+        final removal = await call(bot, 'bot_remember', {
+          'action': 'remove',
+          'id': first.id,
+          'revision': first.revision,
+        });
+        expect(removal['isError'], isNull);
+        expect(bots.memory(bot), '- $large\n- Another note');
+        expect(bots.userMemory(bot).prompt, '- Another note');
+        final duplicate = await call(bot, 'bot_remember', {
+          'text': 'Another note',
+        });
+        expect(duplicate['isError'], isNull);
+        final growth = await call(bot, 'bot_remember', {'text': 'New note'});
+        expect(growth['isError'], isTrue);
+      },
+    );
+
+    test('user memory batch cannot accidentally delete every entry', () async {
+      final bot = bots.save(name: 'Mia', identity: '', abilities: {});
+      bots.setMemory(bot, '- First\n- Second');
+      final removals = [
+        for (final entry in bots.userMemory(bot).entries)
+          {'action': 'remove', 'id': entry.id, 'revision': entry.revision},
+      ];
+      final batch = await call(bot, 'bot_remember', {'operations': removals});
+      expect(batch['isError'], isTrue);
+      expect(bots.memory(bot), '- First\n- Second');
+      for (final remove in removals) {
+        expect((await call(bot, 'bot_remember', remove))['isError'], isNull);
+      }
+      expect(bots.memory(bot), isEmpty);
+    });
+
+    test('user memory retains oversized legacy text outside the prompt', () {
+      final bot = bots.save(name: 'Mia', identity: '', abilities: {});
+      final legacy = '# My notes\n\n${'茶' * 1375}';
+      folders.writeFile('${bot.folder}/MEMORY.md', utf8.encode(legacy));
+      final memory = bots.userMemory(bot);
+      expect(memory.entries.single.text, legacy);
+      expect(memory.prompt, isEmpty);
+      expect(bots.memory(bot), legacy);
+    });
+
+    test('appending through the legacy editor keeps structured entries', () {
+      final bot = bots.save(name: 'Mia', identity: '', abilities: {});
+      bots.changeUserMemory(bot, [
+        (
+          action: BotMemoryAction.add,
+          id: null,
+          revision: null,
+          text: 'First\nDetails',
+        ),
+        (action: BotMemoryAction.add, id: null, revision: null, text: 'Second'),
+      ]);
+      final initial = bots.userMemory(bot).entries.first;
+      bots.pinUserMemory(bot, initial.id, initial.revision, true);
+      final before = bots.userMemory(bot);
+      bots.setMemory(bot, '${before.markdown}\n- Third');
+      final after = bots.userMemory(bot);
+      expect(
+        after.entries.take(2).map((entry) => entry.toJson()),
+        before.entries.map((entry) => entry.toJson()),
+      );
+      expect(after.entries.last.text, 'Third');
+      expect(after.withdrawalGeneration, before.withdrawalGeneration);
     });
 
     test('it writes first of an agent of its own done, in a note of the '
@@ -1258,7 +1395,7 @@ void main() {
       expect(notes(assistant).last, contains('done: "${second.title}"'));
       await pumpEventQueue();
       expect(store.preferences['watching'], {
-        mia.id: [second.id],
+        mia.id: [BotTools.idOf(second)],
       });
     });
 
@@ -1295,6 +1432,92 @@ void main() {
       expect(bots.recentEvents(bot).last, endsWith('-> tell'));
     });
 
+    test(
+      'removing the assistant card retires its queued Link requests',
+      () async {
+        final old = bots.bots.single;
+        final thread = bots.threadFor(old);
+        final alias = bots.privateSessionId(old);
+        bots.sendPrivate(
+          old,
+          const ComposerMessage(text: 'pending message'),
+          linkRequest: (key: 'old-request', fingerprint: 'request-body'),
+        );
+        expect(bots.pendingPrivateItems(old), hasLength(1));
+        expect(bots.privateLinkReceipt('old-request')?.valid, isTrue);
+
+        folders.delete(old.folder);
+        bots.reload();
+
+        final assistant = bots.byId(old.id)!;
+        final replacement = bots.threadOf(assistant);
+        expect(replacement, isNotNull);
+        expect(replacement, isNot(same(thread)));
+        expect(bots.privateSessionId(assistant), isNot(alias));
+        expect(bots.isStalePrivateSession(alias), isTrue);
+        expect(bots.pendingPrivateItems(assistant), isEmpty);
+        expect(bots.privateLinkReceipt('old-request'), isNull);
+        expect(bots.isDeletedPrivateRequest('old-request'), isTrue);
+        await pumpEventQueue();
+        expect(bots.threadFor(assistant).session.itemCount, 0);
+        expect(workspace.threads, isNot(contains(thread)));
+
+        final restarted = Bots(workspace: workspace, folders: folders);
+        addTearDown(restarted.dispose);
+        expect(restarted.isDeletedPrivateRequest('old-request'), isTrue);
+      },
+    );
+
+    test('clear waits for catalog deletion and reports a failure', () async {
+      final catalog = _KeptSessions({});
+      final kept = Workspace(
+        kernels: [
+          KernelDescriptor(
+            id: kernel.id,
+            label: kernel.label,
+            icon: kernel.icon,
+            description: kernel.description,
+            create: kernel.create,
+            catalog: catalog,
+          ),
+        ],
+      );
+      addTearDown(kept.dispose);
+      final own = Bots(workspace: kept, folders: MemoryBotFolders());
+      addTearDown(own.dispose);
+      await own.start();
+      final bot = own.bots.single;
+      final thread = own.threadFor(bot);
+      final folder = own.runtimeFolder(bot);
+      catalog.kept[folder] = ['detached'];
+      final entered = Completer<void>();
+      final released = Completer<void>();
+      final failure = StateError('catalog deletion failed');
+      catalog.onDelete = (id) async {
+        expect(id, 'detached');
+        entered.complete();
+        await released.future;
+        throw failure;
+      };
+      final stopping = Bots.stopping;
+      Bots.stopping = Duration.zero;
+      addTearDown(() => Bots.stopping = stopping);
+
+      final clearing = own.clearChat(bot);
+      final failed = expectLater(clearing, throwsA(same(failure)));
+      await entered.future;
+      expect(kept.threads, isNot(contains(thread)));
+      expect(own.threadOf(bot), isNull);
+      released.complete();
+      await failed;
+      expect(catalog.kept[folder], ['detached']);
+
+      catalog.onDelete = null;
+      await own.clearChat(bot);
+      expect(catalog.deleted, ['detached']);
+      expect(own.threadOf(bot)?.session.itemCount, 0);
+    });
+
     test('its chat deleted: a new one, from nothing said; who it is and '
         'what it remembers kept', () async {
       final bot = bots.save(name: 'Mia', identity: 'x', abilities: {});
@@ -1303,7 +1526,7 @@ void main() {
       await pumpEventQueue();
       bots.setMemory(bot, 'Likes tea');
       bots.later(bot, const Duration(hours: 1), 'Ask how it went');
-      bots.clearChat(bot);
+      await bots.clearChat(bot);
       expect(workspace.threads, isNot(contains(had)));
       final now = bots.threadOf(bot)!;
       expect(now, isNot(had));
@@ -1331,7 +1554,7 @@ void main() {
       );
       bots.setNow(bot, 'waiting to hear of Tom');
       bots.setSelfNotes(bot, '${bots.selfNotes(bot)}\nLikes rain');
-      bots.clearChat(bot);
+      await bots.clearChat(bot);
       final today = bots.timeline(bot).lines;
       expect(today, hasLength(1));
       expect(today.single, contains('hello all'));
@@ -1339,7 +1562,7 @@ void main() {
       // Nothing but it said that day: the day's file gone.
       final other = bots.save(name: 'Bo', identity: '', abilities: {});
       bots.live(other, place: bots.privatePlace, who: 'Leo', text: 'secret');
-      bots.clearChat(other);
+      await bots.clearChat(other);
       expect(folders.files, isNot(contains(bots.timelineFile(other))));
     });
 
@@ -1392,18 +1615,18 @@ void main() {
       ].whereType<UserMessageItem>().last;
       expect(ChatCodec.botEvent(note), contains('小宝 (the assistant'));
       expect(bots.byId(cat.id)!.identity, '你是一只懒猫');
-      // Itself, a picture it made: cut square; not told what it did.
       final before = told(assistant);
-      final file = File('$app/made.png')
-        ..writeAsBytesSync(
-          base64.decode(
-            'iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8Dw'
-            'HxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC',
-          ),
-        );
+      const received = 'received/image-1.png';
+      folders.writeFile(
+        '${assistant.folder}/$received',
+        base64.decode(
+          'iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8Dw'
+          'HxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC',
+        ),
+      );
       final changed = await call(assistant, 'bot_save_bot', {
         'bot': assistant.id,
-        'picture': file.path,
+        'picture': received,
         'signature': '在呢',
       });
       expect(changed['isError'], isNot(isTrue), reason: '$changed');
@@ -1420,10 +1643,9 @@ void main() {
       );
       await call(assistant, 'bot_delete_bot', {'bot': cat.id});
       expect(bots.byId(cat.id), isNull);
-      // A new one with a picture it made, set by it, not left to the user.
       await call(assistant, 'bot_save_bot', {
         'name': '阿狗',
-        'picture': file.path,
+        'picture': received,
       });
       final dog = bots.bots.firstWhere((b) => b.name == '阿狗');
       expect(isAvatarImage(dog.avatar!), isTrue);
@@ -1503,7 +1725,9 @@ void main() {
         (seen['content'] as List).map((c) => (c as Map)['type']),
         contains('image'),
       );
-      final told = workspace.agentSetup!(bot.folder)!.workspace().instructions;
+      final told = workspace.agentSetup!(bots.runtimeFolder(bot))!
+          .workspace()
+          .instructions;
       expect(told, contains('Their name: Leo.'));
       expect(told, contains('写代码的'));
       // Their USER.md, their picture beside it.
@@ -1603,7 +1827,9 @@ void main() {
 
       // Its tool, and told how.
       final mia = bots.save(name: 'Mia', identity: '', abilities: {});
-      final told = workspace.agentSetup!(mia.folder)!.workspace().instructions;
+      final told = workspace.agentSetup!(bots.runtimeFolder(mia))!
+          .workspace()
+          .instructions;
       expect(told, contains('<your_profile>'));
       expect(told, contains('bot_edit_me'));
       await call(mia, 'bot_edit_me', {'emoji': '🐱', 'signature': '困'});
@@ -1611,7 +1837,12 @@ void main() {
         (bots.byId(mia.id)!.avatar, bots.byId(mia.id)!.signature),
         ('🐱', '困'),
       );
-      await call(mia, 'bot_edit_me', {'picture': made.path});
+      expect(
+        (await call(mia, 'bot_edit_me', {'picture': made.path}))['isError'],
+        isTrue,
+      );
+      folders.writeFile('${mia.folder}/received/image-1.png', wide);
+      await call(mia, 'bot_edit_me', {'picture': 'received/image-1.png'});
       final pictured = bots.byId(mia.id)!;
       expect(isAvatarImage(pictured.avatar), isTrue);
       expect(pictured.name, 'Mia');
@@ -1926,8 +2157,14 @@ void main() {
       expect(bots.watchRules(bot), BotWatch.defaults);
       // Not a bot's that is told of nothing.
       final mia = bots.save(name: 'Mia', identity: '', abilities: {});
-      expect(await offered(mia.folder), isNot(contains('bot_watch')));
-      expect(await offered(bot.folder), contains('bot_recent_events'));
+      expect(
+        await offered(bots.runtimeFolder(mia)),
+        isNot(contains('bot_watch')),
+      );
+      expect(
+        await offered(bots.runtimeFolder(bot)),
+        contains('bot_recent_events'),
+      );
     });
 
     test('at work in its chat, as it is: woken by the app too; not at a '
@@ -1953,18 +2190,14 @@ void main() {
       session.stop();
       await until(() => !session.isStreaming);
       expect(bots.typing(bot), isFalse);
-      // A group's news: at work there, not in its chat.
-      session.send(
-        ComposerMessage(
-          text: botEventMessage(
-            '[group g1] The group chat "Team": you.\nNew in it.',
-          ),
-        ),
-      );
-      await until(() => session.isStreaming);
+      final room = bots.groups.save(name: 'Team', members: [bot.id]);
+      bots.groups.send(room.id, text: 'New in it.');
+      final groupSession = bots.threadFor(bot, group: room.id).session;
+      await until(() => groupSession.isStreaming);
+      expect(groupSession.isStreaming, isTrue);
       expect(bots.typing(bot), isFalse);
-      expect(bots.atWork(bot)!.group, 'g1');
-      session.stop();
+      expect(bots.atWork(bot)!.group, room.id);
+      groupSession.stop();
     });
   });
 
@@ -2098,6 +2331,7 @@ class _KeptSessions implements SessionCatalog {
 
   final Map<String, List<String>> kept;
   final deleted = <String>[];
+  Future<void> Function(String id)? onDelete;
 
   @override
   Future<List<ProjectRecord>> projects() async => [
@@ -2122,5 +2356,8 @@ class _KeptSessions implements SessionCatalog {
       const [];
 
   @override
-  Future<void> delete(String id) async => deleted.add(id);
+  Future<void> delete(String id) async {
+    if (onDelete case final callback?) return callback(id);
+    deleted.add(id);
+  }
 }

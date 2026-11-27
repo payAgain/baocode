@@ -2,10 +2,137 @@ import 'dart:typed_data';
 
 import 'package:baocode/bots/desktop_bot_messages.dart';
 import 'package:baocode/chat/chat_models.dart';
+import 'package:baocode/chat/chat_session.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  for (final archived in [false, true]) {
+    test('mixed DM admits only known private content (archived=$archived)', () {
+      final groupPicture = ImageAttachment(
+        bytes: Uint8List(0),
+        mediaType: 'image/png',
+        name: 'group.png',
+      );
+      final privatePicture = ImageAttachment(
+        bytes: Uint8List(0),
+        mediaType: 'image/png',
+        name: 'private.png',
+      );
+      final items = [
+        const AssistantTextItem('<bot_say>unattributed reply</bot_say>'),
+        const UserMessageItem(text: '<bao-event>[group room] note</bao-event>'),
+        UserMessageItem(
+          text: 'queued private words [Image #1] ![room](queued.png)',
+          images: [groupPicture],
+          queued: true,
+        ),
+        const AssistantTextItem('<bot_say>group answer</bot_say>'),
+        UserMessageItem(
+          text:
+              'private words [Image #1] ![room](merged.png)\n'
+              '<bao-event>\n[group room] merged group note</bao-event>',
+          images: [groupPicture],
+        ),
+        const AssistantTextItem(
+          '<bot_say>ambiguous answer</bot_say>'
+          '<bot_narrate>ambiguous narration</bot_narrate>',
+        ),
+        ToolCallItem(
+          kind: ToolKind.image,
+          target: 'group',
+          images: [groupPicture],
+        ),
+        const ToolCallItem(
+          kind: ToolKind.other,
+          target: 'bot_send_image',
+          tool: 'bot_send_image',
+          input: {'url': 'https://example.invalid/ambiguous.png'},
+        ),
+        ToolCallItem(
+          kind: ToolKind.message,
+          target: 'room',
+          tool: 'bot_send',
+          input: const {'to': 'room', 'text': 'group delivery'},
+          images: [groupPicture],
+        ),
+        ToolCallItem(
+          kind: ToolKind.message,
+          target: 'private',
+          tool: 'bot_send',
+          input: const {'to': 'private', 'text': 'explicit private delivery'},
+          images: [privatePicture],
+        ),
+        const ToolCallItem(
+          kind: ToolKind.message,
+          target: 'private',
+          tool: 'bot_send',
+          status: ToolStatus.failed,
+          input: {'to': 'private', 'text': 'failed private delivery'},
+        ),
+        const UserMessageItem(
+          text: '<bao-event>unattributed app note</bao-event>',
+        ),
+        const AssistantTextItem('<bot_say>still unattributed</bot_say>'),
+        const UserMessageItem(
+          text: 'unattributed words <bao-event>[group room] truncated',
+        ),
+        const AssistantTextItem('<bot_say>truncated event reply</bot_say>'),
+        UserMessageItem(
+          text: 'private question [Image #2]',
+          images: [privatePicture],
+        ),
+        const AssistantTextItem('<bot_say>private answer</bot_say>'),
+        const ToolCallItem(
+          kind: ToolKind.other,
+          target: 'bot_send_image',
+          tool: 'bot_send_image',
+          input: {'url': 'https://example.invalid/private.png'},
+        ),
+      ];
+      final projected = archived
+          ? privateBotItems(
+              _Session(items),
+              legacy: true,
+            ).map((entry) => entry.item)
+          : items;
+      final messages = desktopBotMessages(projected, hasEarlier: !archived);
+      expect(messages.map((message) => message.text), [
+        'queued private words',
+        'private words',
+        'explicit private delivery',
+        'private question',
+        'private answer',
+        '',
+      ]);
+      expect(messages.map((message) => message.images), [
+        [],
+        [],
+        [privatePicture],
+        [privatePicture],
+        [],
+        [],
+      ]);
+      expect(
+        messages.where((message) => message.imageUrl != null).single.imageUrl,
+        Uri.parse('https://example.invalid/private.png'),
+      );
+      if (!archived) {
+        final preview = desktopBotMessages(
+          items,
+          hasEarlier: true,
+          previewOnly: true,
+        );
+        expect(preview.map((message) => message.text), [
+          'queued private words',
+          'private words',
+          'private question',
+          'private answer',
+        ]);
+      }
+    });
+  }
+
   test('only explicitly sent private pictures are projected', () {
     const url = 'https://example.invalid/private.png';
     const webPicture = ToolCallItem(
@@ -126,4 +253,16 @@ void main() {
       (DesktopBotMessageKind.reply, 'proactive private'),
     ]);
   });
+}
+
+class _Session extends Fake implements ChatSession {
+  _Session(this.items);
+
+  final List<ChatItem> items;
+
+  @override
+  int get itemCount => items.length;
+
+  @override
+  ChatItem itemAt(int index) => items[index];
 }

@@ -19,6 +19,7 @@ import 'package:baocode/models/model_provider.dart';
 import 'package:baocode/models/model_providers.dart';
 import 'package:baocode/sidebar/sidebar.dart';
 import 'package:baocode/kernel/claude_code/claude_code_transport.dart';
+import 'package:baocode/kernel/mock/mock_kernels.dart';
 import 'package:baocode/workspace/agent_title.dart';
 import 'package:baocode/workspace/chat_grid.dart';
 import 'package:baocode/workspace/editor_launcher.dart';
@@ -66,8 +67,15 @@ class FakeCatalog implements SessionCatalog {
   /// Sessions deleted, in order.
   static final List<String> deleted = [];
 
+  static Object? deleteError;
+  static Future<void> Function(String)? beforeDelete;
+
   @override
-  Future<void> delete(String id) async => deleted.add(id);
+  Future<void> delete(String id) async {
+    if (beforeDelete case final wait?) await wait(id);
+    if (deleteError case final error?) throw error;
+    deleted.add(id);
+  }
 }
 
 final KernelDescriptor claude = KernelDescriptor(
@@ -182,6 +190,28 @@ class _Renames implements ClaudeCodeTransport {
 }
 
 void main() {
+  test('startAgent creates or reuses a draft with the requested kernel', () {
+    final workspace = Workspace(
+      kernels: [MockKernels.codex, MockKernels.claudeCode],
+    );
+    addTearDown(workspace.dispose);
+    final project = workspace.projectAt('/tmp/project-task');
+    final codex = workspace.startAgent(project);
+
+    final claude = workspace.startAgent(
+      project,
+      kernel: MockKernels.claudeCode,
+    );
+
+    expect(codex.kernel.id, 'codex');
+    expect(claude.kernel.id, 'claude-code');
+    expect(claude, isNot(same(codex)));
+    expect(
+      workspace.startAgent(project, kernel: MockKernels.claudeCode),
+      same(claude),
+    );
+  });
+
   testWidgets(
     'a kept session talked in elsewhere is read anew by itself, in place',
     (tester) async {
@@ -952,11 +982,89 @@ void main() {
     );
     notifications = 0;
     final beforeDelete = store.writes;
-    workspace.deleteAll(toDelete);
+    await workspace.deleteAll(toDelete);
     expect(notifications, 1);
     expect(store.writes, beforeDelete + 1);
     // The remaining chat may subsequently sync new state, which must be saved.
     await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+  });
+
+  testWidgets('batch deletion blocks sends through catalog commit', (
+    tester,
+  ) async {
+    FakeCatalog.started.add(
+      SessionRecord(
+        id: 'delete-second',
+        title: 'Delete second',
+        updatedAt: DateTime(2026, 9, 28),
+        cwd: '/tmp/project',
+      ),
+    );
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    final calls = <String>[];
+    FakeCatalog.beforeDelete = (id) async {
+      calls.add(id);
+      if (id != 'delete-second') return;
+      entered.complete();
+      await release.future;
+    };
+    addTearDown(() {
+      FakeCatalog.started.clear();
+      FakeCatalog.beforeDelete = null;
+    });
+    final workspace = await pumpLoaded(tester);
+    AgentThread byId(String id) =>
+        workspace.threads.singleWhere((thread) => thread.id == id);
+    final first = byId(FakeCatalog.kept.id);
+    final second = byId('delete-second');
+    final session = first.session;
+    final deletion = workspace.deleteAll([first, second]);
+    await entered.future;
+    expect(calls, [FakeCatalog.kept.id, 'delete-second']);
+    expect(workspace.threads, contains(first));
+    expect(workspace.canReload(first), isFalse);
+    expect(session.send(const ComposerMessage(text: 'too late')), isFalse);
+    expect(
+      second.session.send(const ComposerMessage(text: 'also late')),
+      isFalse,
+    );
+    final duplicate = workspace.delete(first);
+    release.complete();
+    await Future.wait([deletion, duplicate]);
+    expect(calls, [FakeCatalog.kept.id, 'delete-second']);
+    expect(workspace.threads, isNot(contains(first)));
+    expect(workspace.threads, isNot(contains(second)));
+  });
+
+  testWidgets('catalog deletion failure preserves a thread and its draft', (
+    tester,
+  ) async {
+    final drafts = MemoryPreferenceStore();
+    final workspace = await pumpLoaded(tester, drafts: drafts);
+    final thread = workspace.threads.singleWhere(
+      (t) => t.id == FakeCatalog.kept.id,
+    );
+    thread.session.draft.save(
+      'Unsent text',
+      const TextSelection.collapsed(offset: 11),
+      const [],
+    );
+    await tester.pump(const Duration(milliseconds: 500));
+    final failure = StateError('The transcript writer still holds its lease');
+    FakeCatalog.deleteError = failure;
+    addTearDown(() => FakeCatalog.deleteError = null);
+
+    await expectLater(workspace.delete(thread), throwsA(same(failure)));
+    expect(workspace.threads, contains(thread));
+    expect(thread.session.draft.content, 'Unsent text');
+    expect((await drafts.read())[thread.id], isNotNull);
+
+    FakeCatalog.deleteError = null;
+    await workspace.delete(thread);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(workspace.threads, isNot(contains(thread)));
+    expect((await drafts.read())[thread.id], isNull);
   });
 
   testWidgets('sessions in the temporary folder are listed only once its '

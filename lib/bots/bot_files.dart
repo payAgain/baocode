@@ -21,13 +21,14 @@ import 'bot_pacer.dart' show BotLater;
 //       EVENTS.md        what happened to the agents lately, told or not
 //       avatar-….png     its picture, if it has one
 //
-// A bot that works on the computer keeps these itself, with Claude Code's
-// Read and Edit; the others through their tools.
+// User memory is managed through bot_remember. memory.json is its store,
+// and MEMORY.md is its readable copy after the first managed write.
 
 abstract final class BotFiles {
   static const card = 'BOT.md';
   static const style = 'STYLE.md';
   static const memory = 'MEMORY.md';
+  static const memoryData = 'memory.json';
   static const self = 'SELF.md';
   static const later = 'LATER.md';
   static const watch = 'WATCH.md';

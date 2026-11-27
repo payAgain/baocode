@@ -318,145 +318,161 @@ void main() {
     }
   });
 
-  testWidgets('desktop and phone share an ordered log and one member thread', (
-    tester,
-  ) async {
-    final fixture = _Fixture();
-    await fixture.start();
-    final bots = fixture.bots;
-    final mia = fixture.mia;
-    final thread = bots.threadOf(mia)!;
-    final group = bots.groups.save(name: 'Planning', members: [mia.id]);
-    final other = bots.groups.save(name: 'Research', members: [mia.id]);
-    final (phoneConn, desktopConn) = MemoryLinkConnection.pair(
-      a: LinkIdentity.generate().id,
-      b: LinkIdentity.generate().id,
-    );
-    late final WorkspaceBridge bridge;
-    final accepting = LinkPeer.accept(
-      desktopConn,
-      onRequest: (method, params) => bridge.handle(method, params),
-    );
-    final phone = await LinkPeer.connect(phoneConn);
-    final desktop = await accepting;
-    bridge = WorkspaceBridge(
-      workspace: fixture.workspace,
-      bots: bots,
-      peer: desktop,
-      device: () => const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
-    )..start();
-    try {
-      await tester.pumpWidget(fixture.page());
-      await tester.tap(find.text(group.name));
-      await tester.pump();
-      final input = find.byType(TextField);
-      final send = find.widgetWithIcon(IconButton, Icons.arrow_upward);
-      await tester.enterText(input, '   ');
-      await tester.pump();
-      expect(tester.widget<IconButton>(send).onPressed, isNull);
-
-      thread.session.send(const ComposerMessage(text: 'Private question'));
-      await tester.pump();
-      final cli = fixture.cli[mia.folder]!;
-      _finishTurn(cli, 'private', '<bot_say>Private answer</bot_say>');
-      await tester.pump();
-
-      final initial = await phone.call(LinkMethods.openGroup, {
-        'group': group.id,
-      });
-      expect(initial, {'messages': [], 'more': false});
-      final updates = <LinkGroupMessage>[];
-      final updatedGroups = <Object?>{};
-      final events = phone.events.listen((event) {
-        if (event.name != LinkEvents.group) return;
-        final data = event.data! as Map;
-        updatedGroups.add(data['group']);
-        updates.addAll(
-          (data['messages'] as List).cast<Map<String, Object?>>().map(
-            LinkGroupMessage.fromJson,
-          ),
-        );
-      });
+  testWidgets(
+    'desktop and phone share an ordered group log across isolated threads',
+    (tester) async {
+      final fixture = _Fixture();
+      await fixture.start();
+      final bots = fixture.bots;
+      final mia = fixture.mia;
+      final thread = bots.threadOf(mia)!;
+      final group = bots.groups.save(name: 'Planning', members: [mia.id]);
+      final other = bots.groups.save(name: 'Research', members: [mia.id]);
+      final (phoneConn, desktopConn) = MemoryLinkConnection.pair(
+        a: LinkIdentity.generate().id,
+        b: LinkIdentity.generate().id,
+      );
+      late final WorkspaceBridge bridge;
+      final accepting = LinkPeer.accept(
+        desktopConn,
+        onRequest: (method, params) => bridge.handle(method, params),
+      );
+      final phone = await LinkPeer.connect(phoneConn);
+      final desktop = await accepting;
+      bridge = WorkspaceBridge(
+        workspace: fixture.workspace,
+        bots: bots,
+        peer: desktop,
+        device: () =>
+            const DeviceInfo(name: 'Mac', kind: 'mac', system: 'macOS'),
+      )..start();
       try {
-        await tester.enterText(input, '  Desktop update  ');
+        await tester.pumpWidget(fixture.page());
+        await tester.tap(find.text(group.name));
         await tester.pump();
-        await tester.tap(send);
+        final input = find.byType(TextField);
+        final send = find.widgetWithIcon(IconButton, Icons.arrow_upward);
+        await tester.enterText(input, '   ');
         await tester.pump();
-        expect(tester.widget<TextField>(input).controller!.text, isEmpty);
-        expect(bots.groups.messages(group.id).single.text, 'Desktop update');
-        expect(cli.users.last.toString(), contains('[group ${group.id}]'));
+        expect(tester.widget<IconButton>(send).onPressed, isNull);
 
-        _finishTurn(
-          cli,
-          'first',
-          'private scratchpad <bot_say>[laughs] First reply</bot_say><bot_next></bot_next>',
-        );
+        thread.session.send(const ComposerMessage(text: 'Private question'));
+        await tester.pump();
+        final privateCli = fixture.cli[bots.runtimeFolder(mia)]!;
+        _finishTurn(privateCli, 'private', '<bot_say>Private answer</bot_say>');
         await tester.pump();
 
-        expect(
-          await phone.call(LinkMethods.sendGroup, {
-            'group': group.id,
-            'text': 'From the phone',
-            'id': 'test-phone-update',
-          }),
-          {'seq': 3},
-        );
-        await tester.pump();
-        _finishTurn(cli, 'second', '<bot_say>Second reply</bot_say>');
-        bots.groups.say(other.id, mia.id, 'Other room reply');
-        await tester.pumpAndSettle();
+        final initial = await phone.call(LinkMethods.openGroup, {
+          'group': group.id,
+        });
+        expect(initial, {'messages': [], 'more': false});
+        final updates = <LinkGroupMessage>[];
+        final updatedGroups = <Object?>{};
+        final events = phone.events.listen((event) {
+          if (event.name != LinkEvents.group) return;
+          final data = event.data! as Map;
+          updatedGroups.add(data['group']);
+          updates.addAll(
+            (data['messages'] as List).cast<Map<String, Object?>>().map(
+              LinkGroupMessage.fromJson,
+            ),
+          );
+        });
+        try {
+          await tester.enterText(input, '  Desktop update  ');
+          await tester.pump();
+          await tester.tap(send);
+          await tester.pump();
+          expect(tester.widget<TextField>(input).controller!.text, isEmpty);
+          expect(bots.groups.messages(group.id).single.text, 'Desktop update');
+          final groupCli =
+              fixture.cli[bots.runtimeFolder(mia, group: group.id)]!;
+          expect(
+            groupCli.users.last.toString(),
+            contains('[group ${group.id}]'),
+          );
+          expect(
+            groupCli.users.last.toString(),
+            isNot(contains('Private question')),
+          );
+          expect(privateCli.users, hasLength(1));
 
-        final expected = [
-          ('Desktop update', linkGroupUser),
-          ('First reply', mia.id),
-          ('From the phone', linkGroupUser),
-          ('Second reply', mia.id),
-        ];
-        var previousY = 0.0;
-        for (final (text, _) in expected) {
-          final shown = find.text(text);
-          expect(shown, findsOneWidget);
-          final y = tester.getTopLeft(shown).dy;
-          expect(y, greaterThan(previousY));
-          previousY = y;
+          _finishTurn(
+            groupCli,
+            'first',
+            'private scratchpad <bot_say>[laughs] First reply</bot_say><bot_next></bot_next>',
+          );
+          await tester.pump();
+
+          expect(
+            await phone.call(LinkMethods.sendGroup, {
+              'group': group.id,
+              'text': 'From the phone',
+              'id': 'test-phone-update',
+            }),
+            {'seq': 3},
+          );
+          await tester.pump(Duration.zero);
+          expect(groupCli.users, hasLength(2));
+          _finishTurn(groupCli, 'second', '<bot_say>Second reply</bot_say>');
+          bots.groups.say(other.id, mia.id, 'Other room reply');
+          await tester.pumpAndSettle();
+
+          final expected = [
+            ('Desktop update', linkGroupUser),
+            ('First reply', mia.id),
+            ('From the phone', linkGroupUser),
+            ('Second reply', mia.id),
+          ];
+          var previousY = 0.0;
+          for (final (text, _) in expected) {
+            final shown = find.text(text);
+            expect(shown, findsOneWidget);
+            final y = tester.getTopLeft(shown).dy;
+            expect(y, greaterThan(previousY));
+            previousY = y;
+          }
+          for (final hidden in [
+            'Private question',
+            'Private answer',
+            'Other room reply',
+            'private scratchpad',
+            '[group ',
+            '[laughs]',
+            '<bot_',
+          ]) {
+            expect(find.textContaining(hidden), findsNothing);
+          }
+          expect(updates.map((m) => (m.seq, m.from)), [
+            for (final (index, (_, sender)) in expected.indexed)
+              (index + 1, sender),
+          ]);
+          expect(updatedGroups, {group.id});
+          expect(
+            updates.map((m) => m.toJson()),
+            bots.groups.messages(group.id).map((m) => m.toJson()),
+          );
+          expect(
+            fixture.workspace.threads.where(
+              (t) => t.project.path == bots.runtimeFolder(mia),
+            ),
+            [thread],
+          );
+          expect(bots.threadOf(mia, group: group.id), isNot(same(thread)));
+          expect(fixture.workspace.threads, hasLength(bots.bots.length + 1));
+        } finally {
+          unawaited(events.cancel());
         }
-        for (final hidden in [
-          'Private question',
-          'Private answer',
-          'Other room reply',
-          'private scratchpad',
-          '[group ',
-          '[laughs]',
-          '<bot_',
-        ]) {
-          expect(find.textContaining(hidden), findsNothing);
-        }
-        expect(updates.map((m) => (m.seq, m.from)), [
-          for (final (index, (_, sender)) in expected.indexed)
-            (index + 1, sender),
-        ]);
-        expect(updatedGroups, {group.id});
-        expect(
-          updates.map((m) => m.toJson()),
-          bots.groups.messages(group.id).map((m) => m.toJson()),
-        );
-        expect(
-          fixture.workspace.threads.where((t) => t.project.path == mia.folder),
-          [thread],
-        );
-        expect(fixture.workspace.threads, hasLength(bots.bots.length));
       } finally {
-        unawaited(events.cancel());
+        await tester.pumpWidget(const SizedBox.shrink());
+        bridge.dispose();
+        await phone.close();
+        await desktop.close();
+        fixture.dispose();
+        await tester.pump();
       }
-    } finally {
-      await tester.pumpWidget(const SizedBox.shrink());
-      bridge.dispose();
-      await phone.close();
-      await desktop.close();
-      fixture.dispose();
-      await tester.pump();
-    }
-  });
+    },
+  );
 }
 
 void _finishTurn(FakeCli cli, String id, String reply) => cli

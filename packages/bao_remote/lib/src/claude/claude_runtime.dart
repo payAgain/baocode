@@ -207,12 +207,16 @@ class ClaudeRuntime {
 
   /// [cli]'s version (`2.1.3`), asked as [locate] asks it; null when it
   /// does not say.
-  Future<String?> versionOf(ClaudeCli cli) async {
-    final version = isInstalled(cli)
-        ? _parse(managed.version)
-        : await _versionOf(cli);
-    return version?.join('.');
+  Future<String?> versionOf(ClaudeCli cli) async =>
+      (await _resolvedVersion(cli))?.join('.');
+
+  Future<bool> versionAtLeast(ClaudeCli cli, List<int> minimum) async {
+    final version = await _resolvedVersion(cli);
+    return version != null && _compare(version, minimum) >= 0;
   }
+
+  Future<List<int>?> _resolvedVersion(ClaudeCli cli) async =>
+      isInstalled(cli) ? _parse(managed.version) : _versionOf(cli);
 
   // --- Versions ---------------------------------------------------------------
 

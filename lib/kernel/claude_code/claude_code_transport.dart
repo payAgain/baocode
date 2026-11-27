@@ -27,6 +27,16 @@ abstract interface class ClaudeCodeTransport {
   Future<void> get exited;
 }
 
+/// A CLI process whose system prompt can only change by relaunching.
+abstract interface class ClaudeExternalTransport
+    implements ClaudeCodeTransport {}
+
+/// The host's local built-in runtime and its selected transcript storage.
+abstract interface class LocalBuiltinClaudeTransport
+    implements ClaudeCodeTransport {
+  ({String projectsDir, String sessionId})? get managedTranscript;
+}
+
 /// The message a transport ends with: the process is gone.
 abstract final class ClaudeExit {
   static const type = 'transport_exit';
@@ -49,6 +59,9 @@ class ClaudeLaunch {
   const ClaudeLaunch({
     required this.cwd,
     this.resume,
+    this.resumePath,
+    this.managedTranscript,
+    this.preferManagedTranscript = false,
     this.model,
     this.permissionMode,
     this.effort,
@@ -67,6 +80,7 @@ class ClaudeLaunch {
     this.readable = const [],
     this.instructions,
     this.ownPrompt = false,
+    this.refreshSystemPromptOnCompaction = false,
     this.models = const [],
     this.additionalModels = const [],
     this.sdkServers = const [],
@@ -119,9 +133,22 @@ class ClaudeLaunch {
   /// in place of Claude Code's own and [appendedSystemPrompt]: an agent
   /// that does not code (a bot's).
   final bool ownPrompt;
+  final bool refreshSystemPromptOnCompaction;
+
+  /// A host-authored chat with only the host's explicitly offered tools.
+  bool get restrictedContext => ownPrompt && tools?.isEmpty == true;
 
   /// The session id to continue.
   final String? resume;
+
+  /// Explicit storage for local transcripts owned by the built-in engine.
+  final ({String projectsDir, String sessionId})? managedTranscript;
+
+  /// The catalog's source path, when this is a resume of a kept session.
+  final String? resumePath;
+
+  /// Use managed storage if this is a new, persistent local built-in session.
+  final bool preferManagedTranscript;
   final String? model;
 
   /// The models it may be switched to (`set_model`) without Claude Code
@@ -221,9 +248,13 @@ class ClaudeLaunch {
     String? settingsPath,
     String? promptPath,
     String? instructions,
+    ({String projectsDir, String sessionId})? managedTranscript,
   }) => ClaudeLaunch(
     cwd: cwd ?? this.cwd,
     resume: resume,
+    resumePath: resumePath,
+    managedTranscript: managedTranscript ?? this.managedTranscript,
+    preferManagedTranscript: preferManagedTranscript,
     model: model,
     permissionMode: permissionMode,
     effort: effort,
@@ -242,6 +273,7 @@ class ClaudeLaunch {
     readable: readable,
     instructions: instructions ?? this.instructions,
     ownPrompt: ownPrompt,
+    refreshSystemPromptOnCompaction: refreshSystemPromptOnCompaction,
     models: models,
     additionalModels: additionalModels,
     sdkServers: sdkServers,
@@ -265,6 +297,10 @@ class ClaudeLaunch {
     'attribution': ?_attribution,
     'useAutoModeDuringPlan': ?autoModeDuringPlan,
     'alwaysThinkingEnabled': ?thinking,
+    if (restrictedContext) ...{
+      'disableAllHooks': true,
+      'autoMemoryEnabled': false,
+    },
     if (models.isNotEmpty) ...{
       'modelPicker': {
         'options': [
@@ -377,6 +413,11 @@ class ClaudeLaunch {
       jsonEncode(settings),
     ],
     if (!persist) '--no-session-persistence',
+    if (restrictedContext) ...[
+      '--setting-sources',
+      '',
+      '--disable-slash-commands',
+    ],
     if (tools case final tools?) ...[
       '--tools',
       tools.join(','),
