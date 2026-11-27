@@ -357,8 +357,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.text('Delete'));
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.textContaining('from Claude Code too'), findsOneWidget);
-    await tester.tap(find.text('Delete').last);
+    // Not yet: a moment later, unless called off.
+    expect(inSidebar(find.text('Write a.txt and read it back')), findsNothing);
+    expect(FakeCatalog.deleted, isEmpty);
+    await tester.pump(Workspace.deleteDelay);
     await tester.pump(const Duration(milliseconds: 300));
     await tester.runAsync(() => Future<void>.delayed(Duration.zero));
     expect(FakeCatalog.deleted, ['eafc328b']);
@@ -367,6 +369,52 @@ void main() {
     await tester.runAsync(workspace.refresh);
     await tester.pump();
     expect(inSidebar(find.text('Write a.txt and read it back')), findsNothing);
+  });
+
+  testWidgets('a delayed catalog failure restores the row and shows an error', (
+    tester,
+  ) async {
+    final workspace = await pumpLoaded(tester);
+    final thread = workspace.threads.singleWhere(
+      (t) => t.record == FakeCatalog.kept,
+    );
+    final row = inSidebar(find.text(FakeCatalog.kept.title));
+    const detail = 'The transcript writer still holds its lease';
+    FakeCatalog.deleteError = StateError(detail);
+    final attempts = <String>[];
+    FakeCatalog.beforeDelete = (id) async => attempts.add(id);
+    addTearDown(() {
+      FakeCatalog.deleteError = null;
+      FakeCatalog.beforeDelete = null;
+    });
+
+    Future<void> requestDelete() async {
+      await tester.tap(row, buttons: kSecondaryButton);
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.text('Delete'));
+      await tester.pump();
+      expect(row, findsNothing);
+      expect(workspace.canUse(thread), isFalse);
+      expect(attempts, isEmpty);
+    }
+
+    await requestDelete();
+    await tester.tap(find.text('Undo'));
+    await tester.pump(Workspace.deleteDelay);
+    expect(row, findsOneWidget);
+    expect(workspace.canUse(thread), isTrue);
+    expect(attempts, isEmpty);
+    expect(find.textContaining(detail), findsNothing);
+
+    await requestDelete();
+    await tester.pump(Workspace.deleteDelay);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(attempts, [FakeCatalog.kept.id]);
+    expect(row, findsOneWidget);
+    expect(workspace.canUse(thread), isTrue);
+    expect(find.textContaining(detail), findsOneWidget);
+    await tester.tap(find.text('Dismiss'));
+    await tester.pump(const Duration(milliseconds: 300));
   });
 
   testWidgets('what is typed and not sent is there the next run', (

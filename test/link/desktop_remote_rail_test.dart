@@ -83,7 +83,11 @@ void main() {
         });
         await tester.pumpAndSettle();
         expect(calls.last.$1, LinkMethods.download);
-        expect(calls.last.$2, {'project': _project, 'path': 'example.bin'});
+        expect(calls.last.$2, {
+          'project': _project,
+          'path': 'example.bin',
+          'pieces': true,
+        });
         expect(target.readAsBytesSync(), [1, 2, 3]);
       } finally {
         await tester.pumpWidget(const SizedBox());
@@ -467,21 +471,42 @@ void main() {
     );
     try {
       await _mount(tester, client);
-      await _click(tester, find.byTooltip('Project sidebar'));
-      await _click(tester, find.text('lib'));
+      // The real bridge resolves paths through the filesystem before replying.
+      Future<void> open(Finder item, Finder result) async {
+        await tester.runAsync(() async {
+          await tester.tap(item);
+          for (var retry = 0; retry < 50; retry++) {
+            await tester.pump();
+            if (result.evaluate().isNotEmpty) break;
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+          }
+        });
+        await tester.pumpAndSettle();
+      }
+
+      await open(find.byTooltip('Project sidebar'), find.text('lib'));
+      await open(find.text('lib'), find.text('hello.txt'));
       for (final (file, message) in [
         ('ruled-out.bin', englishLocalizations.placeholderBinary),
         ('huge.txt', englishLocalizations.placeholderTooLarge('999999')),
         ('removed.txt', englishLocalizations.placeholderNotFound),
       ]) {
-        await _click(tester, find.text(file));
+        await open(find.text(file), find.text(message));
         expect(find.text(message), findsOneWidget);
         expect(find.byType(SelectableText), findsNothing);
         expect(find.text('Read-only'), findsOneWidget);
       }
-      await _click(tester, find.text('hello.txt'));
+      await open(
+        find.text('hello.txt'),
+        find.text('Windows host content only'),
+      );
       expect(find.text('Windows host content only'), findsOneWidget);
-      await _click(tester, find.text('empty.txt'));
+      await open(
+        find.text('empty.txt'),
+        find.byWidgetPredicate(
+          (widget) => widget is ReadOnlyFileLines && widget.lines.isEmpty,
+        ),
+      );
       expect(
         tester.widget<ReadOnlyFileLines>(find.byType(ReadOnlyFileLines)).lines,
         isEmpty,

@@ -15,6 +15,7 @@ import '../chat/floating/floating_placement.dart';
 import '../chat/widgets/hover_builder.dart';
 import '../chat/widgets/inline_rename_field.dart';
 import '../chat/widgets/scroll_edge_fade.dart';
+import '../chat/widgets/undo_toast.dart';
 import '../forge/forge_api.dart' show ForgeState;
 import '../forge/forge_ref.dart' show ForgeItemKind;
 import '../forge/forge_view.dart' show forgeStateLook;
@@ -2040,7 +2041,7 @@ class _SidebarState extends State<Sidebar>
       onPinAll: (threads, pinned) => _workspace.setPinnedAll(threads, pinned),
       onArchiveAll: (threads, archived) =>
           _workspace.setArchivedAll(threads, archived),
-      onDeleteAll: (threads) => unawaited(_confirmDelete(threads)),
+      onDeleteAll: _delete,
       dragThreads: () => _targetsFor(thread),
       drag: widget.drag,
       // Archived ones are under a heading naming their folder.
@@ -2083,7 +2084,7 @@ class _SidebarState extends State<Sidebar>
         ),
         _ => null,
       },
-      onDelete: () => unawaited(_confirmDelete([thread])),
+      onDelete: () => _delete([thread]),
     );
   }
 
@@ -2160,13 +2161,23 @@ class _SidebarState extends State<Sidebar>
       ),
       SidebarRowMenuItems.removeProject(
         l10n,
-        () => _workspace.hideProject(project),
+        () => showUndoToast(
+          context,
+          l10n.sidebarProjectRemoved(project.name),
+          onUndo: _workspace.hideProjectLater(project),
+          shown: Workspace.deleteDelay,
+        ),
       ),
       if (multi != null)
         SidebarMenuItem(
           l10n.sidebarDeleteWorkspace,
           icon: Icons.delete_outline_rounded,
-          onSelected: () => _workspace.deleteWorkspace(multi),
+          onSelected: () => showUndoToast(
+            context,
+            l10n.sidebarWorkspaceDeleted(multi.name),
+            onUndo: _workspace.deleteWorkspaceLater(multi),
+            shown: Workspace.deleteDelay,
+          ),
         ),
     ];
   }
@@ -2560,38 +2571,20 @@ class _SidebarState extends State<Sidebar>
         l10n.sidebarDeleteArchived,
         icon: Icons.delete_outline_rounded,
         destructive: true,
-        onSelected: () => unawaited(_confirmDeleteArchived(where: of)),
+        onSelected: () => _deleteArchived(where: of),
       ),
     ];
   }
 
-  Future<void> _confirmDeleteArchived({
-    bool Function(AgentThread thread)? where,
-  }) async {
-    final count = _workspace.threads
-        .where((t) => t.archived && (where ?? _here)(t))
-        .length;
-    if (count == 0) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      // Black, not the theme's: as upstream's dialogs dim the window.
-      barrierColor: const Color(0x99000000),
-      builder: (context) {
-        final l10n = context.l10n;
-        return _ConfirmDialog(
-          title: l10n.sidebarDeleteArchivedTitle,
-          message: l10n.sidebarDeleteArchivedMessage(count),
-          action: l10n.commonDelete,
-        );
-      },
-    );
-    if (!(confirmed ?? false)) return;
-    if (await _deleteConversations(
-          () => _workspace.deleteArchived(where: where ?? _here),
-        ) &&
-        _archivedCount == 0) {
-      _workspace.showArchived = false;
-    }
+  /// Deletes the archived agents ([where] there is one, those it takes),
+  /// a moment left to undo it.
+  void _deleteArchived({bool Function(AgentThread thread)? where}) {
+    final archived = [
+      for (final thread in _workspace.threads)
+        if (thread.archived && (where ?? _here)(thread)) thread,
+    ];
+    _delete(archived);
+    if (_archivedCount == 0) _workspace.showArchived = false;
   }
 
   Widget _buildArchivedLabel(int count, bool active) {
@@ -2623,65 +2616,33 @@ class _SidebarState extends State<Sidebar>
     );
   }
 
-  Future<void> _confirmDelete(List<AgentThread> threads) async {
+  /// Deletes [threads] at once, a moment left to undo it rather than a
+  /// question first (see [Workspace.deleteLater]).
+  void _delete(List<AgentThread> threads) {
     if (threads.isEmpty) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      // Black, not the theme's: as upstream's dialogs dim the window.
-      barrierColor: const Color(0x99000000),
-      builder: (context) {
-        final l10n = context.l10n;
-        final thread = threads.first;
-        final title = thread.localizedTitle(l10n);
-        // Their asides go with them.
-        final asides = {
-          for (final thread in threads) ..._workspace.asidesOf(thread),
-        }.difference(threads.toSet()).length;
-        return _ConfirmDialog(
-          title: threads.length == 1
-              ? l10n.sidebarDeleteAgentTitle
-              : l10n.sidebarDeleteAgentsTitle,
-          message: [
-            threads.length == 1
-                ? thread.kernel.catalog == null
-                      ? l10n.sidebarDeleteAgentMessage(title)
-                      : l10n.sidebarDeleteAgentMessageKernel(
-                          title,
-                          thread.kernel.label,
-                        )
-                : l10n.sidebarDeleteAgentsMessage(threads.length),
-            if (asides > 0) l10n.sidebarDeleteAsidesToo(asides),
-          ].join(' '),
-          action: l10n.commonDelete,
-        );
-      },
-    );
-    if (!(confirmed ?? false)) return;
-    await _deleteConversations(
-      () => threads.length == 1
-          ? _workspace.delete(threads.first)
-          : _workspace.deleteAll(threads),
+    final l10n = context.l10n;
+    final message = threads.length == 1
+        ? l10n.sidebarAgentDeleted(threads.single.localizedTitle(l10n))
+        : l10n.sidebarAgentsDeleted(threads.length);
+    showUndoToast(
+      context,
+      message,
+      onUndo: _workspace.deleteLater(threads, onError: _showDeleteError),
+      shown: Workspace.deleteDelay,
     );
   }
 
-  Future<bool> _deleteConversations(Future<void> Function() delete) async {
-    try {
-      await delete();
-      return true;
-    } on Object catch (error) {
-      if (mounted) {
-        final l10n = context.l10n;
-        await showIdeDialog(
-          context,
-          message: l10n.commonDelete,
-          detail: error.toString(),
-          buttons: [l10n.commonDismiss],
-          cancel: null,
-          type: IdeDialogType.error,
-        );
-      }
-      return false;
-    }
+  Future<void> _showDeleteError(Object error) async {
+    if (!mounted) return;
+    final l10n = context.l10n;
+    await showIdeDialog(
+      context,
+      message: l10n.commonDelete,
+      detail: error.toString(),
+      buttons: [l10n.commonDismiss],
+      cancel: null,
+      type: IdeDialogType.error,
+    );
   }
 }
 

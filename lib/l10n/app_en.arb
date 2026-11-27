@@ -868,6 +868,14 @@
   "@agentImageUntitled": {
     "description": "The title of an agent first asked something with images alone, none from a file (pasted)."
   },
+  "welcomeDemoTitle": "Demo: a rate limiter, compared and rewritten",
+  "@welcomeDemoTitle": {
+    "description": "The title of the demo conversation a new user first sees: nothing in it ran; what they send starts a conversation of their own."
+  },
+  "welcomeDemoNoModel": "This is a demo. To start a real conversation, set up a model of your own.",
+  "@welcomeDemoNoModel": {
+    "description": "Above the composer of the demo conversation, beside the Set Up a Model button, while no model is set up."
+  },
   "chatTitleSummarize": "Summarize into a new title",
   "@chatTitleSummarize": {
     "description": "In the list under a chat's title being renamed: has a model title the conversation from what the user asked."
@@ -990,35 +998,6 @@
       }
     }
   },
-  "sidebarDeleteAgentTitle": "Delete agent?",
-  "sidebarDeleteAgentMessage": "“{title}” and its conversation will be removed.",
-  "@sidebarDeleteAgentMessage": {
-    "placeholders": {
-      "title": {
-        "type": "String"
-      }
-    }
-  },
-  "sidebarDeleteAgentsTitle": "Delete agents?",
-  "sidebarDeleteAgentsMessage": "{count, plural, =1{The agent and its conversation will be deleted} other{The {count} agents and their conversations will be deleted}}, from their kernels too. This cannot be undone.",
-  "@sidebarDeleteAgentsMessage": {
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
-  },
-  "sidebarDeleteAgentMessageKernel": "“{title}” and its conversation will be deleted, from {kernel} too. This cannot be undone.",
-  "@sidebarDeleteAgentMessageKernel": {
-    "placeholders": {
-      "title": {
-        "type": "String"
-      },
-      "kernel": {
-        "type": "String"
-      }
-    }
-  },
   "sidebarSearchAgents": "Search agents…",
   "ideChatHistory": "Agent History",
   "@ideChatHistory": {
@@ -1094,7 +1073,7 @@
       }
     }
   },
-  "sidebarDeleteCount": "Delete {count} Agents…",
+  "sidebarDeleteCount": "Delete {count} Agents",
   "@sidebarDeleteCount": {
     "placeholders": {
       "count": {
@@ -1121,15 +1100,6 @@
   "sidebarDetachAside": "Detach from Conversation",
   "@sidebarDetachAside": {
     "description": "The menu of a conversation asked beside another with /btw, listed under it in the sidebar: makes it a conversation of its own."
-  },
-  "sidebarDeleteAsidesToo": "{count, plural, =1{Its /btw conversation is deleted with it.} other{Its {count} /btw conversations are deleted with it.}}",
-  "@sidebarDeleteAsidesToo": {
-    "description": "After the message asking to delete an agent that has conversations asked beside it with /btw.",
-    "placeholders": {
-      "count": {
-        "type": "int"
-      }
-    }
   },
   "btwCommandDetail": "Ask in a conversation of its own, beside this one",
   "@btwCommandDetail": {
@@ -1177,17 +1147,50 @@
   "sidebarSortByTime": "Sort by Time",
   "sidebarArchiveAll": "Archive All",
   "sidebarUnarchiveAll": "Unarchive All",
-  "sidebarDeleteArchived": "Delete All Archived…",
-  "sidebarDeleteArchivedTitle": "Delete archived agents?",
-  "sidebarDeleteArchivedMessage": "{count, plural, =1{The archived agent and its conversation will be deleted} other{The {count} archived agents and their conversations will be deleted}}, from their kernels too. This cannot be undone.",
-  "@sidebarDeleteArchivedMessage": {
+  "sidebarDeleteArchived": "Delete All Archived",
+  "sidebarRemoveFromList": "Remove from List",
+  "sidebarDeleteAgentTitle": "Delete agent?",
+  "sidebarDeleteAgentMessage": "“{title}” and its conversation will be removed.",
+  "@sidebarDeleteAgentMessage": {
+    "placeholders": {
+      "title": {
+        "type": "String"
+      }
+    }
+  },
+  "sidebarAgentDeleted": "Deleted “{title}”",
+  "@sidebarAgentDeleted": {
+    "description": "The note at the bottom of the window, Undo beside it, once an agent is deleted.",
+    "placeholders": {
+      "title": {
+        "type": "String"
+      }
+    }
+  },
+  "sidebarAgentsDeleted": "{count, plural, =1{Deleted 1 agent} other{Deleted {count} agents}}",
+  "@sidebarAgentsDeleted": {
     "placeholders": {
       "count": {
         "type": "int"
       }
     }
   },
-  "sidebarRemoveFromList": "Remove from List",
+  "sidebarProjectRemoved": "Removed “{name}” from the list",
+  "@sidebarProjectRemoved": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "sidebarWorkspaceDeleted": "Deleted workspace “{name}”",
+  "@sidebarWorkspaceDeleted": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
   "sidebarDropToPin": "Drop here to pin",
   "sidebarMoreActions": "More Actions…",
   "sidebarChangeIcon": "Change Icon…",
@@ -4808,6 +4811,7 @@
       }
     }
   },
+  "modelsDragToReorder": "Drag to reorder",
   "modelsFeaturedWhy": "Why am I seeing this?",
   "modelsFeaturedNote": "These sites are officially listed by BaoCode",
   "modelsFeaturedNoteHow": "Add the one-click import to be listed too, for free",
@@ -7647,6 +7651,7 @@
   "cmdBrowserWelcome": "Connect Your Browser...",
   "cmdStashWelcome": "Meet Stash...",
   "cmdModelWelcome": "Set Up a Model...",
+  "cmdWelcomeDemo": "Show the Demo Conversation",
   "modelWelcomeTitle": "Pick a Model to Start",
   "modelWelcomeLead": "BaoCode runs your agents on a model of your choosing. Add an upstream, a service with an API key, and its models are ready to use.",
   "modelWelcomeAnyTitle": "Any upstream",

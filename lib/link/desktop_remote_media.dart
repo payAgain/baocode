@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:bao_link/bao_link.dart';
@@ -91,20 +92,77 @@ Future<bool> downloadRemoteFile({
   if (!p.isAbsolute(destination)) {
     throw const FormatException('Invalid save destination');
   }
-  final response = await peer.call(LinkMethods.download, {
+  _checkDownloadDestination(destination);
+  final response = await peer.fetch(LinkMethods.download, {
     'project': project,
     'path': path,
+    'pieces': true,
   });
-  if (!isCurrent()) return false;
-  final bytes = decodeRemoteBytes(response, LinkLimits.download);
-  final type = await FileSystemEntity.type(destination, followLinks: false);
+  final Stream<Uint8List> bytes;
+  if (response is LinkPieces) {
+    bytes = response.bytes;
+  } else {
+    if (!isCurrent()) return false;
+    bytes = Stream.value(decodeRemoteBytes(response, LinkLimits.download));
+  }
+
+  File? temporary;
+  RandomAccessFile? output;
+  try {
+    // Start consuming pieces even if the action has gone stale. Returning
+    // from inside the loop cancels the stream, as does a local write error.
+    await for (final piece in bytes) {
+      if (!isCurrent()) return false;
+      if (output == null) {
+        final file = temporary = await _downloadTemporary(destination);
+        output = await file.open(mode: FileMode.write);
+        if (!isCurrent()) return false;
+      }
+      await output.writeFrom(piece);
+    }
+    if (!isCurrent()) return false;
+    if (output == null) {
+      temporary = await _downloadTemporary(destination); // Empty file.
+    } else {
+      await output.flush();
+      await output.close();
+      output = null;
+    }
+    // Validate and rename without yielding after the final scope check.
+    if (!isCurrent()) return false;
+    _checkDownloadDestination(destination);
+    temporary!.renameSync(destination);
+    temporary = null;
+    return true;
+  } finally {
+    try {
+      await output?.close();
+    } finally {
+      try {
+        await temporary?.delete();
+      } on FileSystemException {
+        // Preserve the original failure if the temporary file is inaccessible.
+      }
+    }
+  }
+}
+
+void _checkDownloadDestination(String path) {
+  final type = FileSystemEntity.typeSync(path, followLinks: false);
   if (type != FileSystemEntityType.file &&
       type != FileSystemEntityType.notFound) {
     throw const FileSystemException('Destination is not a regular file');
   }
-  if (!isCurrent()) return false;
-  await File(destination).writeAsBytes(bytes, flush: true);
-  return isCurrent();
+}
+
+Future<File> _downloadTemporary(String destination) {
+  final random = Random.secure();
+  final suffix = List.generate(
+    4,
+    (_) => random.nextInt(1 << 30).toRadixString(36),
+  ).join('-');
+  return File(p.join(p.dirname(destination), '.baocode-download-$suffix'))
+      .create(exclusive: true);
 }
 
 typedef DesktopRemoteMediaTarget = (
@@ -325,17 +383,46 @@ Future<DesktopRemoteMention?> uploadRemoteFile({
   final selected = await WindowControls.pickOpenFiles(multiple: false);
   if (selected.isEmpty || !isCurrent()) return null;
   final file = selected.single;
-  final bytes = await _readChosenFile(
-    file,
-    limit: LinkLimits.upload,
-    current: isCurrent,
-  );
-  if (bytes == null || !isCurrent()) return null;
-  final response = await peer.call(LinkMethods.upload, {
-    ...scope,
-    'name': p.basename(file),
-    'data': base64Encode(bytes),
-  });
+  await _checkChosenFile(file);
+  if (!isCurrent()) return null;
+  final handle = await File(file).open();
+  final params = {...scope, 'name': p.basename(file)};
+  Object? response;
+  try {
+    final size = await handle.length();
+    if (!isCurrent()) return null;
+    try {
+      response = await peer.callWithPieces(
+        LinkMethods.uploadPieces,
+        params,
+        size,
+        _chosenPieces(handle, size, isCurrent),
+      );
+    } on _RemoteUploadStale {
+      return null;
+    } on LinkRemoteException catch (error) {
+      if (error.code != LinkErrors.unknown) rethrow;
+      if (!isCurrent()) return null;
+      // An old host explicitly declined this method. Never retry a failed
+      // write or a lost reply: the host may already have saved the file.
+      if (size > LinkLimits.upload) {
+        throw const RemoteMediaTooLarge(LinkLimits.upload);
+      }
+      await handle.setPosition(0);
+      if (!isCurrent()) return null;
+      final bytes = await handle.read(LinkLimits.upload + 1);
+      if (!isCurrent()) return null;
+      if (bytes.length > LinkLimits.upload) {
+        throw const RemoteMediaTooLarge(LinkLimits.upload);
+      }
+      response = await peer.call(LinkMethods.upload, {
+        ...params,
+        'data': base64Encode(bytes),
+      });
+    }
+  } finally {
+    await handle.close();
+  }
   if (!isCurrent()) return null;
   if (response case {'tooLarge': true}) {
     throw const RemoteMediaTooLarge(LinkLimits.upload);
@@ -356,16 +443,41 @@ bool _remoteUploadPath(String path) =>
     !path.endsWith('/') &&
     !path.endsWith(r'\');
 
-Future<Uint8List?> _readChosenFile(
-  String path, {
-  required int limit,
-  required bool Function() current,
-}) async {
+class _RemoteUploadStale implements Exception {
+  const _RemoteUploadStale();
+}
+
+Stream<Uint8List> _chosenPieces(
+  RandomAccessFile handle,
+  int size,
+  bool Function() current,
+) async* {
+  var remaining = size;
+  while (true) {
+    if (!current()) throw const _RemoteUploadStale();
+    if (remaining == 0) return;
+    final piece = await handle.read(min(remaining, LinkLimits.piece));
+    if (!current()) throw const _RemoteUploadStale();
+    if (piece.isEmpty) return; // Link rejects a shortened upload.
+    remaining -= piece.length;
+    yield piece;
+  }
+}
+
+Future<void> _checkChosenFile(String path) async {
   if (!p.isAbsolute(path) ||
       await FileSystemEntity.type(path, followLinks: false) !=
           FileSystemEntityType.file) {
     throw const FileSystemException('Selection is not a regular file');
   }
+}
+
+Future<Uint8List?> _readChosenFile(
+  String path, {
+  required int limit,
+  required bool Function() current,
+}) async {
+  await _checkChosenFile(path);
   if (!current()) return null;
   final handle = await File(path).open();
   try {

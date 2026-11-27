@@ -30,6 +30,7 @@ import 'editor_launcher.dart';
 import 'preference_store.dart';
 import 'project_workspace.dart';
 import 'temp_folder_stub.dart' if (dart.library.io) 'temp_folder_io.dart';
+import 'welcome.dart';
 
 /// The arrangement of the project and its conversation in the window.
 enum WorkspaceLayout { chat, ide }
@@ -307,6 +308,7 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
     AppLocalizations Function()? l10n,
     this.workspaceDirectories = const ProjectWorkspaceDirectories(),
     ResumeAfterReset? resumes,
+    this.welcome,
   }) : _projects = [...projects],
        resumes = resumes ?? ResumeAfterReset.current,
        icons = icons ?? IconLibrary(),
@@ -335,6 +337,10 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
   /// The strings of the app's language, for the titles given here: they
   /// are kept with the session, so are in the language of when given.
   final AppLocalizations Function() l10n;
+
+  /// What a new user is set up with, the first time: a folder to work in
+  /// and the demo conversation there (see [_welcomeNew]). None, nothing.
+  final Welcome? welcome;
 
   List<Project> get projects => List.unmodifiable(_projects);
   final List<Project> _projects;
@@ -366,7 +372,12 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
     return _localProjectIds[project.path] == id && _canIdentifyProject(project);
   }).firstOrNull;
 
-  List<AgentThread> get threads => List.unmodifiable(_threads);
+  /// The agents, but those about to be deleted ([deleteLater]).
+  List<AgentThread> get threads => List.unmodifiable(
+    _deleting.isEmpty
+        ? _threads
+        : _threads.where((t) => !_deleting.contains(t)),
+  );
   final List<AgentThread> _threads = [];
 
   /// The open agent, the one focused where several show; null only while
@@ -435,6 +446,7 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
         unawaited(_listKept(project));
       }
     }
+    final demo = await _welcomeNew();
     // Only once all were read: what one failed to list is not gone. Nor
     // while remote projects' sessions are still to be listed (or cannot
     // be, their host away): what is kept of those must stay.
@@ -448,20 +460,126 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
     }
     _restoreChatView();
     if (!_disposed) resumes.resume = _resumeAfterReset;
-    final project = _selected == null
-        ? sidebarProjectsHere.firstOrNull ??
-              sidebarProjects.firstOrNull ??
-              _projects
-                  .where((project) => !isAppFolder(project.path))
-                  .firstOrNull
-        : null;
-    // A bot's folder can be the only project on disk. Opening an ordinary
-    // chat there would shadow the bot's kept conversation with a newer one.
-    if (project != null) {
-      create(project: project);
-    } else {
-      notifyListeners();
+    if (_selected == null) {
+      if (demo != null) {
+        select(demo);
+        return;
+      }
+      // Opening an ordinary chat in a bot's folder would shadow its kept
+      // conversation with a newer one.
+      final project =
+          sidebarProjectsHere.firstOrNull ??
+          sidebarProjects.firstOrNull ??
+          _projects.where((project) => !isAppFolder(project.path)).firstOrNull;
+      if (project != null) {
+        create(project: project);
+        return;
+      }
     }
+    notifyListeners();
+  }
+
+  /// Whether a user was set up yet ([welcome]): once, the first time no
+  /// project was listed; never for one that had some.
+  bool _welcomed = false;
+
+  /// The demo conversation's folder and when it was first shown, while it
+  /// is listed (till deleted).
+  ({String folder, DateTime at})? _welcomeDemo;
+
+  /// The first time nothing is listed: [welcome]'s folder opened, and the
+  /// demo conversation in it. It is listed after as a kept one is, till
+  /// deleted; the one shown, the first time.
+  Future<AgentThread?> _welcomeNew() async {
+    final welcome = this.welcome;
+    if (welcome == null) return null;
+    var first = false;
+    if (!_welcomed) {
+      _welcomed = true;
+      if (_projects.isEmpty) {
+        final folder = await welcome.folder();
+        _welcomeDemo = (folder: folder, at: DateTime.now());
+        _openProject(folder);
+        first = true;
+      }
+      _save();
+    }
+    if (_welcomeDemo case (:final folder, :final at)) {
+      final demo = await _addDemo(welcome, folder, at);
+      if (first) return demo;
+    }
+    return null;
+  }
+
+  /// Opens the demo conversation, to play from the start: listed again if
+  /// it was deleted, in the folder it was in, else [welcome]'s.
+  Future<void> showWelcomeDemo() async {
+    final welcome = this.welcome;
+    if (welcome == null) return;
+    var demo = _threads
+        .where((thread) => thread.record?.id == WelcomeDemo.sessionId)
+        .firstOrNull;
+    if (demo == null) {
+      final folder = _welcomeDemo?.folder ?? await welcome.folder();
+      final at = DateTime.now();
+      _welcomeDemo = (folder: folder, at: at);
+      _removed.remove(WelcomeDemo.sessionId);
+      _openProject(folder);
+      _save();
+      demo = await _addDemo(welcome, folder, at);
+    }
+    if (demo == null || _disposed) return;
+    // Played already: from the start again.
+    if (canReload(demo)) reload(demo);
+    select(demo);
+  }
+
+  /// Lists the demo conversation, in [folder]: its note written there for
+  /// it, read as Claude Code's sessions are; played as it opens.
+  Future<AgentThread?> _addDemo(
+    Welcome welcome,
+    String folder,
+    DateTime at,
+  ) async {
+    final kernel = kernels
+        .where((kernel) => kernel.id == KernelRegistry.claudeCode.id)
+        .firstOrNull;
+    if (kernel == null || _removed.contains(WelcomeDemo.sessionId)) {
+      return null;
+    }
+    final demo = await welcome.demo(folder, l10n().localeName);
+    if (demo == null || _disposed) return null;
+    final project = _project(folder);
+    _addKept(
+      welcomeKernel(kernel, demo.recording),
+      project,
+      SessionRecord(
+        id: WelcomeDemo.sessionId,
+        title: l10n().welcomeDemoTitle,
+        updatedAt: at,
+        cwd: folder,
+        path: demo.path,
+      ),
+      // Played as it opens, after its note; again to whatever is sent.
+      opened: (session) {
+        session.healthAs = (health) =>
+            welcomeHealth(health, note: l10n().welcomeDemoNoModel);
+        void play() {
+          if (session.loadingHistory) return;
+          session.removeListener(play);
+          // Not from within the kernel's own event, as it is told.
+          scheduleMicrotask(
+            () => session.send(ComposerMessage(text: demo.recording.prompt)),
+          );
+        }
+
+        session.addListener(play);
+        play();
+      },
+    );
+    return _threads
+        .where((thread) => thread.record?.id == WelcomeDemo.sessionId)
+        .firstOrNull;
   }
 
   Future<void>? _refreshing;
@@ -566,7 +684,10 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
 
   /// Whether a thread is still a live target for asynchronous work.
   bool canUse(AgentThread thread) =>
-      !_disposed && _threads.contains(thread) && !thread._deleting;
+      !_disposed &&
+      _threads.contains(thread) &&
+      !_deleting.contains(thread) &&
+      !thread._deleting;
 
   /// Whether [thread]'s kept session can be read anew now: not while its
   /// agent is at work or waits on the user, what they would lose.
@@ -821,8 +942,9 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
   void _addKept(
     KernelDescriptor kernel,
     Project project,
-    SessionRecord session,
-  ) {
+    SessionRecord session, {
+    void Function(ChatSession session)? opened,
+  }) {
     if (_removed.contains(session.id)) return;
     // Listed already, or it is an agent of this run.
     if (_threads.any(
@@ -849,21 +971,25 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
         updatedAt: session.updatedAt,
         pinned: _pinned.contains(id),
         archived: _archived.contains(id),
-        open: () => ChatSession(
-          kernel: kernel,
-          kernels: kernels,
-          kernelContext: KernelContext(
-            cwd: session.cwd,
-            resume: session,
-            // As it was left, or as a new agent starts.
-            settings: _setUp(session.cwd, {
-              ..._preferredSettings,
-              ...?_agentSettings[session.id],
-            }),
-            workspace: () => _kernelWorkspace(session.cwd),
-          ),
-          historyCount: 0,
-        ),
+        open: () {
+          final chat = ChatSession(
+            kernel: kernel,
+            kernels: kernels,
+            kernelContext: KernelContext(
+              cwd: session.cwd,
+              resume: session,
+              // As it was left, or as a new agent starts.
+              settings: _setUp(session.cwd, {
+                ..._preferredSettings,
+                ...?_agentSettings[session.id],
+              }),
+              workspace: () => _kernelWorkspace(session.cwd),
+            ),
+            historyCount: 0,
+          );
+          opened?.call(chat);
+          return chat;
+        },
       ),
     );
   }
@@ -1658,6 +1784,7 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
 
   bool isHidden(Project project) =>
       _hiddenProjects.containsKey(project.path) ||
+      _hiding.contains(project.path) ||
       isAppFolder(project.path) ||
       _isUnopenedTemp(project.path);
 
@@ -2134,6 +2261,99 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
         }
       }
     }
+  }
+
+  // --- Deleting a moment later ----------------------------------------------
+
+  /// How long a deletion waits to be done ([deleteLater],
+  /// [hideProjectLater], [deleteWorkspaceLater]), shown done meanwhile: as
+  /// long as it can be called off.
+  static const deleteDelay = Duration(seconds: 5);
+
+  /// What waits to be done ([_later]).
+  final Set<Timer> _waiting = {};
+
+  /// Does [act] once [deleteDelay] is over. What calls it off is given
+  /// back, [calledOff] then putting things as they were.
+  VoidCallback _later(VoidCallback act, VoidCallback calledOff) {
+    late final Timer timer;
+    timer = Timer(deleteDelay, () {
+      _waiting.remove(timer);
+      act();
+    });
+    _waiting.add(timer);
+    return () {
+      if (!_waiting.remove(timer) || _disposed) return;
+      timer.cancel();
+      calledOff();
+      notifyListeners();
+    };
+  }
+
+  /// The agents to be deleted once [deleteDelay] is over ([deleteLater]).
+  final Set<AgentThread> _deleting = {};
+
+  /// Deletes [threads] (their asides with them) as [deleteAll] does, once
+  /// [deleteDelay] is over; what calls it off is given back. Meanwhile
+  /// nothing of them changes (nor if the app quits first), but they are
+  /// not in [threads], so not on the sidebar nor the phone, nor in a pane.
+  /// Failed deletions show again and report the error to [onError].
+  VoidCallback deleteLater(
+    Iterable<AgentThread> threads, {
+    FutureOr<void> Function(Object error)? onError,
+  }) {
+    final selected = {...threads, for (final t in threads) ...asidesOf(t)}
+      ..removeWhere((t) => !canUse(t));
+    if (selected.isEmpty) return () {};
+    _deleting.addAll(selected);
+    _leaveMany(selected);
+    notifyListeners();
+    return _later(
+      () => unawaited(_commitDelayedDeletion(selected, onError)),
+      () => _deleting.removeAll(selected),
+    );
+  }
+
+  Future<void> _commitDelayedDeletion(
+    Set<AgentThread> selected,
+    FutureOr<void> Function(Object error)? onError,
+  ) async {
+    Object? failure;
+    try {
+      await deleteAll(selected);
+    } on Object catch (error) {
+      failure = error;
+    } finally {
+      _deleting.removeAll(selected);
+    }
+    if (!_disposed && failure != null) {
+      notifyListeners();
+      await onError?.call(failure);
+    }
+  }
+
+  /// The projects to be taken off the sidebar once [deleteDelay] is over,
+  /// by path ([hideProjectLater], [deleteWorkspaceLater]): hidden
+  /// meanwhile, nothing kept of it.
+  final Set<String> _hiding = {};
+
+  /// [hideProject] once [deleteDelay] is over; what calls it off is given
+  /// back.
+  VoidCallback hideProjectLater(Project project) =>
+      _hideLater(project.path, () => hideProject(project));
+
+  /// [deleteWorkspace] once [deleteDelay] is over; what calls it off is
+  /// given back.
+  VoidCallback deleteWorkspaceLater(ProjectWorkspace workspace) =>
+      _hideLater(workspace.path, () => deleteWorkspace(workspace));
+
+  VoidCallback _hideLater(String path, VoidCallback act) {
+    if (!_hiding.add(path)) return () {};
+    notifyListeners();
+    return _later(() {
+      _hiding.remove(path);
+      act();
+    }, () => _hiding.remove(path));
   }
 
   /// Archives [project]'s agents (not a new one nothing was sent to): the
@@ -3048,6 +3268,12 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
             int.tryParse(value) != null,
       );
     }
+    _welcomed = kept['welcomed'] == true;
+    if (kept['welcomeDemo']
+        case {'folder': final String folder, 'at': final String at}
+        when DateTime.tryParse(at) != null) {
+      _welcomeDemo = (folder: folder, at: DateTime.parse(at));
+    }
     if (kept['ignoredRecommendations'] case final List<Object?> ignored) {
       _ignoredRecommendations.addAll(ignored.whereType<String>());
     }
@@ -3227,6 +3453,9 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
       'contextPicks': 1,
       'agents': _agentSettings,
       'ignoredRecommendations': [..._ignoredRecommendations],
+      if (_welcomed) 'welcomed': true,
+      if (_welcomeDemo case (:final folder, :final at))
+        'welcomeDemo': {'folder': folder, 'at': at.toIso8601String()},
       'sidebar': {
         'grouping': ?_sidebarGrouping,
         'projectSort': ?_projectSort?.name,
@@ -4373,7 +4602,10 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
   Future<bool> _deleteFromCatalog(AgentThread thread) async {
     if (!_threads.contains(thread)) return false;
     final catalog = thread.kernel.catalog;
-    if (catalog == null) return true;
+    // The app owns the demo's recording.
+    if (thread.record?.id == WelcomeDemo.sessionId || catalog == null) {
+      return true;
+    }
     final session = thread._session;
     if (session != null) {
       if (thread.runsInBackground || session.hasQueuedMessages) {
@@ -4389,8 +4621,8 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
 
   bool _removeDeletedThread(AgentThread thread) {
     if (!_threads.contains(thread)) return false;
-    final id =
-        thread.record?.id ?? (thread.isOpen ? thread.session.sessionId : null);
+    final id = thread.record?.id ?? thread._session?.sessionId;
+    if (id == WelcomeDemo.sessionId) _welcomeDemo = null;
     if (id != null) {
       _removed.add(id);
       _forgetDraft(id);
@@ -4435,6 +4667,7 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
       final candidates = [
         for (final thread in _threads)
           if (!thread.archived &&
+              !_deleting.contains(thread) &&
               _projects.contains(thread.project) &&
               !isAppFolder(thread.project.path))
             thread,
@@ -4476,6 +4709,7 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
       for (final thread in _threads)
         if (!thread.archived &&
             !identical(thread, gone) &&
+            !_deleting.contains(thread) &&
             _projects.contains(thread.project) &&
             !isAppFolder(thread.project.path))
           thread,
@@ -4494,6 +4728,10 @@ class Workspace extends ChangeNotifier implements ColorThemeStorage {
   @override
   void dispose() {
     _disposed = true;
+    // Not done, then: nothing of them changed (see [_later]).
+    for (final timer in _waiting) {
+      timer.cancel();
+    }
     if (resumes.resume == _resumeAfterReset) resumes.resume = null;
     icons.removeListener(notifyListeners);
     for (final MapEntry(key: path, value: listener) in _unreached.entries) {

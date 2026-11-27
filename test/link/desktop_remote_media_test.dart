@@ -30,14 +30,15 @@ void main() {
   testWidgets('DM upload sends only the picked file and names the host copy', (
     tester,
   ) async {
-    final (client, host, calls) = await _pair(
-      (method, _) => switch (method) {
-        LinkMethods.upload => {
-          'path': r'D:\bot-store\uploads\remote report.txt',
-        },
-        _ => throw StateError(method),
-      },
-    );
+    final (client, host, calls) = (await tester.runAsync(
+      () => _pair((method, params) async {
+        expect(method, LinkMethods.uploadPieces);
+        final pieces = LinkPeer.piecesOf(params)!;
+        expect(pieces.size, 3);
+        expect(await pieces.bytes.expand((piece) => piece).toList(), [1, 2, 3]);
+        return {'path': r'D:\bot-store\uploads\remote report.txt'};
+      }),
+    ))!;
     final sent = <DesktopRemoteAttachments>[];
     final folder = Directory.systemTemp.createTempSync('bao-upload-test-');
     final source = File('${folder.path}/local report.txt')
@@ -62,19 +63,28 @@ void main() {
       final controller = tester
           .widget<MarkdownEditor>(find.byType(MarkdownEditor))
           .controller;
+      // The picker and disk reads use the real clock. Pump the widget clock
+      // separately so the in-memory peer can deliver the chunked requests.
       await tester.runAsync(() async {
         await tester.tap(find.byKey(const ValueKey('desktop-remote-upload')));
-        for (var i = 0; i < 40 && controller.text.isEmpty; i++) {
-          await Future<void>.delayed(const Duration(milliseconds: 10));
-          await tester.pump();
-        }
       });
+      for (var i = 0; i < 50 && controller.text.isEmpty; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump();
+      }
       await tester.pumpAndSettle();
-      expect(calls.single.$1, LinkMethods.upload);
+      expect(
+        controller.text.trim(),
+        r'@"D:\bot-store\uploads\remote report.txt"',
+      );
+      expect(calls.single.$1, LinkMethods.uploadPieces);
       expect(calls.single.$2, {
         'bot': 'bot1',
         'name': 'local report.txt',
-        'data': 'AQID',
+        'size': 3,
+        r'$pieces': isA<LinkPieces>(),
       });
       await tester.tap(find.byTooltip('Send'));
       await tester.pumpAndSettle();
@@ -91,6 +101,116 @@ void main() {
       await host.close();
     }
   });
+
+  test('upload falls back only for a small file on an older host', () async {
+    final folder = Directory.systemTemp.createTempSync('bao-upload-compat-');
+    addTearDown(() => folder.deleteSync(recursive: true));
+    final source = File('${folder.path}/report.bin')
+      ..writeAsBytesSync([1, 2, 3]);
+    _mockFilePicker((_) async => [source.path]);
+    var code = LinkErrors.unknown;
+    const uploaded = '/host/uploads/report.bin';
+    final (client, host, calls) = await _pair((method, _) {
+      if (method == LinkMethods.uploadPieces) {
+        throw LinkRemoteException(code, 'Upload rejected');
+      }
+      expect(method, LinkMethods.upload);
+      return {'path': uploaded};
+    });
+    addTearDown(client.close);
+    addTearDown(host.close);
+    Future<DesktopRemoteMention?> upload() => uploadRemoteFile(
+      target: (client, 'project', _project.id, _project.projectId),
+      isCurrent: () => true,
+    );
+    expect((await upload())!.path, uploaded);
+    expect(calls.map((call) => call.$1), [
+      LinkMethods.uploadPieces,
+      LinkMethods.upload,
+    ]);
+    expect(calls.last.$2, {
+      'project': _project.projectId,
+      'name': 'report.bin',
+      'data': 'AQID',
+    });
+
+    calls.clear();
+    code = 'failed';
+    await expectLater(upload(), throwsA(isA<LinkRemoteException>()));
+    expect(calls.single.$1, LinkMethods.uploadPieces);
+
+    calls.clear();
+    code = LinkErrors.unknown;
+    final handle = source.openSync(mode: FileMode.append);
+    handle.truncateSync(LinkLimits.upload + 1);
+    handle.closeSync();
+    await expectLater(upload(), throwsA(isA<RemoteMediaTooLarge>()));
+    expect(calls.single.$1, LinkMethods.uploadPieces);
+  });
+
+  test(
+    'download accepts legacy bytes and only commits complete pieces',
+    () async {
+      final folder = Directory.systemTemp.createTempSync(
+        'bao-download-pieces-',
+      );
+      addTearDown(() => folder.deleteSync(recursive: true));
+      final destination = File('${folder.path}/local.bin')
+        ..writeAsBytesSync([0]);
+      _mockFilePicker((call) async {
+        expect(call.method, 'pickSaveFile');
+        expect(call.arguments, {'name': 'report.bin'});
+        return destination.path;
+      });
+      var current = true;
+      Object? response = {'data': 'AQID'};
+      final (client, host, calls) = await _pair((method, _) => response);
+      addTearDown(client.close);
+      addTearDown(host.close);
+      Future<bool> download() => downloadRemoteFile(
+        peer: client,
+        project: _project.projectId!,
+        path: 'files/report.bin',
+        isCurrent: () => current,
+      );
+      expect(await download(), isTrue);
+      expect(calls.single.$1, LinkMethods.download);
+      expect(calls.single.$2, {
+        'project': _project.projectId,
+        'path': 'files/report.bin',
+        'pieces': true,
+      });
+      expect(destination.readAsBytesSync(), [1, 2, 3]);
+
+      final first = Uint8List(LinkLimits.download)..[0] = 4;
+      response = LinkPieces(
+        first.length + 1,
+        Stream.fromIterable([
+          first,
+          Uint8List.fromList([5]),
+        ]),
+      );
+      expect(await download(), isTrue);
+      final saved = destination.readAsBytesSync();
+      expect(saved.length, first.length + 1);
+      expect([saved.first, saved.last], [4, 5]);
+
+      response = LinkPieces(2, Stream.value(Uint8List.fromList([6])));
+      await expectLater(download(), throwsA(anything));
+      expect(destination.lengthSync(), saved.length);
+      expect(folder.listSync().map((entry) => entry.path), [destination.path]);
+
+      Stream<Uint8List> stale() async* {
+        current = false;
+        yield Uint8List.fromList([7]);
+      }
+
+      response = LinkPieces(1, stale());
+      expect(await download(), isFalse);
+      expect(destination.lengthSync(), saved.length);
+      expect(folder.listSync().map((entry) => entry.path), [destination.path]);
+    },
+  );
 
   testWidgets(
     'only a clicked relative Markdown image is fetched from the host',
@@ -407,6 +527,17 @@ void main() {
       await client.close();
       await host.close();
     }
+  });
+}
+
+void _mockFilePicker(Future<Object?> Function(MethodCall) handler) {
+  debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+  final messenger =
+      TestWidgetsFlutterBinding.ensureInitialized().defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(_window, handler);
+  addTearDown(() {
+    messenger.setMockMethodCallHandler(_window, null);
+    debugDefaultTargetPlatformOverride = null;
   });
 }
 
