@@ -6384,6 +6384,10 @@ class AppLocalizationsZh extends AppLocalizations {
       '模型、账号和路由都在 magpie 里管理，这里的列表跟着它自动更新。新出现的路由组、图片模型，以及 magpie 给 Claude Code 选的模型会自动启用，其他的在下面勾选。';
 
   @override
+  String get modelsMagpieProtocolDescription =>
+      '选择 Messages，由 magpie 在需要时转换请求。选择 Responses，由 BaoCode 转换后发给 magpie。两种方式都使用 magpie 的模型、账号和路由。';
+
+  @override
   String get modelsMagpieRunning => '运行中';
 
   @override

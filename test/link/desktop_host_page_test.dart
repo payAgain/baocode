@@ -160,7 +160,7 @@ void main() {
     await tester.pumpAndSettle();
     final confirm = find.descendant(
       of: find.byType(AlertDialog),
-      matching: find.widgetWithText(TextButton, 'Stop task'),
+      matching: find.widgetWithText(FilledButton, 'Stop task'),
     );
     expect(fixture.calls, isNot(contains(LinkMethods.stopTask)));
     await tester.tap(confirm);

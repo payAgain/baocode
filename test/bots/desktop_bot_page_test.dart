@@ -863,8 +863,8 @@ void main() {
     final session = fixture.bots.threadOf(_main)!.session;
     final launch = fixture.launches.single;
     expect(launch.ownPrompt, isTrue);
-    expect(launch.tools, isEmpty);
-    expect(launch.userServers, isFalse);
+    expect(launch.tools, isNull);
+    expect(launch.userServers, isTrue);
     expect(session.selected(KernelChoiceKind.mode), 'agent');
     expect(session.selected(KernelChoiceKind.permission), 'bypassPermissions');
     expect(find.byType(ComposerPicker), findsNothing);
