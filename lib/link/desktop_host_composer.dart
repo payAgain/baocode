@@ -3,9 +3,12 @@ import 'dart:async';
 import 'package:bao_link/bao_link.dart';
 import 'package:bao_markdown/bao_markdown.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../chat/chat_keys.dart';
+import '../chat/composer/composer_mock_data.dart';
 import '../chat/composer/composer_presentation.dart';
+import '../chat/composer/suggestion_menu.dart';
 import '../chat/widgets/image_thumbnails.dart';
 import '../l10n/l10n.dart';
 import '../workspace/window_controls.dart';
@@ -69,6 +72,13 @@ class DesktopHostComposer extends StatefulWidget {
   State<DesktopHostComposer> createState() => _DesktopHostComposerState();
 }
 
+typedef _CompletionAnchor = ({SuggestionKind kind, int start});
+typedef _CompletionTrigger = ({
+  _CompletionAnchor anchor,
+  int end,
+  String query,
+});
+
 class _DesktopHostComposerState extends State<DesktopHostComposer>
     with ChatKeyTarget {
   final _focus = FocusNode(debugLabel: 'Host composer');
@@ -85,6 +95,12 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
   bool _truncated = false;
   String _query = '';
   String? _mediaError;
+  _CompletionTrigger? _trigger;
+  _CompletionAnchor? _dismissed;
+  Object? _completionRequest;
+  Map<Suggestion, DesktopRemoteMention?> _options = const {};
+  List<SuggestionMatch> _matches = const [];
+  int _highlighted = 0;
 
   DesktopRemoteMediaTarget? _targetOf(DesktopHostComposer composer) {
     final peer = composer.peer;
@@ -125,6 +141,7 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
       plain: true,
     )..addListener(_draftChanged);
     _savedSelection = _draft.selection;
+    _focus.addListener(_syncCompletion);
   }
 
   @override
@@ -140,6 +157,8 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
         );
       }
       _mentions.clear();
+      _clearCompletion();
+      _dismissed = null;
       _choices = null;
       _mediaRequest = null;
       _mediaError = null;
@@ -173,6 +192,8 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
   }
 
   void _draftChanged() {
+    // Composition can change without changing the text or caret.
+    _syncCompletion();
     final version = _draft.textVersion;
     final selection = _draft.selection;
     if (version == _savedVersion && selection == _savedSelection) return;
@@ -198,10 +219,223 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
       (_draft.text.trim().isNotEmpty || _images.isNotEmpty) &&
       (_target == null || _current(_target!));
 
+  static final _mentionBoundary = RegExp(r'[\s(\[{]');
+  static final _commandName = RegExp(r'^[a-zA-Z0-9_:.\-]+$');
+
+  _CompletionTrigger? _typedTrigger(DesktopRemoteMediaTarget target) {
+    if (target.$2 != 'project' ||
+        !_current(target) ||
+        !_focus.hasFocus ||
+        _draft.isComposing ||
+        _mediaRequest != null ||
+        _choices != null) {
+      return null;
+    }
+    final selection = _draft.selection;
+    final text = _draft.text;
+    final end = selection.baseOffset;
+    if (!selection.isCollapsed ||
+        end < 1 ||
+        end > text.length ||
+        text[end - 1].trim().isEmpty ||
+        (end < text.length && text[end].trim().isNotEmpty)) {
+      return null;
+    }
+    var start = end - 1;
+    while (start > 0 && !_mentionBoundary.hasMatch(text[start - 1])) {
+      start--;
+    }
+    final query = text.substring(start + 1, end);
+    final kind = switch (text[start]) {
+      '@' when (target.$4?.isNotEmpty ?? false) && !query.contains('"') =>
+        SuggestionKind.file,
+      '/'
+          when text.substring(0, start).trim().isEmpty &&
+              (query.isEmpty || _commandName.hasMatch(query)) =>
+        SuggestionKind.command,
+      _ => null,
+    };
+    return kind == null
+        ? null
+        : (anchor: (kind: kind, start: start), end: end, query: query);
+  }
+
+  void _clearCompletion() {
+    _trigger = null;
+    _completionRequest = null;
+    _options = const {};
+    _matches = const [];
+    _highlighted = 0;
+  }
+
+  void _dismissCompletion() {
+    _dismissed = _trigger?.anchor ?? _dismissed;
+    _clearCompletion();
+  }
+
+  void _syncCompletion() {
+    final target = _target;
+    final trigger = target == null ? null : _typedTrigger(target);
+    if (trigger?.anchor != _dismissed) _dismissed = null;
+    if (trigger == null || trigger.anchor == _dismissed) {
+      if (_trigger != null) setState(_clearCompletion);
+      return;
+    }
+    if (trigger == _trigger) return;
+    final newAnchor = trigger.anchor != _trigger?.anchor;
+    setState(() {
+      if (newAnchor) _clearCompletion();
+      _trigger = trigger;
+      _updateMatches(trigger.query);
+    });
+    if (newAnchor) unawaited(_loadCompletion(target!, trigger.anchor.kind));
+  }
+
+  void _updateMatches(String query) {
+    _matches = rankSuggestions(
+      _options.keys.toList(),
+      query,
+    ).take(100).toList();
+    _highlighted = 0;
+  }
+
+  Future<void> _loadCompletion(
+    DesktopRemoteMediaTarget target,
+    SuggestionKind kind,
+  ) async {
+    final request = _completionRequest = Object();
+    final Map<Suggestion, DesktopRemoteMention?> options;
+    try {
+      if (kind == SuggestionKind.file) {
+        final result = await remoteProjectMentions(target);
+        options = {
+          for (final mention in result.entries)
+            Suggestion(kind: kind, label: mention.path): mention,
+        };
+      } else {
+        options = {
+          for (final command in await _sessionCommands(target)) command: null,
+        };
+      }
+    } on Object {
+      // Suggestions are optional. Older hosts and unavailable file lists
+      // leave the typed text usable, including while the request is pending.
+      if (identical(_completionRequest, request)) _completionRequest = null;
+      return;
+    }
+    final trigger = _trigger;
+    if (!identical(_completionRequest, request) ||
+        trigger == null ||
+        _typedTrigger(target) != trigger) {
+      return;
+    }
+    setState(() {
+      _completionRequest = null;
+      _options = options;
+      _updateMatches(trigger.query);
+    });
+  }
+
+  Future<List<Suggestion>> _sessionCommands(
+    DesktopRemoteMediaTarget target,
+  ) async {
+    final result = await target.$1.call(LinkMethods.sessionCommands, {
+      'session': target.$3,
+    });
+    if (result case {'commands': final List<Object?> commands}) {
+      return [
+        for (final command in commands)
+          if (command case {'name': final String name}
+              when _commandName.hasMatch(name) &&
+                  !const {'btw', 'fork'}.contains(name.toLowerCase()))
+            Suggestion(
+              kind: SuggestionKind.command,
+              label: name,
+              detail: [
+                if (command case {'argumentHint': final String hint}
+                    when hint.isNotEmpty)
+                  hint,
+                if (command case {'description': final String text}
+                    when text.isNotEmpty)
+                  text,
+              ].join('  '),
+            ),
+      ];
+    }
+    return const [];
+  }
+
+  void _acceptCompletion(_CompletionTrigger trigger, Suggestion suggestion) {
+    final target = _target;
+    if (target == null ||
+        _trigger != trigger ||
+        _typedTrigger(target) != trigger ||
+        !_options.containsKey(suggestion)) {
+      return;
+    }
+    final mention = _options[suggestion];
+    final text = mention?.reference ?? '/${suggestion.label}';
+    // Reuse a space already in the draft so replacing a query in the middle
+    // keeps the rest of the text and puts the caret after the reference.
+    final hasSpace = _draft.text.startsWith(' ', trigger.end);
+    setState(() {
+      _dismissCompletion();
+      if (mention != null) _mentions.add(mention);
+      _draft.replace(
+        trigger.anchor.start,
+        trigger.end,
+        hasSpace ? text : '$text ',
+        selection: TextSelection.collapsed(
+          offset: trigger.anchor.start + text.length + 1,
+        ),
+      );
+    });
+    _focus.requestFocus();
+  }
+
+  KeyEventResult? _completionKey(KeyEvent event) {
+    final trigger = _trigger;
+    final target = _target;
+    if (trigger == null || target == null || _typedTrigger(target) != trigger) {
+      return null;
+    }
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.escape &&
+        (_matches.isNotEmpty || _completionRequest != null)) {
+      setState(_dismissCompletion);
+      return KeyEventResult.handled;
+    }
+    if (_matches.isEmpty) return null;
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isShiftPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isControlPressed ||
+        keyboard.isMetaPressed) {
+      return null;
+    }
+    if (key == LogicalKeyboardKey.arrowUp ||
+        key == LogicalKeyboardKey.arrowDown) {
+      final delta = key == LogicalKeyboardKey.arrowUp ? -1 : 1;
+      setState(() => _highlighted = (_highlighted + delta) % _matches.length);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.tab) {
+      if (event is KeyDownEvent) {
+        _acceptCompletion(trigger, _matches[_highlighted].suggestion);
+      }
+      return KeyEventResult.handled;
+    }
+    return handleComposerEnter(
+      event,
+      () => _acceptCompletion(trigger, _matches[_highlighted].suggestion),
+    );
+  }
+
   KeyEventResult _handleKey(KeyEvent event) => handleComposerKey(
     event,
     composing: _draft.isComposing,
-    dispatch: (event) => handleComposerEnter(event, _submit),
+    dispatch: (event) =>
+        _completionKey(event) ?? handleComposerEnter(event, _submit),
   );
 
   void _submit() => unawaited(_send());
@@ -219,7 +453,10 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
             remoteMentionsIn(text, target, _mentions),
           );
     final request = Object();
-    setState(() => _sendRequest = request);
+    setState(() {
+      _dismissCompletion();
+      _sendRequest = request;
+    });
     try {
       final confirmed = await (outgoing == null || outgoing.isEmpty
           ? widget.onSend(text)
@@ -261,6 +498,7 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
     final request = Object();
     bool current() => _current(target) && identical(_mediaRequest, request);
     setState(() {
+      _dismissCompletion();
       _mediaRequest = request;
       _mediaError = null;
       _choices = null;
@@ -421,6 +659,42 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
     );
   }
 
+  Widget? _completionPicker(DesktopRemoteMediaTarget? target) {
+    final trigger = _trigger;
+    if (target == null ||
+        trigger == null ||
+        _matches.isEmpty ||
+        _typedTrigger(target) != trigger) {
+      return null;
+    }
+    final matches = _matches;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(context).height * .25,
+          ),
+          child: SuggestionMenu(
+            title: trigger.anchor.kind == SuggestionKind.file
+                ? context.l10n.composerMentions
+                : context.l10n.composerCommands,
+            matches: matches,
+            highlighted: _highlighted,
+            onHighlight: (index) {
+              if (identical(_matches, matches)) {
+                setState(() => _highlighted = index);
+              }
+            },
+            onSelect: (index) =>
+                _acceptCompletion(trigger, matches[index].suggestion),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _mediaButton(
     String key,
     IconData icon,
@@ -453,6 +727,7 @@ class _DesktopHostComposerState extends State<DesktopHostComposer>
           focused: _focus.hasFocus,
           aboveEditor: [
             if (online && choices != null) _mentionPicker(choices, zh),
+            ?_completionPicker(target),
             if (_images.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),

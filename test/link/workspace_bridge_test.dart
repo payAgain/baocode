@@ -1114,6 +1114,56 @@ void main() {
     expect(earlier, isNotNull);
   });
 
+  test(
+    'session commands reflect the kernel and use the existing send',
+    () async {
+      final session = {'session': id};
+      cli.push({
+        'type': 'system',
+        'subtype': 'commands_changed',
+        'commands': [
+          {
+            'name': 'compact',
+            'description': 'Compact the conversation',
+            'argumentHint': '[instructions]',
+          },
+          {'name': 'status', 'description': 'Show status'},
+        ],
+      });
+      await pumpEventQueue();
+
+      expect(await phone.call(LinkMethods.sessionCommands, session), {
+        'commands': [
+          {
+            'name': 'compact',
+            'description': 'Compact the conversation',
+            'argumentHint': '[instructions]',
+          },
+          {'name': 'status', 'description': 'Show status', 'argumentHint': ''},
+        ],
+      });
+      expect(cli.users, isEmpty);
+
+      const text = '/compact keep the summary';
+      expect(await phone.call(LinkMethods.send, {...session, 'text': text}), {
+        'session': id,
+      });
+      await pumpEventQueue();
+      final content = (cli.users.single['message']! as Map)['content']! as List;
+      expect(content.last, {'type': 'text', 'text': text});
+
+      cli.push({
+        'type': 'system',
+        'subtype': 'commands_changed',
+        'commands': [],
+      });
+      await pumpEventQueue();
+      expect(await phone.call(LinkMethods.sessionCommands, session), {
+        'commands': <Object?>[],
+      });
+    },
+  );
+
   test('a message from the phone tells the agent so, unseen', () async {
     await bridge.handle(LinkMethods.send, {'session': id, 'text': 'go'});
     await settle();
@@ -1635,6 +1685,7 @@ void main() {
         expect(id, isNot(alias));
         for (final method in [
           LinkMethods.open,
+          LinkMethods.sessionCommands,
           LinkMethods.stop,
           LinkMethods.archive,
           LinkMethods.delete,
@@ -1646,6 +1697,10 @@ void main() {
           );
         }
       }
+      await expectLater(
+        withBots.handle(LinkMethods.sessionCommands, {'session': alias}),
+        forbidden,
+      );
       final opened = await withBots.handle(LinkMethods.open, {
         'session': alias,
         'window': 1,
@@ -2603,6 +2658,21 @@ void main() {
     addTearDown(host.dispose);
 
     expect(host.state().projects.map((p) => p.id), [data.cacheDir]);
+    final thread = workspace.startAgent(
+      workspace.projectAt(data.botHistoryIndexDir),
+    );
+    await expectLater(
+      host.handle(LinkMethods.sessionCommands, {
+        'session': WorkspaceBridge.idOf(thread),
+      }),
+      throwsA(
+        isA<LinkRemoteException>().having(
+          (error) => error.code,
+          'code',
+          LinkErrors.notFound,
+        ),
+      ),
+    );
     final folder = await host.handle(LinkMethods.folder, {
       'project': data.cacheDir,
     });

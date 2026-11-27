@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:bao_link/bao_link.dart';
 import 'package:bao_markdown/bao_markdown.dart';
+import 'package:baocode/chat/composer/suggestion_menu.dart';
 import 'package:baocode/chat/widgets/image_thumbnails.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_host_composer.dart';
@@ -318,6 +319,242 @@ void main() {
     }
   });
 
+  testWidgets(
+    'typed project mentions use the caret and send an approved reference',
+    (tester) async {
+      final (client, host, calls) = await _pair(
+        (method, _) => switch (method) {
+          LinkMethods.files => {
+            'paths': ['src/hello.dart', 'My Docs/notes.md', '../notes.md'],
+          },
+          _ => throw StateError(method),
+        },
+      );
+      final sent = <(String, DesktopRemoteAttachments)>[];
+      try {
+        await _mountComposer(tester, client, _project, (
+          text,
+          attachments,
+        ) async {
+          sent.add((text, attachments));
+          return true;
+        });
+        await tester.tap(_composerEditor);
+        await tester.pump();
+        await _typeDraft(tester, 'user@notes');
+        expect(calls, isEmpty);
+        await _typeDraft(tester, 'Read @ with context', caret: 'Read @'.length);
+        expect(_suggestion('src/hello.dart'), findsOneWidget);
+        await _typeDraft(
+          tester,
+          'Read @notes with context',
+          caret: 'Read @notes'.length,
+        );
+        expect(calls.single.$1, LinkMethods.files);
+        expect(calls.single.$2, {'project': _project.projectId});
+        expect(_suggestion('src/hello.dart'), findsNothing);
+        expect(_suggestion('../notes.md'), findsNothing);
+        expect(
+          tester.getBottomLeft(_suggestion('My Docs/notes.md')).dy,
+          lessThan(tester.getTopLeft(_composerEditor).dy),
+        );
+        await tester.tap(_suggestion('My Docs/notes.md'));
+        await tester.pumpAndSettle();
+        const expected = 'Read @"My Docs/notes.md" with context';
+        expect(_composerDraft(tester).text, expected);
+        expect(
+          _composerDraft(tester).selection.baseOffset,
+          'Read @"My Docs/notes.md" '.length,
+        );
+        expect(sent, isEmpty);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        expect(sent.single.$1, expected);
+        expect(sent.single.$2.mentions.single.path, 'My Docs/notes.md');
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        await client.close();
+        await host.close();
+      }
+    },
+  );
+
+  testWidgets('typed commands are session-scoped and send as ordinary text', (
+    tester,
+  ) async {
+    final (client, host, calls) = await _pair(
+      (method, _) => switch (method) {
+        LinkMethods.sessionCommands => {
+          'commands': [
+            {
+              'name': 'review',
+              'description': 'Review changes',
+              'argumentHint': '[path]',
+            },
+            {'name': 'rewind', 'description': 'Rewind changes'},
+            {'name': 'help'},
+            {'name': 'btw'},
+            {'name': 'fork'},
+          ],
+        },
+        _ => throw StateError(method),
+      },
+    );
+    final sent = <String>[];
+    try {
+      await tester.binding.setSurfaceSize(const Size(640, 300));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await _mountComposer(
+        tester,
+        client,
+        _project,
+        (_, _) async => throw StateError('Expected an ordinary send'),
+        plainSend: (text) async {
+          sent.add(text);
+          return true;
+        },
+      );
+      await tester.tap(_composerEditor);
+      await tester.pump();
+      await _typeDraft(tester, 'Path /re');
+      expect(calls, isEmpty);
+      await _typeDraft(tester, '/');
+      expect(_suggestion('/help'), findsOneWidget);
+      expect(_suggestion('/btw'), findsNothing);
+      expect(_suggestion('/fork'), findsNothing);
+      await _typeDraft(tester, '/re');
+      expect(_suggestion('/help'), findsNothing);
+      expect(_suggestion('[path]  Review changes'), findsOneWidget);
+      expect(calls.single.$1, LinkMethods.sessionCommands);
+      expect(calls.single.$2, {'session': _project.id});
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+      expect(sent, isEmpty);
+      expect(_composerDraft(tester).text, '/rewind ');
+      expect(find.byType(SuggestionMenu), findsNothing);
+      await _typeDraft(tester, '/rewind src');
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+      expect(sent, ['/rewind src']);
+      expect(tester.takeException(), isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox());
+      await client.close();
+      await host.close();
+    }
+  });
+
+  testWidgets('commands stay plain on old hosts and non-project chats', (
+    tester,
+  ) async {
+    final (client, host, calls) = await _pair((_, _) {
+      throw const LinkRemoteException('unknown', 'Unknown request');
+    });
+    final sent = <String>[];
+    try {
+      for (final chat in [_project, _dm, _group]) {
+        await _mountComposer(
+          tester,
+          client,
+          chat,
+          (_, _) async => throw StateError('Expected an ordinary send'),
+          plainSend: (text) async {
+            sent.add(text);
+            return true;
+          },
+        );
+        await tester.tap(_composerEditor);
+        await tester.pump();
+        if (chat != _project) await _typeDraft(tester, '@');
+        await _typeDraft(tester, '/custom');
+        expect(find.byType(SuggestionMenu), findsNothing);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+      }
+      expect(calls.single.$1, LinkMethods.sessionCommands);
+      expect(calls.single.$2, {'session': _project.id});
+      expect(sent, List.filled(3, '/custom'));
+    } finally {
+      await tester.pumpWidget(const SizedBox());
+      await client.close();
+      await host.close();
+    }
+  });
+
+  testWidgets('IME, Escape, and a target switch guard pending completion', (
+    tester,
+  ) async {
+    const other = DesktopHostChat(
+      id: 's2',
+      title: 'Another chat',
+      kind: 'project',
+      projectId: '/other',
+    );
+    final files = Completer<Object?>();
+    final commands = Completer<Object?>();
+    final (client, host, calls) = await _pair(
+      (method, params) => switch (method) {
+        LinkMethods.files => files.future,
+        LinkMethods.sessionCommands when params['session'] == _project.id =>
+          commands.future,
+        LinkMethods.sessionCommands => {
+          'commands': [
+            {'name': 'help'},
+          ],
+        },
+        _ => throw StateError(method),
+      },
+    );
+    Future<bool> send(String _, DesktopRemoteAttachments _) async => false;
+    try {
+      await _mountComposer(tester, client, _project, send);
+      await tester.tap(_composerEditor);
+      await tester.pump();
+      const composing = TextRange(start: 1, end: 2);
+      await _typeDraft(tester, '@n', composing: composing);
+      expect(calls, isEmpty);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      expect(_composerDraft(tester).text, '@n');
+      await _typeDraft(
+        tester,
+        '@n',
+      ); // IME commit with no text or caret change.
+      expect(calls.single.$1, LinkMethods.files);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await _typeDraft(tester, '@notes');
+      files.complete({
+        'paths': ['notes.md'],
+      });
+      await tester.pumpAndSettle();
+      expect(calls, hasLength(1));
+      expect(find.byType(SuggestionMenu), findsNothing);
+      expect(_composerDraft(tester).text, '@notes');
+
+      await _typeDraft(tester, '/');
+      expect(calls.last.$2, {'session': _project.id});
+      await _mountComposer(tester, client, other, send);
+      await _typeDraft(tester, '/h');
+      expect(calls.last.$2, {'session': other.id});
+      expect(_suggestion('/help'), findsOneWidget);
+      commands.complete({
+        'commands': [
+          {'name': 'history'},
+        ],
+      });
+      await tester.pumpAndSettle();
+      expect(_suggestion('/history'), findsNothing);
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pumpAndSettle();
+      expect(_composerDraft(tester).text, '/help ');
+    } finally {
+      await tester.pumpWidget(const SizedBox());
+      await client.close();
+      await host.close();
+    }
+  });
+
   testWidgets('remote composer pastes images and falls back to plain text', (
     tester,
   ) async {
@@ -546,12 +783,39 @@ Future<void> _tap(WidgetTester tester, String key) async {
   await tester.pumpAndSettle();
 }
 
+final _composerEditor = find.byType(MarkdownEditor);
+
+Finder _suggestion(String text) => find.descendant(
+  of: find.byType(SuggestionMenu),
+  matching: find.text(text, findRichText: true),
+);
+
+MarkdownController _composerDraft(WidgetTester tester) =>
+    tester.widget<MarkdownEditor>(_composerEditor).controller;
+
+Future<void> _typeDraft(
+  WidgetTester tester,
+  String text, {
+  int? caret,
+  TextRange composing = TextRange.empty,
+}) async {
+  tester.testTextInput.updateEditingValue(
+    TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: caret ?? text.length),
+      composing: composing,
+    ),
+  );
+  await tester.pumpAndSettle();
+}
+
 Future<void> _mountComposer(
   WidgetTester tester,
   LinkPeer peer,
   DesktopHostChat chat,
-  Future<bool> Function(String, DesktopRemoteAttachments) send,
-) => tester.pumpWidget(
+  Future<bool> Function(String, DesktopRemoteAttachments) send, {
+  Future<bool> Function(String)? plainSend,
+}) => tester.pumpWidget(
   MaterialApp(
     home: Scaffold(
       body: Align(
@@ -562,7 +826,7 @@ Future<void> _mountComposer(
           placeholder: 'Message',
           sendLabel: 'Send',
           onChanged: (_) {},
-          onSend: (_) async => false,
+          onSend: plainSend ?? (_) async => false,
           peer: peer,
           chat: chat,
           onSendWithAttachments: send,

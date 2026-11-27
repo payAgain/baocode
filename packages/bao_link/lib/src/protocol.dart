@@ -45,6 +45,10 @@ abstract final class LinkMethods {
   /// `{"session"}`: no longer followed.
   static const close = 'close';
 
+  /// `{"session"}` -> `{"commands": [{"name", "description", "argumentHint"}]}`:
+  /// the visible session's slash commands, with all fields as strings.
+  static const sessionCommands = 'sessionCommands';
+
   /// `{"session"?, "project"?, "bot"?, "text", "images"?, "mentions"?,
   /// "now"?, "id"?, "duringTurn"?, "expectedTurn"?}`: a message to the bot's conversation ([LinkBot.id]),
   /// started if it has none; else to the session; with neither, to a new

@@ -1242,6 +1242,18 @@ class WorkspaceBridge {
           _retiredWindows.remove(id);
         }
         return null;
+      case LinkMethods.sessionCommands:
+        final session = _thread(params['session']).session;
+        return {
+          'commands': [
+            for (final command in session.commands)
+              {
+                'name': command.name,
+                'description': command.description,
+                'argumentHint': command.argumentHint,
+              },
+          ],
+        };
       case LinkMethods.send:
         final request = _requestId(method, params);
         return _take(
