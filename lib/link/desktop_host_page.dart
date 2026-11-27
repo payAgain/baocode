@@ -13,8 +13,10 @@ import 'package:flutter/material.dart';
 
 import '../bots/desktop_bot_message_row.dart';
 import '../theme/codicons.dart';
+import '../theme/workbench_theme.dart' show themeColors;
 import '../chat/chat_column.dart';
 import '../chat/chat_width.dart';
+import '../ide/ide_list.dart' show IdeListColors;
 import '../l10n/l10n.dart';
 import '../sidebar/conversation_navigation_layout.dart';
 import '../sidebar/sidebar_rows.dart';
@@ -23,8 +25,10 @@ import '../sidebar/sidebar_times.dart';
 import '../chat/widgets/conversation_card_header.dart';
 import '../chat/widgets/inline_rename_field.dart';
 import '../chat/widgets/hover_scroll_text.dart';
+import '../chat/widgets/scroll_edge_fade.dart';
 import '../workspace/islands.dart';
-import '../settings/pages/settings_widgets.dart' show SettingsText;
+import '../settings/pages/settings_widgets.dart'
+    show SettingsColors, SettingsText;
 import '../settings/user_settings.dart' show GlobalStorage;
 import '../theme/app_theme.dart' show AppColors;
 import 'computer_group_sidebar.dart';
@@ -34,6 +38,7 @@ import 'desktop_host_connection.dart';
 import 'desktop_host_controls.dart';
 import 'desktop_host_message_row.dart';
 import 'desktop_host_project_history.dart';
+import 'desktop_remote_dialog.dart';
 import 'link_host.dart';
 import 'desktop_remote_activity.dart';
 import 'desktop_remote_session_actions.dart';
@@ -385,20 +390,45 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
         var title = chat.title;
         final value = await showDialog<String>(
           context: context,
-          builder: (dialog) => AlertDialog(
-            title: Text(strings.commonRename),
-            content: TextFormField(
+          builder: (dialog) => RemoteActionDialog(
+            icon: Icons.edit_outlined,
+            title: strings.commonRename,
+            body: TextFormField(
               initialValue: title,
               autofocus: true,
+              style: SettingsText.label.copyWith(fontSize: 13),
+              decoration: InputDecoration(
+                isDense: true,
+                filled: true,
+                fillColor: AppColors.code,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 11,
+                  vertical: 10,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(7),
+                  borderSide: BorderSide(color: SettingsColors.stroke),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(7),
+                  borderSide: BorderSide(color: SettingsColors.stroke),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(7),
+                  borderSide: BorderSide(color: AppColors.accent),
+                ),
+              ),
               onChanged: (s) => title = s,
               onFieldSubmitted: (s) => Navigator.pop(dialog, s),
             ),
             actions: [
               TextButton(
+                style: remoteDialogSecondaryButtonStyle(dialog),
                 onPressed: () => Navigator.pop(dialog),
                 child: Text(strings.commonCancel),
               ),
               TextButton(
+                style: remoteDialogPrimaryButtonStyle(dialog),
                 onPressed: () => Navigator.pop(dialog, title),
                 child: Text(strings.commonSave),
               ),
@@ -416,25 +446,60 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
       case LinkMethods.archive:
       case LinkMethods.delete:
         final deleting = method == LinkMethods.delete;
+        final zh = Localizations.localeOf(context).languageCode == 'zh';
         final accepted = await showDialog<bool>(
           context: context,
-          builder: (dialog) => AlertDialog(
-            title: Text(
-              deleting
-                  ? strings.sidebarDeleteAgentTitle
-                  : strings.sidebarArchive,
-            ),
-            content: Text(
-              deleting
-                  ? strings.sidebarDeleteAgentMessage(chat.title)
-                  : chat.title,
-            ),
+          builder: (dialog) => RemoteActionDialog(
+            icon: deleting
+                ? Icons.delete_outline_rounded
+                : Icons.inventory_2_outlined,
+            destructive: deleting,
+            title: deleting
+                ? strings.sidebarDeleteAgentTitle
+                : strings.sidebarArchive,
+            body: deleting
+                ? Text(strings.sidebarDeleteAgentMessage(chat.title))
+                : Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        zh
+                            ? '归档以下会话？你仍可在归档列表中恢复。'
+                            : 'Archive this conversation? You can restore it later from Archived.',
+                      ),
+                      const SizedBox(height: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 11,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: AppColors.code,
+                          borderRadius: BorderRadius.circular(7),
+                          border: Border.all(color: SettingsColors.stroke),
+                        ),
+                        child: Text(
+                          chat.title,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                            color: SettingsColors.textPrimary,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
             actions: [
               TextButton(
+                style: remoteDialogSecondaryButtonStyle(dialog),
                 onPressed: () => Navigator.pop(dialog, false),
                 child: Text(strings.commonCancel),
               ),
               TextButton(
+                style: deleting
+                    ? remoteDialogDangerButtonStyle(dialog)
+                    : remoteDialogPrimaryButtonStyle(dialog),
                 onPressed: () => Navigator.pop(dialog, true),
                 child: Text(
                   deleting ? strings.commonDelete : strings.sidebarArchive,
@@ -573,7 +638,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
               final showCompactCatalog = !wide && _compactCatalog;
               final catalog = showSidebar || showCompactCatalog || catalogOnly
                   ? Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
                       child: _catalog(
                         text,
                         error,
@@ -648,19 +713,49 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                         ),
                 ),
               );
+              final labelStyle = Theme.of(context).textTheme.labelMedium
+                  ?.copyWith(fontSize: 12, fontWeight: FontWeight.w500);
               final directory = TextButton.icon(
                 key: const ValueKey('host-toggle-sidebar'),
                 onPressed: selected == null ? null : () => _toggleCatalog(wide),
-                style: TextButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: const Size(0, 28),
+                style: ButtonStyle(
+                  padding: const WidgetStatePropertyAll(
+                    EdgeInsets.symmetric(horizontal: 7, vertical: 0),
+                  ),
+                  minimumSize: const WidgetStatePropertyAll(Size(0, 24)),
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  textStyle: labelStyle == null
+                      ? null
+                      : WidgetStatePropertyAll(labelStyle),
+                  shape: WidgetStatePropertyAll(
+                    RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                  ),
+                  foregroundColor: WidgetStateProperty.resolveWith((states) {
+                    if (states.contains(WidgetState.disabled)) {
+                      return SettingsColors.textQuaternary;
+                    }
+                    if (states.contains(WidgetState.hovered) ||
+                        states.contains(WidgetState.pressed)) {
+                      return SettingsColors.textPrimary;
+                    }
+                    return SettingsColors.textSecondary;
+                  }),
+                  backgroundColor: WidgetStateProperty.resolveWith(
+                    (states) => states.contains(WidgetState.hovered)
+                        ? themeColors['toolbar.hoverBackground']
+                        : Colors.transparent,
+                  ),
+                  overlayColor: WidgetStatePropertyAll(
+                    themeColors['toolbar.hoverBackground'],
+                  ),
                 ),
                 icon: Icon(
                   showSidebar || showCompactCatalog || catalogOnly
                       ? Codicons.layoutSidebarLeft
                       : Codicons.layoutSidebarLeftOff,
-                  size: 16,
+                  size: 14.5,
                 ),
                 label: Text(
                   showCompactCatalog && selected != null
@@ -674,9 +769,12 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   widget.windowHeader?.call(directory) ??
-                      Align(
-                        alignment: AlignmentDirectional.centerStart,
-                        child: directory,
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(6, 4, 6, 2),
+                        child: Align(
+                          alignment: AlignmentDirectional.centerStart,
+                          child: directory,
+                        ),
                       ),
                   Expanded(child: body),
                 ],
@@ -740,77 +838,97 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
         (byFolder[id] ??= []).add(chat);
       }
     }
-    return CustomScrollView(
-      key: const ValueKey('host-catalog'),
-      slivers: [
-        SliverPadding(
-          padding: const EdgeInsets.only(top: 4),
-          sliver: SliverToBoxAdapter(
-            child: ComputerGroupSidebar(
-              key: ObjectKey(widget.localHost),
-              host: widget.localHost,
-              connection: _connection,
-              expanded: _rosterExpanded,
-              onToggle: () =>
-                  setState(() => _rosterExpanded = !_rosterExpanded),
-              onLocal: _back,
-              onSelect: (id) {
-                if (widget.onSelectComputer case final select?) {
-                  select(id);
-                } else {
-                  unawaited(_connection.selectGroupMember(id));
-                }
-              },
-              onConnectionInfo: (id) {
-                if (_connection.peer?.remote == id) _showConnectionInfo(text);
-              },
-              reviewVisible:
-                  widget.reviewVisible &&
-                  !(compactPeopleDock &&
-                      identical(_peopleDock?.peer, _connection.peer) &&
-                      _peopleDock != null),
+    final visibleSections = [
+      for (final entry in groups.entries)
+        if (entry.key == 'project'
+            ? folders.isNotEmpty
+            : entry.value.isNotEmpty)
+          entry,
+    ];
+    return ScrollEdgeFade(
+      child: CustomScrollView(
+        key: const ValueKey('host-catalog'),
+        slivers: [
+          SliverPadding(
+            padding: const EdgeInsets.only(top: 4),
+            sliver: SliverToBoxAdapter(
+              child: ComputerGroupSidebar(
+                key: ObjectKey(widget.localHost),
+                host: widget.localHost,
+                connection: _connection,
+                expanded: _rosterExpanded,
+                onToggle: () =>
+                    setState(() => _rosterExpanded = !_rosterExpanded),
+                onLocal: _back,
+                onSelect: (id) {
+                  if (widget.onSelectComputer case final select?) {
+                    select(id);
+                  } else {
+                    unawaited(_connection.selectGroupMember(id));
+                  }
+                },
+                onConnectionInfo: (id) {
+                  if (_connection.peer?.remote == id) _showConnectionInfo(text);
+                },
+                reviewVisible:
+                    widget.reviewVisible &&
+                    !(compactPeopleDock &&
+                        identical(_peopleDock?.peer, _connection.peer) &&
+                        _peopleDock != null),
+              ),
             ),
           ),
-        ),
-        SliverToBoxAdapter(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (_busy) _Progress(text.working),
-              if (showChatStatus && error != null)
-                _Notice(error, isError: true),
-              if (_stored && widget.localHost == null) _host(text),
+          SliverToBoxAdapter(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_busy) _Progress(text.working),
+                if (showChatStatus && error != null)
+                  _Notice(error, isError: true),
+                if (_stored && widget.localHost == null) _host(text),
 
-              if (_online && showChatStatus) ...[
-                const SizedBox(height: 16),
-                if (_chatBusy) _Progress(text.loadingChats),
-                if (chatError != null) _Notice(chatError, isError: true),
-                if (!_chatBusy &&
-                    chatError == null &&
-                    folders.isEmpty &&
-                    groups.values.every((group) => group.isEmpty))
-                  _Notice(text.emptyCatalog),
+                if (_online && showChatStatus) ...[
+                  const SizedBox(height: 14),
+                  if (_chatBusy) _Progress(text.loadingChats),
+                  if (chatError != null) _Notice(chatError, isError: true),
+                  if (!_chatBusy &&
+                      chatError == null &&
+                      folders.isEmpty &&
+                      groups.values.every((group) => group.isEmpty))
+                    _Notice(text.emptyCatalog),
+                ],
               ],
-            ],
+            ),
           ),
-        ),
-        for (final entry in groups.entries)
-          if (entry.key == 'project'
-              ? folders.isNotEmpty
-              : entry.value.isNotEmpty) ...[
+          for (var index = 0; index < visibleSections.length; index++) ...[
+            if (index > 0)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(6, 10, 6, 8),
+                  child: SizedBox(
+                    height: 1,
+                    child: ColoredBox(color: SettingsColors.stroke),
+                  ),
+                ),
+              ),
             SliverToBoxAdapter(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 2),
+                padding: EdgeInsets.fromLTRB(8, index == 0 ? 8 : 2, 8, 3),
                 child: Semantics(
                   header: true,
                   child: Text(
-                    text.group(entry.key),
-                    style: SettingsText.heading,
+                    text.group(visibleSections[index].key),
+                    style: TextStyle(
+                      color: SettingsColors.textTertiary,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.2,
+                    ),
                   ),
                 ),
               ),
             ),
-            if (entry.key == 'project' && host != null)
+            if (visibleSections[index].key == 'project' && host != null)
               for (final folder in folders) ...[
                 SliverToBoxAdapter(
                   child: DesktopRemoteProjectActions(
@@ -830,13 +948,14 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                         project: folder,
                         size: 16,
                         isCurrent: _currentProject,
-                        color: AppColors.textFaint,
+                        color: AppColors.textMuted,
                         fallback: _collapsedFolders.contains((host, folder.id))
                             ? Codicons.folder
                             : Codicons.folderOpened,
                       ),
                       pinned: folder.pinned == true,
                       alwaysShowActions: true,
+                      fadeActionsWhenIdle: true,
                       keyboardFocusableActions: true,
                       createButtonKey: ValueKey(('new-session', folder.id)),
                       createTooltip: text.newSession,
@@ -862,10 +981,11 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                   ]),
               ]
             else
-              _chatRows(entry.value),
+              _chatRows(visibleSections[index].value),
           ],
-        const SliverToBoxAdapter(child: SizedBox(height: 16)),
-      ],
+          const SliverToBoxAdapter(child: SizedBox(height: 16)),
+        ],
+      ),
     );
   }
 
@@ -874,6 +994,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     itemBuilder: (context, index) {
       final chat = chats[index];
       final selected = _chats.selected;
+      final isSelected = selected?.kind == chat.kind && selected?.id == chat.id;
       final peer = _connection.peer;
       final manageable =
           chat.kind == 'project' &&
@@ -881,27 +1002,43 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
           !chat.provisional &&
           !_busy &&
           !_chatBusy;
+      final status = switch (chat.status) {
+        LinkSessionStatus.needsInput => ThreadStatus.needsInput,
+        LinkSessionStatus.running => ThreadStatus.running,
+        _ when chat.unread > 0 => ThreadStatus.unread,
+        _ => ThreadStatus.idle,
+      };
       return ValueListenableBuilder<bool>(
         valueListenable: SidebarTimes.shown,
         builder: (context, showTime, _) => SidebarSessionRow(
           key: ValueKey((chat.kind, chat.id)),
           title: chat.title,
-          selected: selected?.kind == chat.kind && selected?.id == chat.id,
+          selected: isSelected,
+          showSelectionOutline: false,
           onTap: _busy || _chatBusy ? null : () => _openChat(chat),
-          extraIndent: chat.kind == 'project' ? 12 : 0,
-          status: switch (chat.status) {
-            LinkSessionStatus.needsInput => ThreadStatus.needsInput,
-            LinkSessionStatus.running => ThreadStatus.running,
-            _ when chat.unread > 0 => ThreadStatus.unread,
-            _ => ThreadStatus.idle,
-          },
+          leadingPadding: chat.kind == 'project' ? 16 : 10,
+          extraIndent: chat.kind == 'project' ? 4 : 0,
+          status: status,
           unreadCount: chat.unread,
           updatedAt: chat.updatedAt,
           showTime: showTime,
           showMenuButton: manageable,
+          fadeMenuButtonWhenIdle: true,
           showPinnedMarker: true,
           menuButtonKey: ValueKey(('manage-session', chat.id)),
           menuTooltip: _HostText(context).manage,
+          leading: status == ThreadStatus.idle &&
+                  (chat.kind == 'bot' || chat.kind == 'group')
+              ? (context, hovered) => Icon(
+                  chat.kind == 'bot'
+                      ? Codicons.hubot
+                      : Codicons.commentDiscussion,
+                  size: 13.5,
+                  color: isSelected
+                      ? IdeListColors.activeSelectionForeground
+                      : SettingsColors.iconTertiary,
+                )
+              : null,
           actions: SidebarSessionActions(
             pinned: chat.pinned,
             onRename: manageable
@@ -923,24 +1060,43 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
   );
 
   Widget _host(_HostText text) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
     child: Row(
       children: [
-        const Icon(Codicons.deviceDesktop, size: 16),
-        const SizedBox(width: 8),
+        Container(
+          width: 26,
+          height: 26,
+          decoration: BoxDecoration(
+            color: SettingsColors.hover,
+            borderRadius: BorderRadius.circular(6.5),
+          ),
+          alignment: Alignment.center,
+          child: Icon(
+            Codicons.deviceDesktop,
+            size: 14,
+            color: SettingsColors.iconTertiary,
+          ),
+        ),
+        const SizedBox(width: 9),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
                 _connection.hostName ?? text.host,
-                style: SettingsText.label,
+                style: SettingsText.label.copyWith(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w500,
+                ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
               Text(
                 _online ? text.online : text.groupDisconnected,
-                style: SettingsText.description,
+                style: SettingsText.description.copyWith(
+                  fontSize: 11,
+                  color: SettingsColors.textTertiary,
+                ),
               ),
             ],
           ),
@@ -956,7 +1112,7 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
           PopupMenuButton<String>(
             tooltip: text.hostOptions,
             enabled: !_busy,
-            iconSize: 16,
+            iconSize: 15,
             itemBuilder: (_) => [
               PopupMenuItem(
                 value: 'connectionInfo',
@@ -985,9 +1141,10 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
     final path = readPath();
     showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(text.connectionInfo),
-        content: ListenableBuilder(
+      builder: (context) => RemoteActionDialog(
+        icon: Icons.lan_outlined,
+        title: text.connectionInfo,
+        body: ListenableBuilder(
           listenable: connection,
           builder: (context, _) => FutureBuilder<LinkPath>(
             future: path,
@@ -1004,20 +1161,40 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
               if (path.kind == LinkPathKind.none) {
                 return Text(text.routeUnavailable);
               }
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(text.route(path.kind)),
-                  if (path.rtt case final rtt? when !rtt.isNegative)
-                    Text(text.latency(rtt.inMilliseconds)),
-                ],
+              return Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 11,
+                  vertical: 9,
+                ),
+                decoration: BoxDecoration(
+                  color: AppColors.code,
+                  borderRadius: BorderRadius.circular(7),
+                  border: Border.all(color: SettingsColors.stroke),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      text.route(path.kind),
+                      style: TextStyle(
+                        color: SettingsColors.textPrimary,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    if (path.rtt case final rtt? when !rtt.isNegative) ...[
+                      const SizedBox(height: 2),
+                      Text(text.latency(rtt.inMilliseconds)),
+                    ],
+                  ],
+                ),
               );
             },
           ),
         ),
         actions: [
           TextButton(
+            style: remoteDialogSecondaryButtonStyle(context),
             onPressed: () => Navigator.pop(context),
             child: Text(MaterialLocalizations.of(context).closeButtonLabel),
           ),

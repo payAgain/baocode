@@ -203,6 +203,7 @@ class IdeListRow extends StatefulWidget {
     this.focusedItem,
     this.focused = false,
     this.keepSelectionActive = false,
+    this.showSelectionOutline = true,
     this.height = IdeListColors.rowHeight,
     this.tooltip,
   });
@@ -223,6 +224,10 @@ class IdeListRow extends StatefulWidget {
   /// Keeps the active selection colors and outline when opening a row
   /// moves keyboard focus to its content.
   final bool keepSelectionActive;
+
+  /// Whether to paint the focus/selection outline when [selected] and
+  /// [keepSelectionActive] are true while the list itself is unfocused.
+  final bool showSelectionOutline;
   final double height;
   final String? tooltip;
 
@@ -276,7 +281,9 @@ class _IdeListRowState extends State<IdeListRow> {
     final contrast = colors.get('contrastActiveBorder');
     final focusedItem = widget.focusedItem ?? widget.selected;
     if ((widget.focused && focusedItem) ||
-        (widget.selected && widget.keepSelectionActive)) {
+        (widget.selected &&
+            widget.keepSelectionActive &&
+            widget.showSelectionOutline)) {
       return widget.selected
           ? colors.get('list.focusAndSelectionOutline') ??
                 contrast ??

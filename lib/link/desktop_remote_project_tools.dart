@@ -9,8 +9,12 @@ import '../icons/icon_library.dart';
 import '../icons/project_icon.dart';
 import '../icons/project_icon_view.dart';
 import '../l10n/l10n.dart';
+import '../settings/pages/settings_widgets.dart'
+    show SettingsColors, SettingsText;
 import '../sidebar/sidebar_menu.dart';
 import '../sidebar/sidebar_rows.dart';
+import '../theme/app_theme.dart' show AppColors;
+import 'desktop_remote_dialog.dart';
 
 /// Checks the live connection and catalog, not the snapshots used to build a row.
 typedef DesktopRemoteProjectGuard = bool Function(
@@ -115,11 +119,11 @@ class _DesktopRemoteProjectActionsState
     final zh = Localizations.localeOf(context).languageCode == 'zh';
     return showDialog<bool>(
       context: context,
-      builder: (dialog) => AlertDialog(
-        scrollable: true,
-        title: Text(strings.sidebarRemoveFromList),
-        content: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+      builder: (dialog) => RemoteActionDialog(
+        icon: Icons.visibility_off_outlined,
+        title: strings.sidebarRemoveFromList,
+        body: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
@@ -129,17 +133,30 @@ class _DesktopRemoteProjectActionsState
                         'The project files and chats will be kept.',
             ),
             if (project.path.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              SelectableText(project.path),
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: AppColors.code,
+                  borderRadius: BorderRadius.circular(7),
+                  border: Border.all(color: SettingsColors.stroke),
+                ),
+                child: SelectableText(project.path, style: SettingsText.path),
+              ),
             ],
           ],
         ),
         actions: [
           TextButton(
+            style: remoteDialogSecondaryButtonStyle(dialog),
             onPressed: () => Navigator.pop(dialog, false),
             child: Text(strings.commonCancel),
           ),
           TextButton(
+            style: remoteDialogPrimaryButtonStyle(dialog),
             onPressed: () => Navigator.pop(dialog, true),
             child: Text(strings.sidebarRemoveFromList),
           ),

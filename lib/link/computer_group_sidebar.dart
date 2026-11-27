@@ -4,12 +4,17 @@ import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../chat/widgets/hover_builder.dart';
 import '../l10n/l10n.dart';
+import '../settings/pages/settings_widgets.dart' show SettingsColors, SettingsText;
 import '../theme/app_theme.dart';
+import '../theme/codicons.dart';
+import '../theme/workbench_theme.dart' show themeColors;
 import 'computer_admission_prompt.dart';
 import 'computer_admission_review.dart';
 import 'computer_group.dart';
 import 'desktop_host_connection.dart';
+import 'desktop_remote_dialog.dart';
 import 'link_host.dart';
 
 /// The single trust group and workspace switcher at the top of remote navigation.
@@ -205,6 +210,17 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
         final selected = group?.active[_connection.selectedHostId];
         final expanded = widget.expanded;
         _revealReview(_canReview ? request : null);
+        final selectedIndicator = selected == null
+            ? null
+            : _connection.peer?.remote == selected.id ||
+                  _host.groupWorkspaceConnected(selected.id)
+            ? AppColors.added
+            : _connection.busy
+            ? AppColors.accent
+            : switch (_host.computerGroupPresence(selected.id)) {
+                ComputerGroupPresence.reachable => AppColors.added,
+                _ => SettingsColors.textQuaternary,
+              };
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -214,18 +230,21 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
                   child: Semantics(
                     header: true,
                     expanded: expanded,
-                    child: _SidebarAction(
+                    child: _ComputerSectionHeader(
                       key: const ValueKey('computer-group-toggle'),
-                      icon: expanded ? Icons.expand_more : Icons.chevron_right,
+                      expanded: expanded,
                       label: context.l10n.myComputers,
                       onTap: widget.onToggle,
                       trailing: !expanded && request != null
                           ? Tooltip(
                               message: text.pendingReview,
-                              child: Icon(
-                                Icons.circle,
-                                size: 7,
-                                color: AppColors.accent,
+                              child: Container(
+                                width: 6,
+                                height: 6,
+                                decoration: BoxDecoration(
+                                  color: AppColors.accent,
+                                  shape: BoxShape.circle,
+                                ),
                               ),
                             )
                           : null,
@@ -237,47 +256,78 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
                   IconButton(
                     tooltip: text.returnLocal,
                     onPressed: widget.onLocal,
-                    icon: const Icon(Icons.keyboard_return, size: 16),
+                    style: _compactHeaderIconStyle(),
+                    icon: Icon(
+                      Icons.keyboard_return_rounded,
+                      size: 14,
+                      color: SettingsColors.iconTertiary,
+                    ),
                   ),
               ],
             ),
             if (!expanded && selected != null)
               Padding(
-                padding: const EdgeInsetsDirectional.only(start: 28, bottom: 8),
-                child: Text(
-                  selected.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: AppColors.textMuted, fontSize: 12),
+                padding: const EdgeInsets.fromLTRB(4, 2, 4, 4),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: SettingsColors.hover,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(
+                    children: [
+                      if (selectedIndicator != null) ...[
+                        Container(
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            color: selectedIndicator,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 7),
+                      ],
+                      Expanded(
+                        child: Text(
+                          selected.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: AppColors.text,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             if (expanded) ...[
+              const SizedBox(height: 2),
               _localRow(text, group == null ? null : local),
               if (group != null)
                 for (final member in group.active.values)
                   if (member.id != local!.id) _member(text, group, member),
-              Padding(
-                padding: const EdgeInsetsDirectional.fromSTEB(8, 4, 8, 6),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (final child in _controls(
-                      text,
-                      supported,
-                      history,
-                      group,
-                      share,
-                      request,
-                    ))
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 3),
-                        child: child,
-                      ),
-                  ],
-                ),
+              ..._controls(
+                text,
+                supported,
+                history,
+                group,
+                share,
+                request,
               ),
             ],
-            Divider(height: 1, color: AppColors.partBorder),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 6, 4, 2),
+              child: SizedBox(
+                height: 1,
+                child: ColoredBox(color: SettingsColors.stroke),
+              ),
+            ),
           ],
         );
       },
@@ -292,116 +342,255 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
     bool share,
     ComputerGroupApproval? request,
   ) {
-    if (!supported) return [Text(context.l10n.myComputersUnavailable)];
-    if (_host.computerGroupStorageError) return [Text(text.storage)];
-    if (history != null && group == null) return [Text(text.youRemoved)];
+    if (!supported) {
+      return [_panelCard([_mutedCopy(context.l10n.myComputersUnavailable)])];
+    }
+    if (_host.computerGroupStorageError) {
+      return [_panelCard([_mutedCopy(text.storage)])];
+    }
+    if (history != null && group == null) {
+      return [_panelCard([_mutedCopy(text.youRemoved)])];
+    }
     final waiting = _host.confirmingGroupJoin;
     final preview = _preview;
     return [
-      if (waiting != null) ...[
-        ComputerAdmissionWaiting(
-          title: text.waiting(waiting.sponsor.name),
-          code: waiting.code,
+      if (waiting != null)
+        _panelCard([
+          ComputerAdmissionWaiting(
+            title: text.waiting(waiting.sponsor.name),
+            code: waiting.code,
+          ),
+          TextButton(
+            style: _secondaryTextButtonStyle(),
+            onPressed: () => _host.cancelGroupJoin(waiting),
+            child: Text(text.cancelJoin),
+          ),
+        ])
+      else if (preview != null)
+        _panelCard(compact: true, [
+          ComputerGroupAdmissionReview(
+            title: text.joinVia(preview.sponsor.name),
+            fingerprint: _fingerprint(preview.sponsor.id),
+            code: preview.code,
+            compact: true,
+            primaryLabel: text.confirmJoin,
+            onPrimary: _busy
+                ? null
+                : () {
+                    setState(() {
+                      _preview = null;
+                      _setup = null;
+                      _input.clear();
+                    });
+                    unawaited(_run(() => _host.confirmGroupJoin(preview)));
+                  },
+            secondaryLabel: text.cancelJoin,
+            onSecondary: _busy
+                ? null
+                : () {
+                    _host.cancelGroupJoin(preview);
+                    setState(() {
+                      _preview = null;
+                      _setup = null;
+                      _input.clear();
+                    });
+                  },
+          ),
+        ])
+      else if (group == null)
+        _panelCard(_setupWidgets(text))
+      else if (!share)
+        _panelCard([
+          _mutedCopy(text.paused),
+          FilledButton(
+            style: _compactFilledButtonStyle(),
+            onPressed: _busy
+                ? null
+                : () => _run(() async {
+                    await _host.enableGroupConnections();
+                    if (mounted) _refreshPresence();
+                  }),
+            child: Text(text.enable),
+          ),
+        ])
+      else if (request != null && _canReview)
+        _panelCard(compact: true, [
+          ComputerApprovalPanel(
+            key: _reviewAnchor,
+            compact: true,
+            host: _host,
+            request: request,
+            onApproved: () {
+              if (!mounted) return;
+              setState(() => _invitingNearby = _showInviteOptions = false);
+            },
+          ),
+        ])
+      else if (group.canAdmit) ...[
+        Padding(
+          padding: const EdgeInsets.only(top: 3),
+          child: _InviteAction(
+            icon: _showInviteOptions
+                ? Icons.expand_less_rounded
+                : Icons.add_rounded,
+            label: text.createInvite,
+            expanded: _showInviteOptions,
+            onTap: _busy
+                ? null
+                : () {
+                    if (_invitingNearby) _host.cancelGroupInvite();
+                    setState(() {
+                      _showInviteOptions = !_showInviteOptions;
+                      _copied = _invitingNearby = false;
+                    });
+                  },
+          ),
         ),
-        TextButton(
-          onPressed: () => _host.cancelGroupJoin(waiting),
-          child: Text(text.cancelJoin),
-        ),
-      ] else if (preview != null) ...[
-        ComputerGroupAdmissionReview(
-          title: text.joinVia(preview.sponsor.name),
-          fingerprint: _fingerprint(preview.sponsor.id),
-          code: preview.code,
-          compact: true,
-          primaryLabel: text.confirmJoin,
-          onPrimary: _busy
-              ? null
-              : () {
-                  setState(() {
-                    _preview = null;
-                    _setup = null;
-                    _input.clear();
-                  });
-                  unawaited(_run(() => _host.confirmGroupJoin(preview)));
-                },
-          secondaryLabel: text.cancelJoin,
-          onSecondary: _busy
-              ? null
-              : () {
-                  _host.cancelGroupJoin(preview);
-                  setState(() {
-                    _preview = null;
-                    _setup = null;
-                    _input.clear();
-                  });
-                },
-        ),
-      ] else if (group == null) ...[
-        ..._setupWidgets(text),
-      ] else if (!share) ...[
-        Text(text.paused),
-        FilledButton(
-          onPressed: _busy
-              ? null
-              : () => _run(() async {
-                  await _host.enableGroupConnections();
-                  if (mounted) _refreshPresence();
-                }),
-          child: Text(text.enable),
-        ),
-      ] else if (request != null && _canReview) ...[
-        ComputerApprovalPanel(
-          key: _reviewAnchor,
-          compact: true,
-          host: _host,
-          request: request,
-          onApproved: () {
-            if (!mounted) return;
-            setState(() => _invitingNearby = _showInviteOptions = false);
-          },
-        ),
-      ] else if (group.canAdmit) ...[
-        _SidebarAction(
-          icon: _showInviteOptions ? Icons.expand_less : Icons.add,
-          label: text.createInvite,
-          onTap: _busy
-              ? null
-              : () {
-                  if (_invitingNearby) _host.cancelGroupInvite();
-                  setState(() {
-                    _showInviteOptions = !_showInviteOptions;
-                    _copied = _invitingNearby = false;
-                  });
-                },
-        ),
-        if (_showInviteOptions) ..._inviteWidgets(text),
+        if (_showInviteOptions) _panelCard(_inviteWidgets(text)),
       ],
       if (group != null)
         for (final id in group.removed)
-          ExpansionTile(
-            tilePadding: EdgeInsets.zero,
-            childrenPadding: const EdgeInsets.only(bottom: 8),
-            title: Text(text.removed(group.known[id]!.name)),
-            expandedCrossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SelectableText(_fingerprint(id)),
-              Text(switch (_host.pendingGroupRemoval(id)) {
-                final pending when pending.isNotEmpty => text.pending(
-                  pending.map((id) => group.known[id]!.name).join(', '),
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Material(
+              color: SettingsColors.card,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+                side: BorderSide(color: SettingsColors.stroke),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: ExpansionTile(
+                tilePadding: const EdgeInsets.symmetric(horizontal: 10),
+                childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+                title: Text(
+                  text.removed(group.known[id]!.name),
+                  style: SettingsText.label.copyWith(fontSize: 12.5),
                 ),
-                _ => text.delivered,
-              }),
-            ],
+                expandedCrossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SelectableText(
+                    _fingerprint(id),
+                    style: SettingsText.path.copyWith(fontSize: 11.5),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    switch (_host.pendingGroupRemoval(id)) {
+                      final pending when pending.isNotEmpty => text.pending(
+                        pending.map((id) => group.known[id]!.name).join(', '),
+                      ),
+                      _ => text.delivered,
+                    },
+                    style: SettingsText.description.copyWith(fontSize: 11.5),
+                  ),
+                ],
+              ),
+            ),
           ),
       if (_failed || (_host.groupJoinFailed && group == null))
-        Semantics(liveRegion: true, child: Text(text.failed)),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(6, 4, 6, 2),
+          child: Semantics(
+            liveRegion: true,
+            child: Text(
+              text.failed,
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.error,
+                fontSize: 12,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ),
     ];
   }
+
+  Widget _panelCard(List<Widget> children, {bool compact = false}) => Padding(
+    padding: compact
+        ? const EdgeInsets.only(top: 4)
+        : const EdgeInsets.fromLTRB(2, 6, 2, 2),
+    child: Container(
+      padding: EdgeInsets.all(compact ? 8 : 10),
+      decoration: BoxDecoration(
+        color: SettingsColors.card,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: SettingsColors.stroke),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var i = 0; i < children.length; i++) ...[
+            if (i > 0) SizedBox(height: compact ? 6 : 8),
+            children[i],
+          ],
+        ],
+      ),
+    ),
+  );
+
+  Widget _mutedCopy(String copy) => Text(
+    copy,
+    style: SettingsText.description.copyWith(fontSize: 12, height: 1.45),
+  );
+
+  ButtonStyle _compactHeaderIconStyle() => IconButton.styleFrom(
+    minimumSize: const Size(24, 24),
+    fixedSize: const Size(24, 24),
+    padding: EdgeInsets.zero,
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    foregroundColor: SettingsColors.iconTertiary,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
+  );
+
+  ButtonStyle _compactFilledButtonStyle() => FilledButton.styleFrom(
+    minimumSize: const Size(0, 28),
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    textStyle: Theme.of(context).textTheme.labelMedium?.copyWith(
+      fontSize: 12,
+      fontWeight: FontWeight.w500,
+    ),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+  );
+
+  ButtonStyle _compactOutlinedButtonStyle() => OutlinedButton.styleFrom(
+    minimumSize: const Size(0, 28),
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    foregroundColor: SettingsColors.textPrimary,
+    side: BorderSide(color: SettingsColors.stroke),
+    textStyle: Theme.of(context).textTheme.labelMedium?.copyWith(
+      fontSize: 12,
+      fontWeight: FontWeight.w500,
+    ),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+  );
+
+  ButtonStyle _secondaryTextButtonStyle() => TextButton.styleFrom(
+    minimumSize: const Size(0, 28),
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    foregroundColor: SettingsColors.textSecondary,
+    textStyle: Theme.of(context).textTheme.labelMedium?.copyWith(
+      fontSize: 12,
+      fontWeight: FontWeight.w500,
+    ),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+  );
 
   Widget _settings(_Text text, ComputerGroup group, bool share) =>
       PopupMenuButton<_SettingsAction>(
         tooltip: text.settings,
-        icon: Icon(Icons.tune, size: 16, color: AppColors.textMuted),
+        style: _compactHeaderIconStyle(),
+        color: AppColors.surfaceRaised,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: BorderSide(color: SettingsColors.stroke),
+        ),
+        icon: Icon(
+          Icons.tune_rounded,
+          size: 14,
+          color: SettingsColors.iconTertiary,
+        ),
         onSelected: (value) {
           if (_host.computerGroup?.id != group.id) return;
           switch (value) {
@@ -422,27 +611,34 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
         itemBuilder: (_) => [
           PopupMenuItem(
             value: _SettingsAction.permissions,
-            child: Text(text.access),
+            child: _menuItemLabel(
+              Icons.verified_user_outlined,
+              text.access,
+            ),
           ),
           if (share && group.removed.isNotEmpty)
             PopupMenuItem(
               value: _SettingsAction.sync,
               enabled: !_busy,
-              child: Text(text.sync),
+              child: _menuItemLabel(Icons.sync_rounded, text.sync),
             ),
           if (share)
             PopupMenuItem(
               value: _SettingsAction.pause,
               enabled: !_busy,
-              child: Text(text.pause),
+              child: _menuItemLabel(
+                Icons.pause_circle_outline_rounded,
+                text.pause,
+              ),
             ),
         ],
       );
 
   List<Widget> _setupWidgets(_Text text) => switch (_setup) {
     _Setup.create => [
-      Text(text.scope),
+      _mutedCopy(text.scope),
       FilledButton(
+        style: _compactFilledButtonStyle(),
         onPressed: _busy
             ? null
             : () => _run(() async {
@@ -462,11 +658,34 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
         autocorrect: false,
         enableSuggestions: false,
         enableIMEPersonalizedLearning: false,
-        decoration: InputDecoration(labelText: text.invite, isDense: true),
+        style: SettingsText.label.copyWith(fontSize: 12.5),
+        decoration: InputDecoration(
+          labelText: text.invite,
+          labelStyle: TextStyle(
+            fontSize: 12,
+            color: SettingsColors.textSecondary,
+          ),
+          isDense: true,
+          filled: true,
+          fillColor: AppColors.code,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 10,
+            vertical: 9,
+          ),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(6),
+            borderSide: BorderSide(color: SettingsColors.stroke),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(6),
+            borderSide: BorderSide(color: SettingsColors.stroke),
+          ),
+        ),
       ),
       ValueListenableBuilder(
         valueListenable: _input,
         builder: (context, value, _) => FilledButton(
+          style: _compactFilledButtonStyle(),
           onPressed: _busy || value.text.trim().isEmpty
               ? null
               : () => _run(
@@ -479,15 +698,16 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
       _back(),
     ],
     _Setup.nearby => [
-      Text(text.findHint),
+      _mutedCopy(text.findHint),
       if (_connection.discoveryError != null)
-        Text(text.findFailed)
+        _mutedCopy(text.findFailed)
       else if (_connection.nearbyGroupHosts.isEmpty)
-        Text(text.searching)
+        _mutedCopy(text.searching)
       else
         for (final advert in _connection.nearbyGroupHosts)
           OutlinedButton.icon(
-            icon: const Icon(Icons.computer),
+            style: _compactOutlinedButtonStyle(),
+            icon: const Icon(Icons.computer, size: 15),
             label: Text(advert.name),
             onPressed: _busy
                 ? null
@@ -500,17 +720,20 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
       _back(),
     ],
     null => [
-      Text(text.welcome),
+      _mutedCopy(text.welcome),
       Wrap(
-        spacing: 8,
+        spacing: 6,
+        runSpacing: 6,
         children: [
           FilledButton(
+            style: _compactFilledButtonStyle(),
             onPressed: _busy
                 ? null
                 : () => setState(() => _setup = _Setup.create),
             child: Text(text.create),
           ),
           OutlinedButton(
+            style: _compactOutlinedButtonStyle(),
             onPressed: _busy
                 ? null
                 : () => setState(() => _setup = _Setup.invite),
@@ -518,7 +741,8 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
           ),
           if (_connection.discoverySupported)
             OutlinedButton.icon(
-              icon: const Icon(Icons.radar, size: 16),
+              style: _compactOutlinedButtonStyle(),
+              icon: const Icon(Icons.radar, size: 14),
               onPressed: _busy
                   ? null
                   : () {
@@ -537,6 +761,7 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
   };
 
   Widget _back() => TextButton(
+    style: _secondaryTextButtonStyle(),
     onPressed: _busy
         ? null
         : () {
@@ -551,12 +776,13 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
 
   List<Widget> _inviteWidgets(_Text text) => [
     if (_invitingNearby) ...[
-      Text(
+      _mutedCopy(
         _host.invitingNearbyGroupMembers
             ? text.invitingNearby
             : text.inviteExpired,
       ),
       TextButton(
+        style: _secondaryTextButtonStyle(),
         onPressed: _busy
             ? null
             : () {
@@ -566,11 +792,13 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
         child: Text(text.stopInviting),
       ),
     ] else ...[
-      Text(text.share),
+      _mutedCopy(text.share),
       Wrap(
-        spacing: 8,
+        spacing: 6,
+        runSpacing: 6,
         children: [
           FilledButton(
+            style: _compactFilledButtonStyle(),
             onPressed: _busy
                 ? null
                 : () => _run(() async {
@@ -583,7 +811,8 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
             child: Text(_copied ? text.copied : text.copy),
           ),
           OutlinedButton.icon(
-            icon: const Icon(Icons.radar, size: 16),
+            style: _compactOutlinedButtonStyle(),
+            icon: const Icon(Icons.radar, size: 14),
             onPressed: _busy
                 ? null
                 : () => _run(() {
@@ -603,12 +832,13 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
   void _info(String title, Widget content) {
     showDialog<void>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: content,
-        scrollable: true,
+      builder: (context) => RemoteActionDialog(
+        icon: Icons.info_outline_rounded,
+        title: title,
+        body: content,
         actions: [
           TextButton(
+            style: remoteDialogSecondaryButtonStyle(context),
             onPressed: () => Navigator.pop(context),
             child: Text(context.l10n.commonClose),
           ),
@@ -621,10 +851,18 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
     key: const ValueKey('local-computer'),
     name: member?.name ?? text.local,
     status: member == null ? text.returnLocal : text.local,
-    icon: Icons.desktop_windows_outlined,
+    icon: Codicons.deviceDesktop,
     tooltip: text.returnLocal,
+    isLocal: member != null,
     onTap: widget.onLocal,
-    menu: member == null ? null : _deviceMenu(text, member),
+    menuBuilder: member == null
+        ? null
+        : (onOpened, onClosed) => _deviceMenu(
+            text,
+            member,
+            onOpened: onOpened,
+            onClosed: onClosed,
+          ),
   );
 
   Widget _member(_Text text, ComputerGroup group, ComputerGroupMember member) {
@@ -633,39 +871,45 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
     final allowed = _host.permitsGroupWorkspace(member.id);
     final connecting = selected && _connection.busy;
     final presence = _host.computerGroupPresence(member.id);
-    final (status, indicator) = switch (presence) {
+    final (status, indicator, statusMuted) = switch (presence) {
       _ when online || _host.groupWorkspaceConnected(member.id) => (
         text.connected,
         AppColors.added,
+        false,
       ),
-      _ when connecting => (text.connecting, AppColors.accent),
-      ComputerGroupPresence.reachable => (text.reachable, AppColors.added),
+      _ when connecting => (text.connecting, AppColors.accent, false),
+      ComputerGroupPresence.reachable => (text.reachable, AppColors.added, false),
       ComputerGroupPresence.unreachable => (
         text.unreachable,
-        AppColors.textFaint,
+        SettingsColors.textQuaternary,
+        true,
       ),
       ComputerGroupPresence.unknown => (
         text.statusUnknown,
-        AppColors.textFaint,
+        SettingsColors.textQuaternary,
+        true,
       ),
     };
     return _DeviceRow(
       key: ValueKey(('open-computer', member.id)),
       name: member.name,
       status: status,
-      icon: Icons.devices_outlined,
+      icon: Icons.devices_rounded,
       tooltip: member.name,
       selected: selected,
       indicator: indicator,
+      statusMuted: statusMuted,
       onTap: allowed && !_connection.busy && !online
           ? () => widget.onSelect(member.id)
           : null,
-      menu: _deviceMenu(
+      menuBuilder: (onOpened, onClosed) => _deviceMenu(
         text,
         member,
         group: group,
         online: online,
         canReconnect: selected && allowed && !_connection.busy && !online,
+        onOpened: onOpened,
+        onClosed: onClosed,
       ),
     );
   }
@@ -676,11 +920,22 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
     ComputerGroup? group,
     bool online = false,
     bool canReconnect = false,
+    VoidCallback? onOpened,
+    VoidCallback? onClosed,
   }) => PopupMenuButton<_DeviceAction>(
     key: ValueKey(('computer-menu', member.id)),
     tooltip: text.options(member.name),
-    icon: Icon(Icons.more_horiz, color: AppColors.textMuted, size: 18),
+    style: _compactHeaderIconStyle(),
+    color: AppColors.surfaceRaised,
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(8),
+      side: BorderSide(color: SettingsColors.stroke),
+    ),
+    icon: Icon(Icons.more_horiz_rounded, color: AppColors.textMuted, size: 16),
+    onOpened: onOpened,
+    onCanceled: onClosed,
     onSelected: (value) {
+      onClosed?.call();
       switch (value) {
         case _DeviceAction.details:
           _info(
@@ -689,9 +944,23 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(text.fingerprint),
+                Text(text.fingerprint, style: SettingsText.heading),
                 const SizedBox(height: 8),
-                SelectableText(_fingerprint(member.id)),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppColors.code,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: SettingsColors.stroke),
+                  ),
+                  child: SelectableText(
+                    _fingerprint(member.id),
+                    style: SettingsText.path,
+                  ),
+                ),
               ],
             ),
           );
@@ -706,26 +975,43 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
       }
     },
     itemBuilder: (context) => [
-      PopupMenuItem(value: _DeviceAction.details, child: Text(text.details)),
+      PopupMenuItem(
+        value: _DeviceAction.details,
+        child: _menuItemLabel(Icons.info_outline_rounded, text.details),
+      ),
       if (online)
         PopupMenuItem(
           value: _DeviceAction.connectionInfo,
-          child: Text(text.connectionInfo),
+          child: _menuItemLabel(Icons.lan_outlined, text.connectionInfo),
         ),
       if (canReconnect)
         PopupMenuItem(
           value: _DeviceAction.reconnect,
-          child: Text(text.reconnect),
+          child: _menuItemLabel(Icons.refresh_rounded, text.reconnect),
         ),
       if (group != null)
         PopupMenuItem(
           value: _DeviceAction.remove,
           enabled: !_busy && _host.permitsGroupWorkspace(member.id),
-          child: Text(
+          child: _menuItemLabel(
+            Icons.person_remove_outlined,
             text.remove(member.name),
-            style: TextStyle(color: Theme.of(context).colorScheme.error),
+            color: Theme.of(context).colorScheme.error,
           ),
         ),
+    ],
+  );
+
+  Widget _menuItemLabel(IconData icon, String label, {Color? color}) => Row(
+    children: [
+      Icon(icon, size: 15, color: color ?? AppColors.textMuted),
+      const SizedBox(width: 8),
+      Expanded(
+        child: Text(
+          label,
+          style: color == null ? null : TextStyle(color: color),
+        ),
+      ),
     ],
   );
 
@@ -742,27 +1028,38 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
     if (!stillAllowed()) return;
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(text.remove(member.name)),
-        content: Column(
+      builder: (context) => RemoteActionDialog(
+        icon: Icons.person_remove_outlined,
+        destructive: true,
+        title: text.remove(member.name),
+        body: Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(text.removePrompt(member.name)),
-            const SizedBox(height: 8),
-            SelectableText(_fingerprint(member.id)),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: AppColors.code,
+                borderRadius: BorderRadius.circular(7),
+                border: Border.all(color: SettingsColors.stroke),
+              ),
+              child: SelectableText(
+                _fingerprint(member.id),
+                style: SettingsText.path,
+              ),
+            ),
           ],
         ),
-        scrollable: true,
         actions: [
           TextButton(
+            style: remoteDialogSecondaryButtonStyle(context),
             onPressed: () => Navigator.pop(context),
             child: Text(context.l10n.commonCancel),
           ),
           TextButton(
-            style: TextButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.error,
-            ),
+            style: remoteDialogDangerButtonStyle(context),
             onPressed: () => Navigator.pop(context, true),
             child: Text(text.confirmRemove),
           ),
@@ -775,46 +1072,126 @@ class _ComputerGroupSidebarState extends State<ComputerGroupSidebar> {
   }
 }
 
-class _SidebarAction extends StatelessWidget {
-  const _SidebarAction({
+class _ComputerSectionHeader extends StatelessWidget {
+  const _ComputerSectionHeader({
     super.key,
-    required this.icon,
+    required this.expanded,
     required this.label,
     required this.onTap,
     this.trailing,
   });
-  final IconData icon;
+
+  final bool expanded;
   final String label;
-  final VoidCallback? onTap;
+  final VoidCallback onTap;
   final Widget? trailing;
 
   @override
-  Widget build(BuildContext context) => InkWell(
-    onTap: onTap,
-    borderRadius: BorderRadius.circular(6),
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
-      child: Row(
-        children: [
-          Icon(icon, size: 16, color: AppColors.textMuted),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              label,
-              style: TextStyle(
-                color: AppColors.textPrimary,
-                fontWeight: FontWeight.w600,
+  Widget build(BuildContext context) => HoverBuilder(
+    cursor: SystemMouseCursors.click,
+    builder: (context, hovered) => GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        height: 28,
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        decoration: BoxDecoration(
+          color: hovered ? AppColors.hover : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Row(
+          children: [
+            AnimatedRotation(
+              turns: expanded ? 0.25 : 0,
+              duration: const Duration(milliseconds: 150),
+              child: Icon(
+                Icons.chevron_right_rounded,
+                size: 14,
+                color: hovered ? AppColors.textMuted : AppColors.textFaint,
               ),
             ),
-          ),
-          if (trailing != null) ...[const SizedBox(width: 6), trailing!],
-        ],
+            const SizedBox(width: 4),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: hovered
+                      ? SettingsColors.textPrimary
+                      : SettingsColors.textSecondary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ),
+            if (trailing != null) ...[const SizedBox(width: 6), trailing!],
+          ],
+        ),
       ),
     ),
   );
 }
 
-class _DeviceRow extends StatelessWidget {
+class _InviteAction extends StatelessWidget {
+  const _InviteAction({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.expanded = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+  final bool expanded;
+
+  @override
+  Widget build(BuildContext context) => HoverBuilder(
+    cursor: onTap == null ? MouseCursor.defer : SystemMouseCursors.click,
+    builder: (context, hovered) => GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        height: 28,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        decoration: BoxDecoration(
+          color: hovered || expanded ? AppColors.hover : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              icon,
+              size: 15,
+              color: hovered || expanded
+                  ? SettingsColors.textPrimary
+                  : SettingsColors.iconTertiary,
+            ),
+            const SizedBox(width: 7),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: hovered || expanded
+                      ? SettingsColors.textPrimary
+                      : SettingsColors.textSecondary,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+class _DeviceRow extends StatefulWidget {
   const _DeviceRow({
     super.key,
     required this.name,
@@ -823,100 +1200,228 @@ class _DeviceRow extends StatelessWidget {
     required this.tooltip,
     required this.onTap,
     this.selected = false,
+    this.isLocal = false,
+    this.statusMuted = false,
     this.indicator,
-    this.menu,
+    this.menuBuilder,
   });
+
   final String name, status, tooltip;
   final IconData icon;
   final VoidCallback? onTap;
   final bool selected;
+  final bool isLocal;
+  final bool statusMuted;
   final Color? indicator;
-  final Widget? menu;
+  final Widget Function(VoidCallback onOpened, VoidCallback onClosed)?
+  menuBuilder;
+
+  @override
+  State<_DeviceRow> createState() => _DeviceRowState();
+}
+
+class _DeviceRowState extends State<_DeviceRow> {
+  bool _hovered = false;
+  bool _menuOpen = false;
+  bool _menuFocused = false;
 
   @override
   Widget build(BuildContext context) {
-    final shape = BorderRadius.circular(7);
-    return Material(
-      color: selected
-          ? AppColors.accent.withValues(alpha: 0.14)
-          : Colors.transparent,
-      borderRadius: shape,
-      child: Row(
-        children: [
-          Expanded(
-            child: Semantics(
-              selected: selected,
-              button: onTap != null || selected,
-              enabled: onTap != null,
-              child: Tooltip(
-                message: tooltip,
-                excludeFromSemantics: tooltip == name,
-                child: InkWell(
-                  onTap: onTap,
-                  borderRadius: shape,
-                  child: Padding(
-                    padding: const EdgeInsetsDirectional.fromSTEB(8, 6, 2, 6),
-                    child: Row(
-                      children: [
-                        Icon(
-                          icon,
-                          size: 17,
-                          color: selected
-                              ? AppColors.accent
-                              : AppColors.textMuted,
-                        ),
-                        const SizedBox(width: 9),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                name,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 13,
-                                  color: AppColors.textPrimary,
+    final selected = widget.selected;
+    final showMenu = _hovered || _menuOpen || _menuFocused;
+    final fill = selected
+        ? Color.alphaBlend(
+            AppColors.accent.withValues(alpha: 0.10),
+            SettingsColors.hover,
+          )
+        : _hovered
+        ? AppColors.hover
+        : Colors.transparent;
+    final borderColor = selected
+        ? (themeColors.highContrast
+              ? SettingsColors.stroke
+              : AppColors.accent.withValues(alpha: 0.24))
+        : Colors.transparent;
+    final statusColor = selected
+        ? (widget.statusMuted
+              ? SettingsColors.textSecondary
+              : AppColors.added.withValues(alpha: 0.92))
+        : widget.statusMuted
+        ? SettingsColors.textQuaternary
+        : SettingsColors.textTertiary;
+
+    final row = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1.5),
+      child: MouseRegion(
+        cursor: widget.onTap == null
+            ? MouseCursor.defer
+            : SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          decoration: BoxDecoration(
+            color: fill,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: borderColor),
+          ),
+          child: Stack(
+            alignment: AlignmentDirectional.centerStart,
+            children: [
+              Semantics(
+                selected: selected,
+                button: widget.onTap != null || selected,
+                enabled: widget.onTap != null,
+                child: Tooltip(
+                  message: widget.tooltip,
+                  excludeFromSemantics: widget.tooltip == widget.name,
+                  child: Material(
+                    type: MaterialType.transparency,
+                    child: InkWell(
+                      onTap: widget.onTap,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Padding(
+                      padding: EdgeInsetsDirectional.fromSTEB(
+                        7,
+                        6,
+                        widget.menuBuilder != null && showMenu ? 30 : 8,
+                        6,
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 26,
+                            height: 26,
+                            decoration: BoxDecoration(
+                              color: selected
+                                  ? AppColors.accent.withValues(alpha: 0.16)
+                                  : SettingsColors.hover,
+                              borderRadius: BorderRadius.circular(6.5),
+                            ),
+                            alignment: Alignment.center,
+                            child: Icon(
+                              widget.icon,
+                              size: widget.isLocal ? 14 : 14.5,
+                              color: selected
+                                  ? AppColors.accent
+                                  : SettingsColors.iconTertiary,
+                            ),
+                          ),
+                          const SizedBox(width: 9),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  widget.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontWeight: selected
+                                        ? FontWeight.w600
+                                        : FontWeight.w500,
+                                    fontSize: 12.5,
+                                    height: 1.25,
+                                    color: selected
+                                        ? AppColors.textPrimary
+                                        : AppColors.text,
+                                  ),
                                 ),
-                              ),
-                              Row(
-                                children: [
-                                  if (indicator != null) ...[
-                                    Icon(
-                                      Icons.circle,
-                                      size: 6,
-                                      color: indicator,
+                                const SizedBox(height: 2),
+                                if (widget.isLocal)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 5,
+                                      vertical: 1,
                                     ),
-                                    const SizedBox(width: 5),
-                                  ],
-                                  Expanded(
+                                    decoration: BoxDecoration(
+                                      color: SettingsColors.hover,
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
                                     child: Text(
-                                      status,
+                                      widget.status,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
-                                        color: AppColors.textMuted,
-                                        fontSize: 12,
+                                        color: SettingsColors.textSecondary,
+                                        fontSize: 10.5,
+                                        fontWeight: FontWeight.w500,
+                                        height: 1.2,
                                       ),
                                     ),
+                                  )
+                                else
+                                  Row(
+                                    children: [
+                                      if (widget.indicator case final dot?) ...[
+                                        Container(
+                                          width: 6,
+                                          height: 6,
+                                          decoration: BoxDecoration(
+                                            color: dot,
+                                            shape: BoxShape.circle,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 5),
+                                      ],
+                                      Expanded(
+                                        child: Text(
+                                          widget.status,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: statusColor,
+                                            fontSize: 11,
+                                            height: 1.25,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                ],
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
-                        if (selected)
-                          Icon(Icons.check, size: 14, color: AppColors.accent),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
+              if (widget.menuBuilder case final buildMenu?)
+                Positioned.directional(
+                  textDirection: Directionality.of(context),
+                  end: 4,
+                  top: 0,
+                  bottom: 0,
+                  child: Center(
+                    child: Focus(
+                      canRequestFocus: false,
+                      skipTraversal: true,
+                      onFocusChange: (focused) {
+                        if (focused != _menuFocused) {
+                          setState(() => _menuFocused = focused);
+                        }
+                      },
+                      child: AnimatedOpacity(
+                        opacity: showMenu ? 1.0 : 0.0,
+                        duration: const Duration(milliseconds: 120),
+                        child: buildMenu(
+                          () => setState(() => _menuOpen = true),
+                          () {
+                            if (mounted) setState(() => _menuOpen = false);
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
-          ?menu,
-        ],
+        ),
       ),
     );
+    return row;
   }
 }
 

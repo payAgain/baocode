@@ -1,6 +1,7 @@
 import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
 
+import '../settings/pages/settings_widgets.dart' show SettingsColors;
 import '../theme/app_theme.dart';
 import 'link_host.dart';
 
@@ -34,6 +35,13 @@ class ComputerGroupAdmissionReview extends StatelessWidget {
       color: AppColors.textMuted,
       fontWeight: FontWeight.w600,
     );
+    final buttonText = Theme.of(context).textTheme.labelMedium?.copyWith(
+      fontSize: 12,
+      fontWeight: FontWeight.w500,
+    );
+    final shape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(6),
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -51,7 +59,7 @@ class ComputerGroupAdmissionReview extends StatelessWidget {
                   Text(
                     title,
                     style: TextStyle(
-                      fontSize: compact ? 15 : 17,
+                      fontSize: compact ? 14 : 17,
                       fontWeight: FontWeight.w600,
                       color: AppColors.textPrimary,
                     ),
@@ -66,23 +74,53 @@ class ComputerGroupAdmissionReview extends StatelessWidget {
             ),
           ],
         ),
-        SizedBox(height: compact ? 10 : 16),
+        SizedBox(height: compact ? 8 : 16),
         _Code(code: code, compact: compact),
-        SizedBox(height: compact ? 10 : 16),
+        SizedBox(height: compact ? 8 : 16),
         Text(zh ? '工作区权限' : 'Workspace access', style: label),
         const SizedBox(height: 4),
         Text(
           admissionScope(zh),
-          style: TextStyle(color: AppColors.text, height: 1.4, fontSize: 13),
+          style: TextStyle(
+            color: AppColors.text,
+            height: compact ? 1.35 : 1.4,
+            fontSize: compact ? 12 : 13,
+          ),
         ),
-        SizedBox(height: compact ? 10 : 16),
+        SizedBox(height: compact ? 8 : 16),
         Wrap(
           alignment: compact ? WrapAlignment.start : WrapAlignment.end,
           spacing: 8,
           runSpacing: 4,
           children: [
-            TextButton(onPressed: onSecondary, child: Text(secondaryLabel)),
-            FilledButton(onPressed: onPrimary, child: Text(primaryLabel)),
+            TextButton(
+              style: TextButton.styleFrom(
+                minimumSize: const Size(0, 28),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                textStyle: buttonText,
+                shape: shape,
+              ),
+              onPressed: onSecondary,
+              child: Text(secondaryLabel),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(0, 28),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                textStyle: buttonText,
+                shape: shape,
+              ),
+              onPressed: onPrimary,
+              child: Text(primaryLabel),
+            ),
           ],
         ),
       ],
@@ -102,7 +140,7 @@ class _Code extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppColors.code,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: AppColors.partBorder),
+        border: Border.all(color: SettingsColors.stroke),
       ),
       child: Column(
         children: [
@@ -116,7 +154,7 @@ class _Code extends StatelessWidget {
             textAlign: TextAlign.center,
             style: TextStyle(
               fontFeatures: const [FontFeature.tabularFigures()],
-              fontSize: 22,
+              fontSize: compact ? 20 : 22,
               fontWeight: FontWeight.w600,
               letterSpacing: 2,
               color: AppColors.textPrimary,

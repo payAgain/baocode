@@ -143,6 +143,7 @@ class SidebarProjectRow extends StatelessWidget {
     this.wrapCreateButton,
     this.menuItems,
     this.alwaysShowActions = false,
+    this.fadeActionsWhenIdle = false,
     this.keyboardFocusableActions = false,
     this.isProject = true,
     this.light = false,
@@ -168,6 +169,7 @@ class SidebarProjectRow extends StatelessWidget {
   final Widget Function(Widget button)? wrapCreateButton;
   final List<SidebarMenuItem> Function()? menuItems;
   final bool alwaysShowActions;
+  final bool fadeActionsWhenIdle;
   final bool keyboardFocusableActions;
   final bool isProject;
   final bool light;
@@ -196,8 +198,8 @@ class SidebarProjectRow extends StatelessWidget {
       cursor: onToggle == null ? MouseCursor.defer : SystemMouseCursors.click,
       builder: (context, hovered) {
         final active = hovered || (menu?.isOpen ?? false);
-        final showActions = active || alwaysShowActions;
-        final create = showActions && onCreate != null
+        final mountActions = active || alwaysShowActions;
+        final create = mountActions && onCreate != null
             ? SidebarIconButton(
                 key: createButtonKey,
                 icon: Icons.add_rounded,
@@ -207,13 +209,31 @@ class SidebarProjectRow extends StatelessWidget {
                 onTap: onCreate!,
               )
             : null;
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: onToggle,
-          onSecondaryTapUp: menu == null
-              ? null
-              : (details) => menu.open(details.globalPosition),
-          child: Container(
+        final menuButton = mountActions && menu != null
+            ? SidebarIconButton(
+                icon: Icons.more_horiz_rounded,
+                tooltip: l10n.sidebarMoreActions,
+                size: 20,
+                keyboardFocusable: keyboardFocusableActions,
+                onTap: menu.open,
+              )
+            : null;
+        final wrappedCreate = create == null
+            ? null
+            : wrapCreateButton?.call(create) ?? create;
+
+        Widget buildRow(BuildContext context, bool actionsVisible) {
+          final reservedActionsWidth =
+              alwaysShowActions && fadeActionsWhenIdle && actionsVisible
+              ? (menuButton != null ? 22.0 : 0.0) +
+                    (wrappedCreate != null ? 22.0 : 0.0)
+              : 0.0;
+          final showCount =
+              collapsed &&
+              !light &&
+              hiddenCount > 0 &&
+              !(alwaysShowActions && fadeActionsWhenIdle && actionsVisible);
+          return Container(
             height: extent - _topGap,
             margin: const EdgeInsets.only(top: _topGap),
             padding: EdgeInsets.only(left: light ? 6 : 4, right: 2),
@@ -221,7 +241,7 @@ class SidebarProjectRow extends StatelessWidget {
               color: (active || highlighted) && isProject
                   ? AppColors.hover
                   : Colors.transparent,
-              borderRadius: BorderRadius.circular(5),
+              borderRadius: BorderRadius.circular(6),
             ),
             child: Row(
               children: [
@@ -260,7 +280,7 @@ class SidebarProjectRow extends StatelessWidget {
                     ],
                   ),
                 ),
-                if (collapsed && !light && hiddenCount > 0)
+                if (showCount)
                   Padding(
                     padding: const EdgeInsets.only(right: 6),
                     child: Text(
@@ -271,18 +291,56 @@ class SidebarProjectRow extends StatelessWidget {
                       ),
                     ),
                   ),
-                if (showActions && menu != null)
-                  SidebarIconButton(
-                    icon: Icons.more_horiz_rounded,
-                    tooltip: l10n.sidebarMoreActions,
-                    size: 20,
-                    keyboardFocusable: keyboardFocusableActions,
-                    onTap: menu.open,
-                  ),
-                if (create != null) wrapCreateButton?.call(create) ?? create,
+                if (alwaysShowActions && fadeActionsWhenIdle)
+                  SizedBox(width: reservedActionsWidth)
+                else ...[
+                  ?menuButton,
+                  ?wrappedCreate,
+                ],
               ],
             ),
-          ),
+          );
+        }
+
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onToggle,
+          onSecondaryTapUp: menu == null
+              ? null
+              : (details) => menu.open(details.globalPosition),
+          child:
+              alwaysShowActions &&
+                  fadeActionsWhenIdle &&
+                  (menuButton != null || wrappedCreate != null)
+              ? _FocusAwareReveal(
+                  visible: active,
+                  builder: (context, actionsVisible) => Stack(
+                    alignment: AlignmentDirectional.center,
+                    children: [
+                      buildRow(context, actionsVisible),
+                      Positioned.directional(
+                        textDirection: Directionality.of(context),
+                        end: 2,
+                        top: _topGap,
+                        bottom: 0,
+                        child: Center(
+                          child: AnimatedOpacity(
+                            opacity: actionsVisible ? 1.0 : 0.0,
+                            duration: const Duration(milliseconds: 120),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                ?menuButton,
+                                ?wrappedCreate,
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : buildRow(context, active),
         );
       },
     );
@@ -309,11 +367,14 @@ class SidebarSessionRow extends StatelessWidget {
     this.suppressTimestamp = false,
     this.actions = const SidebarSessionActions(),
     this.showMenuButton = false,
+    this.fadeMenuButtonWhenIdle = false,
     this.showPinnedMarker = false,
+    this.showSelectionOutline = true,
     this.menuButtonKey,
     this.menuTooltip,
     this.menuItems,
     this.onContextMenu,
+    this.leadingPadding = 16.0,
     this.extraIndent = 0,
     this.titleSuffix = const [],
     this.editor,
@@ -338,11 +399,14 @@ class SidebarSessionRow extends StatelessWidget {
   final bool suppressTimestamp;
   final SidebarSessionActions actions;
   final bool showMenuButton;
+  final bool fadeMenuButtonWhenIdle;
   final bool showPinnedMarker;
+  final bool showSelectionOutline;
   final Key? menuButtonKey;
   final String? menuTooltip;
   final List<SidebarMenuItem> Function()? menuItems;
   final VoidCallback? onContextMenu;
+  final double leadingPadding;
   final double extraIndent;
   final List<InlineSpan> titleSuffix;
   final Widget? editor;
@@ -371,6 +435,7 @@ class SidebarSessionRow extends StatelessWidget {
     focusedItem: focusedItem,
     focused: focused,
     keepSelectionActive: true,
+    showSelectionOutline: showSelectionOutline,
     onTap: editor == null ? onTap : null,
     onDoubleTap: editor == null ? onDoubleTap : null,
     onContextMenu: menu == null
@@ -387,8 +452,10 @@ class SidebarSessionRow extends StatelessWidget {
           ? IdeListColors.hoverForeground
           : IdeListColors.foreground;
       final l10n = context.l10n;
-      return Padding(
-        padding: EdgeInsets.only(left: 16 + extraIndent, right: 4),
+      final menuOverlay = showMenuButton && fadeMenuButtonWhenIdle && menu != null;
+
+      Widget buildRowContent(bool menuVisible) => Padding(
+        padding: EdgeInsets.only(left: leadingPadding + extraIndent, right: 4),
         // Keep the title legible in a narrow sidebar before showing details.
         child: GiveWayRow(
           children: [
@@ -496,7 +563,9 @@ class SidebarSessionRow extends StatelessWidget {
                     ),
                   ),
                 ),
-              if (showMenuButton && menu != null)
+              if (menuOverlay) ...[
+                if (menuVisible) const GiveWay(SizedBox(width: 24)),
+              ] else if (showMenuButton && menu != null)
                 GiveWay(
                   _gap(
                     SidebarIconButton(
@@ -511,6 +580,38 @@ class SidebarSessionRow extends StatelessWidget {
                 ),
               const GiveWay(SizedBox(width: 2)),
             ],
+          ],
+        ),
+      );
+
+      if (!menuOverlay) return buildRowContent(false);
+      return _FocusAwareReveal(
+        visible: active,
+        builder: (context, menuVisible) => Stack(
+          alignment: AlignmentDirectional.centerStart,
+          children: [
+            buildRowContent(menuVisible),
+            if (editor == null)
+              Positioned.directional(
+                textDirection: Directionality.of(context),
+                end: 4,
+                top: 0,
+                bottom: 0,
+                child: Center(
+                  child: AnimatedOpacity(
+                    opacity: menuVisible ? 1.0 : 0.0,
+                    duration: const Duration(milliseconds: 120),
+                    child: SidebarIconButton(
+                      key: menuButtonKey,
+                      icon: Icons.more_horiz_rounded,
+                      tooltip: menuTooltip ?? l10n.sidebarMoreActions,
+                      size: 20,
+                      keyboardFocusable: true,
+                      onTap: menu.open,
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       );
@@ -536,6 +637,8 @@ class SidebarSessionRow extends StatelessWidget {
       fontSize: 12.5,
       fontWeight: emphasized || unreadCount > 0
           ? FontWeight.w600
+          : !showSelectionOutline && selected
+          ? FontWeight.w500
           : FontWeight.normal,
     ),
   );
@@ -828,4 +931,30 @@ class SidebarIconButton extends StatelessWidget {
     final graphic = AppIcon(icon, size: size * 0.65, color: color);
     return spinning ? IdeSpinning(graphic) : graphic;
   }
+}
+
+/// Reveals hover-only row actions when the pointer hovers the row OR any
+/// action inside receives keyboard focus, without blocking hit testing at rest.
+class _FocusAwareReveal extends StatefulWidget {
+  const _FocusAwareReveal({required this.visible, required this.builder});
+
+  final bool visible;
+  final Widget Function(BuildContext context, bool shown) builder;
+
+  @override
+  State<_FocusAwareReveal> createState() => _FocusAwareRevealState();
+}
+
+class _FocusAwareRevealState extends State<_FocusAwareReveal> {
+  bool _hasFocus = false;
+
+  @override
+  Widget build(BuildContext context) => Focus(
+    canRequestFocus: false,
+    skipTraversal: true,
+    onFocusChange: (focused) {
+      if (focused != _hasFocus) setState(() => _hasFocus = focused);
+    },
+    child: widget.builder(context, widget.visible || _hasFocus),
+  );
 }
