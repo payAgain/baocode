@@ -10965,6 +10965,12 @@ abstract class AppLocalizations {
   /// **'Models, accounts and routing are set up in magpie, and this list follows it. New routing groups, image models and the models magpie gives Claude Code are turned on as they come; tick any other below.'**
   String get modelsMagpieGatewayDescription;
 
+  /// No description provided for @modelsMagpieProtocolDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'With Messages, magpie translates requests when needed. With Responses, BaoCode translates them before sending them to magpie. Both use magpie’s models, accounts and routing.'**
+  String get modelsMagpieProtocolDescription;
+
   /// No description provided for @modelsMagpieRunning.
   ///
   /// In en, this message translates to:

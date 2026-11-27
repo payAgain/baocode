@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:bao_websearch/bao_websearch.dart';
+import 'package:baocode/models/magpie.dart';
 import 'package:baocode/models/model_provider.dart';
 import 'package:baocode/models/proxy/model_proxy.dart';
 import 'package:baocode/models/upstream.dart';
@@ -485,6 +486,51 @@ void main() {
     expect((delta['delta']! as Map)['stop_reason'], 'tool_use');
     expect(answer.data.last['type'], 'message_stop');
   });
+
+  test(
+    'magpie: switching protocol changes the path and keeps the model',
+    () async {
+      final model = 'auto/gpt-5';
+      provider = Magpie.provider(
+        'gw',
+        port: Uri.parse(upstream.base).port,
+      ).withModel(ProviderModel(id: model));
+      final request = {
+        'model': model,
+        'stream': true,
+        'metadata': {'user_id': '{"session_id":"magpie-test"}'},
+        'messages': [
+          {'role': 'user', 'content': 'hello'},
+        ],
+      };
+      final url = await messages();
+      const headers = {'authorization': 'Bearer tok'};
+      await post(url, request, headers: headers);
+      expect(upstream.requests.single.path, '/v1/messages');
+      expect(upstream.requests.single.body, request);
+
+      provider = provider.copyWith(protocol: ProviderProtocol.openaiResponses);
+      upstream.reply = (_) => (
+        200,
+        [
+          'data: {"type":"response.created","response":{"id":"resp_magpie","model":"gpt-5"}}',
+          'data: {"type":"response.completed","response":{"usage":{"input_tokens":1200,"input_tokens_details":{"cached_tokens":1000},"output_tokens":4}}}',
+        ],
+      );
+      final answer = await post(url, request, headers: headers);
+      final sent = upstream.requests.last;
+      expect(sent.path, '/v1/responses');
+      expect(sent.headers['authorization'], 'Bearer sk-upstream');
+      expect(sent.headers['user-agent'], baoCodeUserAgent);
+      expect(sent.body, containsPair('model', model));
+      expect(
+        sent.body,
+        containsPair('prompt_cache_key', promptCacheKey(request)),
+      );
+      final delta = answer.data.lastWhere((e) => e['type'] == 'message_delta');
+      expect(delta['usage'], containsPair('cache_read_input_tokens', 1000));
+    },
+  );
 
   group('Fast mode', () {
     for (final fast in [false, true]) {

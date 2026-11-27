@@ -1802,6 +1802,48 @@ void main() {
       expect(find.text('Connect magpie'), findsNothing);
     });
 
+    testWidgets('the gateway protocol can change while following', (
+      tester,
+    ) async {
+      final magpie = follow();
+      await pump(tester, magpie: magpie);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Connect magpie'));
+      await tester.pumpAndSettle();
+      final id = providers.providers.single.id;
+      expect(providers.provider(id)!.protocol, ProviderProtocol.anthropic);
+
+      await tester.tap(find.text('Anthropic Messages'));
+      await tester.pumpAndSettle();
+      expect(find.text('OpenAI Chat Completions'), findsNothing);
+      await tester.tap(find.text('OpenAI Responses').last);
+      await tester.pumpAndSettle();
+      status = const MagpieStatus(
+        installed: true,
+        version: '0.13.0',
+        port: 4000,
+      );
+      await tester.tap(find.text('Sync Models'));
+      await tester.pumpAndSettle();
+
+      final provider = providers.provider(id)!;
+      expect(provider.followsMagpie, isTrue);
+      expect(provider.protocol, ProviderProtocol.openaiResponses);
+      expect(
+        UpstreamUrls.conversation(provider)?.toString(),
+        'http://127.0.0.1:4000/v1/responses',
+      );
+      expect(provider.model('auto/claude-opus-5-5')?.enabled, isTrue);
+      expect(provider.imageModels.single.id, 'yiyuan/gpt-image-2');
+      expect(await providers.key(id), Magpie.key);
+
+      await tester.tap(find.text('OpenAI Responses'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Anthropic Messages').last);
+      await tester.pumpAndSettle();
+      expect(providers.provider(id)!.protocol, ProviderProtocol.anthropic);
+    });
+
     testWidgets('not running: said so in the list', (tester) async {
       await providers.save(Magpie.provider('magpie'));
       status = const MagpieStatus(installed: true);

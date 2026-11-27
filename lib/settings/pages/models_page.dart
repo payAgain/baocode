@@ -1767,9 +1767,48 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
             },
           ),
         ),
-        // Where it is and how it is spoken to are magpie's.
-        if (_follows) _magpieGateway(context) else ..._reaching(context),
+        if (_follows) ...[
+          _magpieGateway(context),
+          _protocolRow(context),
+        ] else
+          ..._reaching(context),
       ],
+    );
+  }
+
+  Widget _protocolRow(BuildContext context) {
+    final l10n = context.l10n;
+    final protocol = _provider.protocol;
+    final choices = _follows
+        ? const [ProviderProtocol.anthropic, ProviderProtocol.openaiResponses]
+        : ProviderProtocol.values;
+    String name(ProviderProtocol value) =>
+        _follows && value == ProviderProtocol.anthropic
+        ? 'Anthropic Messages'
+        : ModelsSettingsPage.protocolName(context, value);
+    return SettingsRow(
+      label: l10n.modelsProtocol,
+      description: _follows
+          ? l10n.modelsMagpieProtocolDescription
+          : protocol == ProviderProtocol.agy
+          ? l10n.agyProtocolDescription
+          : l10n.modelsProtocolDescription,
+      trailing: SettingsDropdown(
+        current: name(protocol),
+        semanticLabel: l10n.modelsChoiceLabel(
+          l10n.modelsProtocol,
+          name(protocol),
+        ),
+        entries: () => [
+          for (final value in choices)
+            IdeMenuAction(
+              name(value),
+              enabled: value.selectable || value == protocol,
+              checked: value == protocol,
+              onSelected: () => unawaited(_setProtocol(value)),
+            ),
+        ],
+      ),
     );
   }
 
@@ -1778,30 +1817,8 @@ class _ProviderSettingsPageState extends State<ProviderSettingsPage> {
   List<Widget> _reaching(BuildContext context) {
     final l10n = context.l10n;
     final provider = _provider;
-    final protocol = ModelsSettingsPage.protocolName(
-      context,
-      provider.protocol,
-    );
     return [
-      SettingsRow(
-        label: l10n.modelsProtocol,
-        description: provider.protocol == ProviderProtocol.agy
-            ? l10n.agyProtocolDescription
-            : l10n.modelsProtocolDescription,
-        trailing: SettingsDropdown(
-          current: protocol,
-          semanticLabel: l10n.modelsChoiceLabel(l10n.modelsProtocol, protocol),
-          entries: () => [
-            for (final value in ProviderProtocol.values)
-              IdeMenuAction(
-                ModelsSettingsPage.protocolName(context, value),
-                enabled: value.selectable || value == provider.protocol,
-                checked: value == provider.protocol,
-                onSelected: () => unawaited(_setProtocol(value)),
-              ),
-          ],
-        ),
-      ),
+      _protocolRow(context),
       if (!provider.protocol.usesAccounts &&
           provider.protocol != ProviderProtocol.agy) ...[
         SettingsRow(

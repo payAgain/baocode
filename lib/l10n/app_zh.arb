@@ -1810,6 +1810,7 @@
   "modelsMagpieBadge": "跟随 magpie",
   "modelsMagpieGateway": "magpie 网关",
   "modelsMagpieGatewayDescription": "模型、账号和路由都在 magpie 里管理，这里的列表跟着它自动更新。新出现的路由组、图片模型，以及 magpie 给 Claude Code 选的模型会自动启用，其他的在下面勾选。",
+  "modelsMagpieProtocolDescription": "选择 Messages，由 magpie 在需要时转换请求。选择 Responses，由 BaoCode 转换后发给 magpie。两种方式都使用 magpie 的模型、账号和路由。",
   "modelsMagpieRunning": "运行中",
   "modelsMagpieNotRunning": "magpie 未运行",
   "modelsMagpieNotRunningDetail": "打开 magpie，或运行 magpie serve。它没运行时，用它的模型的会话会失败。",
