@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../l10n/l10n.dart';
+import '../settings/pages/settings_widgets.dart' show SettingsColors;
 import '../theme/app_theme.dart';
 import 'bot.dart';
 import 'bot_memory_provider_settings.dart';
@@ -171,30 +172,23 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
     );
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        scrollable: true,
-        insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
-        constraints: const BoxConstraints(maxWidth: 440),
-        backgroundColor: AppColors.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-          side: BorderSide(color: AppColors.partBorder),
+      builder: (context) => BotModernDialog(
+        width: 440,
+        icon: Icons.delete_outline,
+        warning: true,
+        title: title,
+        body: Text(
+          warning,
+          style: TextStyle(
+            fontSize: 13.5,
+            height: 1.5,
+            color: SettingsColors.textSecondary,
+          ),
         ),
-        icon: const Align(
-          alignment: AlignmentDirectional.centerStart,
-          child: BotEditorIcon(icon: Icons.delete_outline, warning: true),
-        ),
-        title: Text(
-          title,
-          textAlign: TextAlign.start,
-          style: Theme.of(context).textTheme.titleLarge,
-        ),
-        content: Text(warning),
-        actionsOverflowButtonSpacing: 8,
         actions: [
-          OutlinedButton(
+          TextButton(
             autofocus: true,
-            style: botEditorButtonStyle(context),
+            style: botEditorTonalButtonStyle(context),
             onPressed: () => Navigator.pop(context, false),
             child: Text(l10n.commonCancel),
           ),
@@ -228,12 +222,17 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
       String subtitle,
       bool value,
       ValueChanged<bool> onChanged,
-    ) => SwitchListTile(
-      contentPadding: EdgeInsets.zero,
-      title: Text(title),
-      subtitle: Text(subtitle),
+    ) => BotEditorSwitchTile(
+      title: title,
+      subtitle: subtitle,
       value: value,
       onChanged: (value) => setState(() => onChanged(value)),
+    );
+
+    Widget tileDivider() => Container(
+      height: 1,
+      margin: const EdgeInsets.symmetric(horizontal: 6),
+      color: SettingsColors.divider,
     );
 
     Widget ability(BotAbility ability, String title, String subtitle) =>
@@ -290,8 +289,8 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
         },
         actions: BotEditorActions(
           children: [
-            OutlinedButton(
-              style: botEditorButtonStyle(context),
+            TextButton(
+              style: botEditorTonalButtonStyle(context),
               onPressed: widget.onBack,
               child: Text(l10n.commonCancel),
             ),
@@ -308,7 +307,7 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
           key: _form,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
-            spacing: 12,
+            spacing: 14,
             children: [
               BotEditorSection(
                 title: label('Profile', '基本资料'),
@@ -340,44 +339,52 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
               BotEditorSection(
                 title: label('Permissions', '权限'),
                 children: [
-                  permission(
-                    label('Chat only', '仅聊天'),
-                    label(
-                      'Disables file changes and shell commands.',
-                      '禁止修改文件和运行命令。',
-                    ),
-                    _chatOnly,
-                    (enabled) => _chatOnly = enabled,
-                  ),
-                  ability(
-                    BotAbility.agents,
-                    label('Manage agents', '管理智能体'),
-                    label(
-                      'Can view and control your agent sessions.',
-                      '可以查看和控制你的智能体会话。',
-                    ),
-                  ),
-                  ability(
-                    BotAbility.browser,
-                    label('Use the browser', '使用浏览器'),
-                    label('Can interact with your browser.', '可以操作你的浏览器。'),
-                  ),
-                  ability(
-                    BotAbility.proactive,
-                    label('Monitor agent activity', '关注智能体动态'),
-                    label(
-                      'Can receive agent updates and notify your linked phone.',
-                      '可以接收智能体动态并通知已连接的手机。',
-                    ),
-                  ),
-                  permission(
-                    label('Can message you first', '可以主动给你发消息'),
-                    label(
-                      'Allows private messages from a group without a recent message from you.',
-                      '即使你最近没有发消息，也可以从群聊主动私信你。',
-                    ),
-                    _writesFirst,
-                    (enabled) => _writesFirst = enabled,
+                  Column(
+                    children: [
+                      permission(
+                        label('Chat only', '仅聊天'),
+                        label(
+                          'Disables file changes and shell commands.',
+                          '禁止修改文件和运行命令。',
+                        ),
+                        _chatOnly,
+                        (enabled) => _chatOnly = enabled,
+                      ),
+                      tileDivider(),
+                      ability(
+                        BotAbility.agents,
+                        label('Manage agents', '管理智能体'),
+                        label(
+                          'Can view and control your agent sessions.',
+                          '可以查看和控制你的智能体会话。',
+                        ),
+                      ),
+                      tileDivider(),
+                      ability(
+                        BotAbility.browser,
+                        label('Use the browser', '使用浏览器'),
+                        label('Can interact with your browser.', '可以操作你的浏览器。'),
+                      ),
+                      tileDivider(),
+                      ability(
+                        BotAbility.proactive,
+                        label('Monitor agent activity', '关注智能体动态'),
+                        label(
+                          'Can receive agent updates and notify your linked phone.',
+                          '可以接收智能体动态并通知已连接的手机。',
+                        ),
+                      ),
+                      tileDivider(),
+                      permission(
+                        label('Can message you first', '可以主动给你发消息'),
+                        label(
+                          'Allows private messages from a group without a recent message from you.',
+                          '即使你最近没有发消息，也可以从群聊主动私信你。',
+                        ),
+                        _writesFirst,
+                        (enabled) => _writesFirst = enabled,
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -385,38 +392,50 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
                 BotEditorSection(
                   title: label('Memory', '记忆'),
                   children: [
-                    Align(
-                      alignment: AlignmentDirectional.centerStart,
-                      child: OutlinedButton.icon(
-                        onPressed: () =>
-                            showLocalBotMemory(context, widget.bots, bot),
-                        icon: const Icon(Icons.notes_outlined),
-                        label: Text(label('Memory and review', '记忆与审核')),
-                      ),
-                    ),
-                    Align(
-                      alignment: AlignmentDirectional.centerStart,
-                      child: OutlinedButton.icon(
-                        onPressed: () => showBotMemoryProviderSettings(
-                          context,
-                          widget.bots,
-                          bot,
+                    Column(
+                      children: [
+                        BotEditorNavTile(
+                          icon: Icons.auto_stories_outlined,
+                          tint: AppColors.accent,
+                          title: label('Memory and review', '记忆与审核'),
+                          subtitle: label(
+                            'View preferences, facts, skills, and review proposals',
+                            '查看偏好、事实、技能与复盘提案',
+                          ),
+                          onTap: () =>
+                              showLocalBotMemory(context, widget.bots, bot),
                         ),
-                        icon: const Icon(Icons.cloud_outlined),
-                        label: Text(label('External memory', '外部记忆')),
-                      ),
-                    ),
-                    Align(
-                      alignment: AlignmentDirectional.centerStart,
-                      child: OutlinedButton.icon(
-                        onPressed: () => showDesktopBotMemoryMigration(
-                          context,
-                          widget.bots,
-                          bot,
+                        tileDivider(),
+                        BotEditorNavTile(
+                          icon: Icons.cloud_outlined,
+                          tint: const Color(0xFF56B6C2),
+                          title: label('External memory', '外部记忆'),
+                          subtitle: label(
+                            'Configure a read-only HTTPS recall endpoint',
+                            '配置专用的只读 HTTPS 外部检索接口',
+                          ),
+                          onTap: () => showBotMemoryProviderSettings(
+                            context,
+                            widget.bots,
+                            bot,
+                          ),
                         ),
-                        icon: const Icon(Icons.restore_outlined),
-                        label: Text(label('Legacy memory', '旧版记忆')),
-                      ),
+                        tileDivider(),
+                        BotEditorNavTile(
+                          icon: Icons.swap_horiz_rounded,
+                          tint: AppColors.added,
+                          title: label('Import & migration', '导入与迁移'),
+                          subtitle: label(
+                            'Import Hermes files, sync Markdown mirrors, and restore backups',
+                            '导入 Hermes 文件（MEMORY.md / USER.md）、同步镜像与恢复备份',
+                          ),
+                          onTap: () => showDesktopBotMemoryMigration(
+                            context,
+                            widget.bots,
+                            bot,
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -446,14 +465,12 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
     bool multiline = false,
     FocusNode? focusNode,
     FormFieldValidator<String>? validator,
-  }) => TextFormField(
-    key: key,
+  }) => BotEditorInsetField(
+    fieldKey: key,
     controller: controller,
     focusNode: focusNode,
-    minLines: multiline ? 2 : 1,
-    maxLines: multiline ? 8 : 1,
-    textInputAction: multiline ? TextInputAction.newline : TextInputAction.next,
-    decoration: botEditorInput(label, multiline: multiline),
+    label: label,
+    multiline: multiline,
     validator: validator,
   );
 }

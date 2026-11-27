@@ -122,10 +122,12 @@ class _PeopleEditors {
     String? hint,
     Object? version,
     void Function(String)? onChanged,
-  }) => TextFormField(
+  }) => BotEditorInsetField(
     key: ValueKey((key, version)),
     initialValue: draft.text[key] ?? '',
-    decoration: botEditorInput(label, hint: hint, multiline: lines > 1),
+    label: label,
+    hint: hint,
+    multiline: lines > 1,
     minLines: lines,
     maxLines: lines == 1 ? 1 : lines + 2,
     keyboardType: numeric ? TextInputType.number : null,
@@ -299,29 +301,44 @@ class _PeopleEditors {
             ),
         ],
         if (id != null) ...[
-          if (state._catalog?.botMemoryOptions.contains(
-                LinkMethods.botMemoryEntries,
-              ) ==
-              true)
-            Align(
-              alignment: AlignmentDirectional.centerStart,
-              child: OutlinedButton.icon(
-                onPressed: _busy
-                    ? null
-                    : () => state._openStructuredMemory(draft),
-                icon: const Icon(Icons.notes_outlined, size: 17),
-                label: Text(_tr('Memory and review', '记忆与审核')),
+          BotEditorSection(
+            title: _tr('Memory', '记忆'),
+            children: [
+              Column(
+                children: [
+                  if (state._catalog?.botMemoryOptions.contains(
+                        LinkMethods.botMemoryEntries,
+                      ) ==
+                      true) ...[
+                    BotEditorNavTile(
+                      icon: Icons.auto_stories_outlined,
+                      tint: AppColors.accent,
+                      title: _tr('Memory and review', '记忆与审核'),
+                      subtitle: _tr(
+                        'View preferences, facts, skills, and review proposals',
+                        '查看偏好、事实、技能与复盘提案',
+                      ),
+                      onTap: _busy
+                          ? null
+                          : () => state._openStructuredMemory(draft),
+                    ),
+                    const Divider(height: 1),
+                  ],
+                  BotEditorNavTile(
+                    icon: Icons.notes_outlined,
+                    tint: const Color(0xFF56B6C2),
+                    title: _tr('Memory & self notes', '记忆和自我笔记'),
+                    subtitle: _tr(
+                      'Edit raw Markdown memory and self notes',
+                      '直接编辑原始 Markdown 记忆与自我笔记',
+                    ),
+                    onTap: !_can(LinkMethods.botMemory)
+                        ? null
+                        : () => _run((peer) => state._openMemory(peer, draft)),
+                  ),
+                ],
               ),
-            ),
-          Align(
-            alignment: AlignmentDirectional.centerStart,
-            child: OutlinedButton.icon(
-              onPressed: !_can(LinkMethods.botMemory)
-                  ? null
-                  : () => _run((peer) => state._openMemory(peer, draft)),
-              icon: const Icon(Icons.notes_outlined, size: 17),
-              label: Text(_tr('Memory & self notes', '记忆和自我笔记')),
-            ),
+            ],
           ),
           BotEditorSection(
             title: _tr('Destructive actions', '危险操作'),

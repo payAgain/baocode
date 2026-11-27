@@ -804,6 +804,61 @@ void main() {
       await tester.pump();
     },
   );
+
+  testWidgets('memory section exposes Import & migration and External memory dialog', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(900, 800);
+    addTearDown(tester.view.reset);
+    final fixture = _Fixture();
+    addTearDown(fixture.dispose);
+    final bot = fixture.bots.save(name: 'Finch', identity: '', abilities: {});
+    await tester.pumpWidget(fixture.page(bot: bot));
+
+    await tester.ensureVisible(find.text('Import & migration'));
+    await tester.pumpAndSettle();
+    expect(find.text('Memory and review'), findsOneWidget);
+    expect(find.text('External memory'), findsOneWidget);
+    expect(find.text('Import & migration'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('External memory'));
+    await tester.tap(find.text('External memory'));
+    await tester.pump();
+    for (var i = 0; i < 60 && find.text('Off').evaluate().isEmpty; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(find.text('Off'), findsOneWidget);
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(AlertDialog).last,
+        matching: find.byType(TextField),
+      ),
+      'https://memory.example/recall',
+    );
+    await tester.pumpAndSettle();
+    final consent = find.descendant(
+      of: find.byType(AlertDialog).last,
+      matching: find.byType(CheckboxListTile),
+    );
+    await _tap(tester, consent);
+    final enable = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, 'Enable'),
+    );
+    expect(enable.onPressed, isNotNull);
+    await _tap(
+      tester,
+      find.descendant(
+        of: find.byType(AlertDialog).last,
+        matching: find.text('Cancel'),
+      ),
+    );
+    expect(find.byType(AlertDialog), findsNothing);
+  });
 }
 
 Future<void> _openMemoryDialog(

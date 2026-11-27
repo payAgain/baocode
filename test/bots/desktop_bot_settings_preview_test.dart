@@ -12,6 +12,7 @@ import 'package:baocode/bots/desktop_bot_settings.dart';
 import 'package:baocode/l10n/l10n.dart';
 import 'package:baocode/link/desktop_remote_people.dart';
 import 'package:baocode/theme/app_theme.dart';
+import 'package:baocode/theme/code_font.dart';
 import 'package:baocode/theme/workbench_theme.dart';
 import 'package:baocode/workspace/preference_store.dart';
 import 'package:baocode/workspace/workspace.dart';
@@ -31,6 +32,9 @@ void main() {
   testWidgets(
     'capture the Chinese local and paired Bot editors and reviews',
     (tester) async {
+      final previousFamilies = CodeFont.families.value;
+      CodeFont.families.value = const ['Menlo'];
+      addTearDown(() => CodeFont.families.value = previousFamilies);
       await tester.runAsync(_loadThemeAndFonts);
       final theme = buildAppTheme();
       final previewTheme = theme.copyWith(
@@ -124,6 +128,111 @@ void main() {
         expect(find.text('基本资料').hitTestable(), findsOneWidget);
         expect(find.text('保存').hitTestable(), findsOneWidget);
         await _capture(tester, surface, 'local-edit-$label.png');
+        if (label == 'normal') {
+          tester.view.physicalSize = const Size(920, 760);
+          await mount(
+            DesktopBotSettings(
+              bots: bots,
+              bot: bot,
+              drawer: true,
+              onBack: () {},
+            ),
+          );
+          final memorySection = find.text('导入与迁移');
+          await tester.ensureVisible(memorySection);
+          await tester.pumpAndSettle();
+          await _capture(tester, surface, 'local-memory-section.png');
+
+          // Capture 外部记忆
+          await tester.tap(find.text('外部记忆'));
+          await tester.pump();
+          for (
+            var i = 0;
+            i < 60 && find.text('已关闭').evaluate().isEmpty;
+            i++
+          ) {
+            await tester.runAsync(
+              () => Future<void>.delayed(const Duration(milliseconds: 10)),
+            );
+            await tester.pump();
+          }
+          await tester.pumpAndSettle();
+          await _capture(tester, surface, 'external-memory.png');
+          await tester.tap(find.text('取消').last);
+          await tester.pumpAndSettle();
+
+          // Capture 导入与迁移 + 核对 Hermes 导入内容
+          final tempDir = Directory.systemTemp.createTempSync('preview-hermes-');
+          addTearDown(() => tempDir.deleteSync(recursive: true));
+          final sampleUser = File('${tempDir.path}/USER.md')
+            ..writeAsStringSync(
+              [
+                '回答尽量简短直接，先给结论。',
+                '默认使用 macOS 与 zsh 环境。',
+                'apiKey: sk-example-secret-1234',
+              ].join('\n§\n'),
+            );
+          final messenger =
+              TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+          const windowChannel = MethodChannel('baocode/window');
+          messenger.setMockMethodCallHandler(windowChannel, (call) async {
+            if (call.method == 'pickOpenFiles') return [sampleUser.path];
+            return null;
+          });
+          addTearDown(
+            () => messenger.setMockMethodCallHandler(windowChannel, null),
+          );
+
+          await tester.ensureVisible(find.text('导入与迁移'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('导入与迁移'));
+          await tester.pumpAndSettle();
+          await _capture(tester, surface, 'memory-migration.png');
+
+          await tester.tap(find.text('导入 Hermes 文件'));
+          await tester.pump();
+          for (
+            var i = 0;
+            i < 60 && find.text('核对 Hermes 导入内容').evaluate().isEmpty;
+            i++
+          ) {
+            await tester.runAsync(
+              () => Future<void>.delayed(const Duration(milliseconds: 10)),
+            );
+            await tester.pump();
+          }
+          await tester.pumpAndSettle();
+          await _capture(tester, surface, 'hermes-review.png');
+          await tester.tap(
+            find.descendant(
+              of: find.byType(AlertDialog).last,
+              matching: find.text('取消'),
+            ),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('关闭').last);
+          await tester.pumpAndSettle();
+
+          // Seed sample memory and capture 记忆与审核
+          bots.setMemory(bot, '- 偏好深色主题与紧凑桌面布局。\n- 默认使用 Flutter 与 Dart 工具链。');
+          await tester.ensureVisible(find.text('记忆与审核'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('记忆与审核'));
+          await tester.pumpAndSettle();
+          await _capture(tester, surface, 'memory-review.png');
+          await tester.tap(find.text('关闭').last);
+          await tester.pumpAndSettle();
+
+          tester.view.physicalSize = size;
+          await mount(
+            DesktopBotSettings(
+              bots: bots,
+              bot: bot,
+              drawer: true,
+              onBack: () {},
+            ),
+          );
+        }
         final delete = find.text('删除 Bot');
         await tester.ensureVisible(delete);
         await tester.pump();
@@ -187,6 +296,7 @@ Future<void> _loadThemeAndFonts() async {
       'Preview Unicode',
       read('/System/Library/Fonts/Supplemental/Arial Unicode.ttf'),
     ),
+    load('Menlo', read('/System/Library/Fonts/Menlo.ttc')),
     load('MaterialIcons', rootBundle.load('fonts/MaterialIcons-Regular.otf')),
   ]);
 }
