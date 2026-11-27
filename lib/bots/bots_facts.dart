@@ -44,17 +44,23 @@ extension BotFacts on Bots {
         messageId,
       );
 
-  BotFactStore _privateFacts(Bot bot) {
+  BotFactStore _privateFacts(Bot bot, {bool persistLegacy = true}) {
     if (_readSavedFacts(bot, null) case final saved?) return saved;
     final selfPath = p.join(bot.folder, BotFiles.self);
     final peoplePath = p.join(bot.folder, BotLife.people);
     final self = folders.readFile(selfPath, strict: true);
     final people = folders.readFile(peoplePath, strict: true);
-    if (self != null) {
-      _backupLegacyMirror(bot, BotMemoryMirror.self, authorityExists: false);
-    }
-    if (people != null) {
-      _backupLegacyMirror(bot, BotMemoryMirror.people, authorityExists: false);
+    if (persistLegacy) {
+      if (self != null) {
+        _backupLegacyMirror(bot, BotMemoryMirror.self, authorityExists: false);
+      }
+      if (people != null) {
+        _backupLegacyMirror(
+          bot,
+          BotMemoryMirror.people,
+          authorityExists: false,
+        );
+      }
     }
     final store = BotFactStore.fromLegacy(
       self: self == null
@@ -65,7 +71,7 @@ extension BotFacts on Bots {
           : decodeBotMemoryMarkdown(people, allowMalformed: true),
       ownerNames: _ownerFactNames,
     );
-    if (self != null || people != null) {
+    if (persistLegacy && (self != null || people != null)) {
       _writeFactStore(
         bot,
         null,

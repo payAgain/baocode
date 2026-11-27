@@ -111,6 +111,21 @@ class BotMemoryEntry {
 
 enum BotMemoryAction { add, update, remove }
 
+enum BotMemoryImportBlockReason { credential, forgotten }
+
+typedef BotMemoryBlockedImport = ({
+  int index,
+  String text,
+  BotMemoryImportBlockReason reason,
+});
+
+typedef BotMemoryImportResult = ({
+  BotMemory memory,
+  List<BotMemoryEntry> added,
+  int skippedDuplicates,
+  List<BotMemoryBlockedImport> blocked,
+});
+
 typedef BotMemorySource = ({String sessionId, String messageId});
 
 /// A typed fact supplies its own rendered text and identity partition.
@@ -402,6 +417,33 @@ class BotMemory {
     ]);
   }
 
+  static List<({String markdown, String? content})>? _parseBulletList(
+    String text,
+  ) {
+    final blocks = <List<String>>[];
+    for (final line in text.split('\n')) {
+      if (line.startsWith('- ')) {
+        blocks.add([line]);
+      } else if (blocks.isNotEmpty && line.startsWith('  ')) {
+        blocks.last.add(line);
+      } else {
+        return null;
+      }
+    }
+    return [
+      for (final block in blocks)
+        block.length == 1
+            ? (markdown: block.single, content: null)
+            : (
+                markdown: block.join('\n'),
+                content: [
+                  block.first.substring(2),
+                  for (final line in block.skip(1)) line.substring(2),
+                ].join('\n'),
+              ),
+    ];
+  }
+
   BotMemory replaceMarkdown(String updatedMarkdown, {DateTime? at}) {
     final text = updatedMarkdown.trim();
     if (text == markdown) return this;
@@ -410,18 +452,25 @@ class BotMemory {
     final incoming = unchangedPrefix
         ? text.substring(markdown.length + 1)
         : text;
-    final lines = incoming.split('\n');
+    final parsed = incoming.isEmpty ? null : _parseBulletList(incoming);
     final items = [
-      if (unchangedPrefix) ...entries.map((entry) => entry.markdown),
+      if (unchangedPrefix)
+        for (final entry in entries)
+          (markdown: entry.markdown, content: entry.content),
       if (incoming.isNotEmpty)
-        ...lines.every((line) => line.startsWith('- ')) ? lines : [incoming],
+        ...(parsed ?? [(markdown: incoming, content: null)]),
     ];
     final left = entries.toList();
     var nextId = _nextId;
     final replacement = [
       for (final item in items)
-        switch (left.indexWhere((entry) => entry.markdown == item)) {
-          -1 => BotMemoryEntry(id: nextId++, revision: 1, markdown: item),
+        switch (left.indexWhere((entry) => entry.markdown == item.markdown)) {
+          -1 => BotMemoryEntry(
+            id: nextId++,
+            revision: 1,
+            markdown: item.markdown,
+            content: item.content,
+          ),
           final index => left.removeAt(index),
         },
     ];
@@ -434,6 +483,79 @@ class BotMemory {
       }..removeAll(replacement.map((entry) => _fingerprint(entry.text))),
       withdrawn: left,
       at: at,
+    );
+  }
+
+  void _checkImportedDraft(BotMemoryDraft draft, String fingerprint) {
+    if (botMemoryHasCredential(draft.markdown)) {
+      throw ArgumentError('Credentials cannot be imported as memory.');
+    }
+    if (_forgotten.contains(fingerprint)) {
+      throw StateError('This import would bring back a forgotten entry.');
+    }
+  }
+
+  /// Plans an append-only import of reviewed notes without mutating saved
+  /// entries or imposing a storage limit. Duplicate active entries and blocked
+  /// entries (credentials or previously forgotten notes) are reported and
+  /// skipped rather than rejecting the rest of the batch.
+  BotMemoryImportResult planImportedNotes(
+    Iterable<String> notes, {
+    String? key,
+    required DateTime at,
+  }) {
+    final seen = {for (final entry in activeEntries) _entryFingerprint(entry)};
+    final added = <BotMemoryEntry>[];
+    final blocked = <BotMemoryBlockedImport>[];
+    var skippedDuplicates = 0;
+    var noteIndex = 0;
+    for (final note in notes) {
+      final trimmed = note.trim();
+      final text = (trimmed.startsWith('- ') ? trimmed.substring(2) : trimmed)
+          .trim();
+      if (text.isEmpty) continue;
+      noteIndex++;
+      final fingerprint = _fingerprint(text, key);
+      if (seen.contains(fingerprint)) {
+        skippedDuplicates++;
+        continue;
+      }
+      final markdown = '- ${text.replaceAll('\n', '\n  ')}';
+      if (botMemoryHasCredential(markdown)) {
+        blocked.add((
+          index: noteIndex,
+          text: text,
+          reason: BotMemoryImportBlockReason.credential,
+        ));
+        continue;
+      }
+      if (_forgotten.contains(fingerprint)) {
+        blocked.add((
+          index: noteIndex,
+          text: text,
+          reason: BotMemoryImportBlockReason.forgotten,
+        ));
+        continue;
+      }
+      seen.add(fingerprint);
+      added.add(
+        BotMemoryEntry(
+          id: _nextId + added.length,
+          revision: 1,
+          markdown: markdown,
+          content: text,
+          key: key,
+          updatedAt: at,
+        ),
+      );
+    }
+    return (
+      memory: added.isEmpty
+          ? this
+          : _withEntries(_nextId + added.length, [...entries, ...added]),
+      added: List.unmodifiable(added),
+      skippedDuplicates: skippedDuplicates,
+      blocked: List.unmodifiable(blocked),
     );
   }
 
@@ -459,12 +581,7 @@ class BotMemory {
         continue;
       }
       if (verifyImport) {
-        if (botMemoryHasCredential(draft.markdown)) {
-          throw ArgumentError('Credentials cannot be imported as memory.');
-        }
-        if (_forgotten.contains(_fingerprint(draft.text, draft.key))) {
-          throw StateError('This import would bring back a forgotten entry.');
-        }
+        _checkImportedDraft(draft, _fingerprint(draft.text, draft.key));
       }
       replacement.add(
         BotMemoryEntry(

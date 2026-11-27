@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:bao_agent/bao_agent.dart' show SessionStore;
 import 'package:baocode/bots/bot.dart';
+import 'package:baocode/bots/bot_fact_store.dart';
 import 'package:baocode/bots/bot_folders.dart';
 import 'package:baocode/bots/bot_legacy_diary.dart';
 import 'package:baocode/bots/bot_memory.dart';
@@ -159,6 +160,452 @@ void main() {
     expect(() => _archive(folders), throwsFormatException);
     expect(folders.readFile(path), corrupt);
     expect(folders.readFile(_source), source);
+  });
+
+  group('Hermes memory import', () {
+    late Bots bots;
+    late Bot bot;
+    late MemoryBotFolders folders;
+
+    setUp(() async {
+      final workspace = Workspace(kernels: [MockKernels.claudeCode]);
+      addTearDown(workspace.dispose);
+      folders = MemoryBotFolders();
+      bots = Bots(workspace: workspace, folders: folders);
+      addTearDown(bots.dispose);
+      await bots.start();
+      bot = bots.save(name: 'Hermes fixture', identity: '', abilities: {});
+    });
+
+    test('splits standalone delimiters and normalizes BOM, CR, and CRLF', () {
+      expect(
+        splitHermesMemoryNotes('\uFEFFFirst\r\ncontinued\r\n§\r\nSecond'),
+        ['First\ncontinued', 'Second'],
+      );
+      expect(splitHermesMemoryNotes('one § two'), ['one § two']);
+      expect(splitHermesMemoryNotes('§\nFirst\n§\n§\nSecond\n§'), [
+        'First',
+        'Second',
+      ]);
+      expect(splitHermesMemoryNotes('First\r § \rSecond\r§'), [
+        'First',
+        'Second',
+      ]);
+      expect(splitHermesMemoryNotes('§\n  \n§'), isEmpty);
+      expect(looksLikeNonHermesBulletList('- First\n- Second'), isTrue);
+      expect(looksLikeNonHermesBulletList('- First\n§\n- Second'), isFalse);
+      expect(defaultHermesImportTarget('MEMORY.md'), BotMemoryMirror.self);
+      expect(defaultHermesImportTarget('memory.md'), BotMemoryMirror.self);
+      expect(defaultHermesImportTarget('USER.md'), BotMemoryMirror.memory);
+      expect(defaultHermesImportTarget('user.md'), BotMemoryMirror.memory);
+      expect(defaultHermesImportTarget('hermes-notes.md'), isNull);
+    });
+
+    test(
+      'imports MEMORY facts and USER preferences append-only and deduplicated',
+      () {
+        bots.setMemory(bot, '- Existing preference');
+        bots.setSelfNotes(bot, '- Existing fact');
+        final initialUser = bots.userMemory(bot);
+        final initialFacts = bots.privateFactMemory(bot);
+        final userInput = 'Likes tea\n  and walks\n§\nPrefers concise replies';
+        final selfInput = '\uFEFFUses Dart\r\n§\r\nBuilds tools';
+        final userPreview = bots.previewHermesMemoryImport(
+          bot,
+          BotMemoryMirror.memory,
+          userInput,
+        );
+        expect(userPreview.target, BotMemoryMirror.memory);
+        expect(userPreview.sourceCount, 2);
+        expect(userPreview.skippedDuplicates, 0);
+        expect(userPreview.blocked, isEmpty);
+        bots.applyHermesMemoryImport(userPreview);
+        final factPreview = bots.previewHermesMemoryImport(
+          bot,
+          BotMemoryMirror.self,
+          selfInput,
+        );
+        expect(factPreview.target, BotMemoryMirror.self);
+        expect(factPreview.sourceCount, 2);
+        bots.applyHermesMemoryImport(factPreview);
+        expect(bots.userMemory(bot).entries.map((entry) => entry.text), [
+          'Existing preference',
+          'Likes tea\n  and walks',
+          'Prefers concise replies',
+        ]);
+        expect(bots.selfNotes(bot), contains('Uses Dart'));
+        expect(bots.selfNotes(bot), contains('Builds tools'));
+        expect(
+          bots
+              .userMemory(bot)
+              .entries
+              .take(initialUser.entries.length)
+              .map((entry) => entry.toJson()),
+          initialUser.entries.map((entry) => entry.toJson()),
+        );
+        expect(
+          bots
+              .privateFactMemory(bot)
+              .entries
+              .take(initialFacts.entries.length)
+              .map((entry) => entry.toJson()),
+          initialFacts.entries.map((entry) => entry.toJson()),
+        );
+
+        final duplicate = bots.previewHermesMemoryImport(
+          bot,
+          BotMemoryMirror.memory,
+          'likes TEA and walks\n§\nPrefers concise replies',
+        );
+        expect(duplicate.hasChanges, isFalse);
+        expect(duplicate.additions, isEmpty);
+        expect(duplicate.skippedDuplicates, 2);
+        expect(duplicate.sourceCount, 2);
+      },
+    );
+
+    test(
+      'preview is strictly read-only when legacy stores are uninitialized',
+      () {
+        final selfBytes = utf8.encode('Now: planning\n- Legacy self fact\n');
+        final peopleBytes = utf8.encode('## Lina\n- Legacy friend\n');
+        final userBytes = utf8.encode('- Legacy user pref\n');
+        folders.writeFile('${bot.folder}/SELF.md', selfBytes);
+        folders.writeFile('${bot.folder}/PEOPLE.md', peopleBytes);
+        folders.writeFile('${bot.folder}/MEMORY.md', userBytes);
+
+        final userPreview = bots.previewHermesMemoryImport(
+          bot,
+          BotMemoryMirror.memory,
+          'Imported user pref',
+        );
+        final selfPreview = bots.previewHermesMemoryImport(
+          bot,
+          BotMemoryMirror.self,
+          'Imported self fact',
+        );
+        expect(userPreview.additions, ['Imported user pref']);
+        expect(selfPreview.additions, ['Imported self fact']);
+        expect(folders.readFile('${bot.folder}/memory.json'), isNull);
+        expect(
+          folders.readFile('/bots/runtime/${bot.id}/private-facts.json'),
+          isNull,
+        );
+        expect(bots.ownerMemoryBackup(bot, BotMemoryMirror.memory), isNull);
+        expect(bots.ownerMemoryBackup(bot, BotMemoryMirror.self), isNull);
+        expect(bots.ownerMemoryBackup(bot, BotMemoryMirror.people), isNull);
+
+        bots.applyHermesMemoryImport(userPreview);
+        bots.applyHermesMemoryImport(selfPreview);
+        expect(
+          bots.ownerMemoryBackup(bot, BotMemoryMirror.memory)!.bytes,
+          userBytes,
+        );
+        expect(
+          bots.ownerMemoryBackup(bot, BotMemoryMirror.self)!.bytes,
+          selfBytes,
+        );
+        expect(
+          bots.ownerMemoryBackup(bot, BotMemoryMirror.people)!.bytes,
+          peopleBytes,
+        );
+        expect(bots.userMemory(bot).entries.map((entry) => entry.text), [
+          'Legacy user pref',
+          'Imported user pref',
+        ]);
+        expect(bots.selfNow(bot), 'Now: planning');
+        expect(bots.selfNotes(bot), contains('Legacy self fact'));
+        expect(bots.selfNotes(bot), contains('Imported self fact'));
+        expect(bots.people(bot), contains('Legacy friend'));
+      },
+    );
+
+    test('rejects stale ledger, target mirror, and companion PEOPLE mirror previews', () {
+      const target = BotMemoryMirror.memory;
+      final path = '${bot.folder}/MEMORY.md';
+      bots.setMemory(bot, '- Existing preference');
+      final preview = bots.previewHermesMemoryImport(
+        bot,
+        target,
+        'New preference',
+      );
+      final external = utf8.encode('Externally edited mirror\n');
+      folders.writeFile(path, external);
+      expect(() => bots.applyHermesMemoryImport(preview), throwsStateError);
+      expect(folders.readFile(path), external);
+      expect(bots.userMemory(bot).entries.single.text, 'Existing preference');
+      final refreshed = bots.previewHermesMemoryImport(
+        bot,
+        target,
+        'New preference',
+      );
+      bots.setMemory(bot, '- Another local edit');
+      expect(() => bots.applyHermesMemoryImport(refreshed), throwsStateError);
+
+      // Self facts target: stale SELF.md, stale PEOPLE.md (before init), and stale ledger.
+      folders.writeFile(
+        '${bot.folder}/SELF.md',
+        utf8.encode('- Legacy self\n'),
+      );
+      folders.writeFile(
+        '${bot.folder}/PEOPLE.md',
+        utf8.encode('## Lina\n- Legacy friend\n'),
+      );
+      final uninitializedSelf = bots.previewHermesMemoryImport(
+        bot,
+        BotMemoryMirror.self,
+        'New self fact',
+      );
+      folders.writeFile(
+        '${bot.folder}/PEOPLE.md',
+        utf8.encode('## Lina\n- Edited friend\n'),
+      );
+      expect(
+        () => bots.applyHermesMemoryImport(uninitializedSelf),
+        throwsStateError,
+      );
+
+      final selfPreview = bots.previewHermesMemoryImport(
+        bot,
+        BotMemoryMirror.self,
+        'New self fact',
+      );
+      folders.writeFile(
+        '${bot.folder}/SELF.md',
+        utf8.encode('- Externally edited self\n'),
+      );
+      expect(() => bots.applyHermesMemoryImport(selfPreview), throwsStateError);
+
+      bots.setSelfNotes(bot, '- Initialized fact');
+      final ledgerSelfPreview = bots.previewHermesMemoryImport(
+        bot,
+        BotMemoryMirror.self,
+        'Another self fact',
+      );
+      bots.setSelfNotes(bot, '- Updated fact');
+      expect(
+        () => bots.applyHermesMemoryImport(ledgerSelfPreview),
+        throwsStateError,
+      );
+    });
+
+    test('skips and reports credentials and previously forgotten notes', () {
+      for (final target in const [
+        BotMemoryMirror.memory,
+        BotMemoryMirror.self,
+      ]) {
+        if (target == BotMemoryMirror.memory) {
+          bots.setMemory(bot, '- Kept pref\n- Forgotten pref');
+          final old = bots.userMemory(bot).entries.last;
+          bots.changeUserMemory(bot, [
+            (
+              action: BotMemoryAction.remove,
+              id: old.id,
+              revision: old.revision,
+              text: null,
+            ),
+          ]);
+        } else {
+          bots.setSelfNotes(bot, '- Kept fact\n- Forgotten fact');
+          final access = bots.privateFactAccess(bot);
+          final old = bots.factMemory(access).entries.last;
+          bots.changeFacts(access, [
+            BotFactChange(
+              action: BotMemoryAction.remove,
+              id: old.id,
+              revision: old.revision,
+            ),
+          ]);
+        }
+
+        final isPref = target == BotMemoryMirror.memory;
+        final preview = bots.previewHermesMemoryImport(
+          bot,
+          target,
+          [
+            isPref ? 'Kept pref' : 'Kept fact',
+            isPref ? 'Forgotten pref' : 'Forgotten fact',
+            'password: example-only',
+            isPref ? 'Valid imported pref' : 'Valid imported fact',
+          ].join('\n§\n'),
+        );
+        expect(preview.sourceCount, 4);
+        expect(preview.skippedDuplicates, 1);
+        expect(preview.additions, [
+          isPref ? 'Valid imported pref' : 'Valid imported fact',
+        ]);
+        expect(preview.blocked, [
+          (
+            index: 2,
+            text: isPref ? 'Forgotten pref' : 'Forgotten fact',
+            reason: BotMemoryImportBlockReason.forgotten,
+          ),
+          (
+            index: 3,
+            text: 'password: example-only',
+            reason: BotMemoryImportBlockReason.credential,
+          ),
+        ]);
+        bots.applyHermesMemoryImport(preview);
+        if (isPref) {
+          expect(bots.userMemory(bot).entries.map((entry) => entry.text), [
+            'Kept pref',
+            'Valid imported pref',
+          ]);
+        } else {
+          expect(bots.selfNotes(bot), contains('Valid imported fact'));
+          expect(bots.selfNotes(bot), isNot(contains('Forgotten fact')));
+          expect(bots.selfNotes(bot), isNot(contains('password:')));
+        }
+      }
+    });
+
+    test('keeps imported entries beyond budget and reports indexes', () {
+      final longUserNotes = List.generate(
+        3,
+        (index) => 'Note $index ${'x' * 900}',
+      );
+      final userPreview = bots.previewHermesMemoryImport(
+        bot,
+        BotMemoryMirror.memory,
+        longUserNotes.join('\n§\n'),
+      );
+      expect(userPreview.additions, hasLength(3));
+      expect(userPreview.outsideBudget, 2);
+      expect(userPreview.outsideBudgetIndexes, {1, 2});
+      bots.applyHermesMemoryImport(userPreview);
+      expect(bots.userMemory(bot).entries, hasLength(3));
+
+      final longSelfNotes = List.generate(
+        3,
+        (index) => 'Self $index ${'y' * 1200}',
+      );
+      final selfPreview = bots.previewHermesMemoryImport(
+        bot,
+        BotMemoryMirror.self,
+        longSelfNotes.join('\n§\n'),
+      );
+      expect(selfPreview.additions, hasLength(3));
+      expect(selfPreview.outsideBudget, 2);
+      expect(selfPreview.outsideBudgetIndexes, {1, 2});
+      bots.applyHermesMemoryImport(selfPreview);
+      expect(bots.privateFactMemory(bot).entries, hasLength(3));
+    });
+
+    test('multiline Hermes notes round-trip through owner migration', () {
+      final userPreview = bots.previewHermesMemoryImport(
+        bot,
+        BotMemoryMirror.memory,
+        'Likes tea\n  and walks\n§\nPrefers short answers',
+      );
+      bots.applyHermesMemoryImport(userPreview);
+      final initialUser = bots.userMemory(bot).entries;
+      folders.writeFile(
+        '${bot.folder}/MEMORY.md',
+        utf8.encode('${bots.memory(bot)}\n- Drinks oolong\n'),
+      );
+      final userMigration = bots.previewOwnerMemoryMigration(
+        bot,
+        BotMemoryMirror.memory,
+      );
+      expect(userMigration.added, 1);
+      expect(userMigration.removed, 0);
+      bots.applyOwnerMemoryMigration(userMigration);
+      final afterUser = bots.userMemory(bot).entries;
+      expect(afterUser.map((entry) => entry.text), [
+        'Likes tea\n  and walks',
+        'Prefers short answers',
+        'Drinks oolong',
+      ]);
+      expect(afterUser.first.id, initialUser.first.id);
+
+      final selfPreview = bots.previewHermesMemoryImport(
+        bot,
+        BotMemoryMirror.self,
+        'Para 1\n\nPara 2',
+      );
+      bots.applyHermesMemoryImport(selfPreview);
+      final initialSelf = bots.privateFactMemory(bot).entries;
+      // Simulate an editor stripping whitespace on the blank line inside a bullet.
+      folders.writeFile(
+        '${bot.folder}/SELF.md',
+        utf8.encode('- Para 1\n\n  Para 2\n- Added externally\n'),
+      );
+      final selfMigration = bots.previewOwnerMemoryMigration(
+        bot,
+        BotMemoryMirror.self,
+      );
+      expect(selfMigration.added, 1);
+      expect(selfMigration.removed, 0);
+      bots.applyOwnerMemoryMigration(selfMigration);
+      final afterSelf = bots.privateFactMemory(bot).entries;
+      expect(afterSelf.first.id, initialSelf.first.id);
+      expect(afterSelf.map((entry) => entry.text), [
+        'Para 1\n\nPara 2',
+        'Added externally',
+      ]);
+    });
+
+    test(
+      'rejects invalid targets, cross-instance previews, and managed paths',
+      () async {
+        expect(
+          () => bots.previewHermesMemoryImport(
+            bot,
+            BotMemoryMirror.people,
+            'Someone',
+          ),
+          throwsArgumentError,
+        );
+
+        final preview = bots.previewHermesMemoryImport(
+          bot,
+          BotMemoryMirror.memory,
+          'Valid note',
+        );
+        final otherWorkspace = Workspace(kernels: [MockKernels.claudeCode]);
+        addTearDown(otherWorkspace.dispose);
+        final otherBots = Bots(
+          workspace: otherWorkspace,
+          folders: MemoryBotFolders(),
+        );
+        addTearDown(otherBots.dispose);
+        await otherBots.start();
+        expect(
+          () => otherBots.applyHermesMemoryImport(preview),
+          throwsStateError,
+        );
+
+        expect(
+          bots.isManagedBotMemoryPath(bot, '${bot.folder}/MEMORY.md'),
+          isTrue,
+        );
+        expect(
+          bots.isManagedBotMemoryPath(
+            bot,
+            '/bots/runtime/${bot.id}/private-facts.json',
+          ),
+          isTrue,
+        );
+        expect(
+          bots.isManagedBotMemoryPath(bot, '/tmp/hermes/memories/USER.md'),
+          isFalse,
+        );
+
+        bots.delete(bot.id);
+        expect(() => bots.applyHermesMemoryImport(preview), throwsStateError);
+      },
+    );
+
+    test('unavailable entries do not shadow imported notes as duplicates', () {
+      final memory = BotMemory.fromMarkdown('- Hidden note')
+          .withUnavailableSources((_) => true);
+      final planned = memory.planImportedNotes([
+        'Hidden note',
+      ], at: DateTime.utc(2026, 11, 27));
+      expect(planned.skippedDuplicates, 0);
+      expect(planned.added.map((entry) => entry.text), ['Hidden note']);
+    });
   });
 
   group('Owner migration', () {

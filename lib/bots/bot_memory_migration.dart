@@ -134,7 +134,54 @@ String decodeBotMemoryMarkdown(
 );
 
 String normalizeBotMemoryMarkdown(String markdown) =>
-    markdown.replaceAll('\r\n', '\n');
+    markdown.replaceAll(RegExp(r'\r\n?'), '\n');
+
+List<String> _normalizedHermesLines(String markdown) =>
+    normalizeBotMemoryMarkdown(
+      markdown.startsWith('\uFEFF') ? markdown.substring(1) : markdown,
+    ).split('\n');
+
+/// Hermes stores independent Markdown notes separated by a standalone section
+/// delimiter. A leading BOM is transport metadata, not part of the first note.
+List<String> splitHermesMemoryNotes(String markdown) {
+  final notes = <String>[];
+  final current = <String>[];
+  void finish() {
+    final section = current.join('\n').trim();
+    if (section.isNotEmpty) notes.add(section);
+    current.clear();
+  }
+
+  for (final line in _normalizedHermesLines(markdown)) {
+    if (line.trim() == '§') {
+      finish();
+    } else {
+      current.add(line);
+    }
+  }
+  finish();
+  return notes;
+}
+
+/// Whether [markdown] looks like a plain multi-bullet Markdown list rather
+/// than Hermes `§`-delimited notes.
+bool looksLikeNonHermesBulletList(String markdown) {
+  final lines = _normalizedHermesLines(markdown);
+  if (lines.any((line) => line.trim() == '§')) return false;
+  var bullets = 0;
+  for (final line in lines) {
+    if (line.startsWith('- ') && ++bullets >= 2) return true;
+  }
+  return false;
+}
+
+/// Default BaoCode target for a standard Hermes memory filename.
+BotMemoryMirror? defaultHermesImportTarget(String fileName) =>
+    switch (fileName.trim().toLowerCase()) {
+      'memory.md' => BotMemoryMirror.self,
+      'user.md' => BotMemoryMirror.memory,
+      _ => null,
+    };
 
 String botMemoryDigest(Uint8List? bytes) =>
     bytes == null ? 'missing' : sha256.convert(bytes).toString();

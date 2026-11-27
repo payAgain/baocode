@@ -128,9 +128,29 @@ abstract final class BotLife {
       lines.clear();
     }
 
-    for (final line in text.split('\n')) {
-      if (line.trim().isEmpty || line.startsWith('- ')) finish();
-      if (line.trim().isNotEmpty) lines.add(line);
+    final rawLines = text.split('\n');
+    for (var i = 0; i < rawLines.length; i++) {
+      final line = rawLines[i];
+      if (line.startsWith('- ')) {
+        finish();
+        lines.add(line);
+        continue;
+      }
+      if (line.trim().isEmpty) {
+        if (lines.isNotEmpty && lines.first.startsWith('- ')) {
+          var next = i + 1;
+          while (next < rawLines.length && rawLines[next].trim().isEmpty) {
+            next++;
+          }
+          if (next < rawLines.length && rawLines[next].startsWith('  ')) {
+            lines.add('  ');
+            continue;
+          }
+        }
+        finish();
+        continue;
+      }
+      lines.add(line);
     }
     finish();
     return notes;

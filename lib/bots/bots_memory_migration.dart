@@ -1,5 +1,40 @@
 part of 'bots.dart';
 
+/// The exact additions reviewed for one Bot and one private ledger.
+final class BotHermesImportPreview {
+  const BotHermesImportPreview._({
+    required this.target,
+    required this.sourceCount,
+    required this.additions,
+    required this.skippedDuplicates,
+    required this.blocked,
+    required this.outsideBudget,
+    required this.outsideBudgetIndexes,
+    required this._owner,
+    required this._bot,
+    required this._ledgerDigest,
+    required this._mirrorDigest,
+    required this._companionMirrorDigest,
+    required this._notes,
+  });
+
+  final BotMemoryMirror target;
+  final int sourceCount;
+  final List<String> additions;
+  final int skippedDuplicates;
+  final List<BotMemoryBlockedImport> blocked;
+  final int outsideBudget;
+  final Set<int> outsideBudgetIndexes;
+  final Bots _owner;
+  final Bot _bot;
+  final String _ledgerDigest;
+  final String _mirrorDigest;
+  final String? _companionMirrorDigest;
+  final List<String> _notes;
+
+  bool get hasChanges => additions.isNotEmpty;
+}
+
 /// A diff bound to the owner's open Bot and the exact revisions reviewed.
 final class BotMemoryMigrationPreview {
   const BotMemoryMigrationPreview._({
@@ -124,9 +159,13 @@ extension BotOwnerMemoryMigration on Bots {
     String markdown,
     List<BotMemoryEntry> entries,
   })
-  _migrationCurrent(Bot bot, BotMemoryMirror source) {
+  _migrationCurrent(
+    Bot bot,
+    BotMemoryMirror source, {
+    bool persistLegacy = true,
+  }) {
     if (source == BotMemoryMirror.memory) {
-      final memory = userMemory(bot);
+      final memory = userMemory(bot, createBackup: persistLegacy);
       return (
         memory: memory,
         facts: null,
@@ -134,7 +173,7 @@ extension BotOwnerMemoryMigration on Bots {
         entries: memory.activeEntries.toList(),
       );
     }
-    final facts = _privateFacts(bot);
+    final facts = _privateFacts(bot, persistLegacy: persistLegacy);
     final kind = source == BotMemoryMirror.self
         ? BotFactKind.self
         : BotFactKind.person;
@@ -298,6 +337,196 @@ extension BotOwnerMemoryMigration on Bots {
       drafts.add((text: entry.text, markdown: entry.markdown, key: null));
     }
     return previous.replaceDrafts(drafts, at: at, verifyImport: true);
+  }
+
+  String? hermesMemoriesDirectory() {
+    final candidates = <String>[];
+    final hermesHome = Platform.environment['HERMES_HOME']?.trim();
+    if (hermesHome != null && hermesHome.isNotEmpty) {
+      candidates.add(p.join(hermesHome, 'memories'));
+      if (File(p.join(hermesHome, 'MEMORY.md')).existsSync() ||
+          File(p.join(hermesHome, 'USER.md')).existsSync()) {
+        candidates.add(hermesHome);
+      }
+    }
+    final home =
+        (Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'])
+            ?.trim();
+    if (home != null && home.isNotEmpty) {
+      candidates.add(p.join(home, '.hermes', 'memories'));
+    }
+    for (final path in candidates) {
+      if (Directory(path).existsSync()) return path;
+    }
+    return null;
+  }
+
+  bool isManagedBotMemoryPath(Bot bot, String path) {
+    String resolve(String value) {
+      final normalized = p.normalize(p.absolute(value));
+      try {
+        final type = FileSystemEntity.typeSync(normalized, followLinks: true);
+        if (type == FileSystemEntityType.directory) {
+          return p.normalize(Directory(normalized).resolveSymbolicLinksSync());
+        }
+        if (type != FileSystemEntityType.notFound) {
+          return p.normalize(File(normalized).resolveSymbolicLinksSync());
+        }
+        final parent = Directory(p.dirname(normalized));
+        if (parent.existsSync()) {
+          return p.normalize(
+            p.join(parent.resolveSymbolicLinksSync(), p.basename(normalized)),
+          );
+        }
+      } on FileSystemException {
+        // Fall back to normalized absolute paths for virtual folders.
+      }
+      return normalized;
+    }
+
+    final candidate = resolve(path);
+    final roots = <String>[
+      bot.folder,
+      if (folders.root case final root?) ...[root, _runtimeRoot(bot)],
+    ];
+    for (final root in roots) {
+      final target = resolve(root);
+      if (p.equals(candidate, target) || p.isWithin(target, candidate)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  BotHermesImportPreview previewHermesMemoryImport(
+    Bot bot,
+    BotMemoryMirror target,
+    String markdown,
+  ) {
+    if (target == BotMemoryMirror.people) {
+      throw ArgumentError.value(target, 'target');
+    }
+    return _hermesImportPlan(
+      _migrationBot(bot),
+      target,
+      List.unmodifiable(splitHermesMemoryNotes(markdown)),
+    ).preview;
+  }
+
+  ({
+    BotHermesImportPreview preview,
+    BotMemory memory,
+    BotFactStore? previousFacts,
+    BotFactStore? facts,
+  })
+  _hermesImportPlan(Bot bot, BotMemoryMirror target, List<String> notes) {
+    final current = _migrationCurrent(bot, target, persistLegacy: false);
+    final ledgerPath = target == BotMemoryMirror.self
+        ? _factPath(bot, null)
+        : _memoryDataPath(bot, null);
+    final ledger = folders.readFile(ledgerPath, strict: true);
+    final mirror = folders.readFile(_mirrorPath(bot, target), strict: true);
+    final companionMirrorDigest =
+        target == BotMemoryMirror.self && ledger == null
+        ? botMemoryDigest(
+            folders.readFile(
+              _mirrorPath(bot, BotMemoryMirror.people),
+              strict: true,
+            ),
+          )
+        : null;
+    final at = _clock();
+    final factImport = current.facts?.planImportedSelfNotes(notes, at: at);
+    final memoryImport = factImport == null
+        ? current.memory.planImportedNotes(notes, at: at)
+        : null;
+    final facts = factImport?.store;
+    final memory = facts?.memory ?? memoryImport!.memory;
+    final added = factImport?.added ?? memoryImport!.added;
+    final skippedDuplicates =
+        factImport?.skippedDuplicates ?? memoryImport!.skippedDuplicates;
+    final blocked = factImport?.blocked ?? memoryImport!.blocked;
+    final included = memory.promptEntries.map((entry) => entry.id).toSet();
+    final outsideBudgetIndexes = Set.unmodifiable({
+      for (final (i, entry) in added.indexed)
+        if (!included.contains(entry.id)) i,
+    });
+    final sourceCount = added.length + skippedDuplicates + blocked.length;
+    return (
+      preview: BotHermesImportPreview._(
+        target: target,
+        sourceCount: sourceCount,
+        additions: List.unmodifiable(added.map((entry) => entry.text)),
+        skippedDuplicates: skippedDuplicates,
+        blocked: blocked,
+        outsideBudget: outsideBudgetIndexes.length,
+        outsideBudgetIndexes: outsideBudgetIndexes,
+        owner: this,
+        bot: bot,
+        ledgerDigest: botMemoryDigest(ledger),
+        mirrorDigest: botMemoryDigest(mirror),
+        companionMirrorDigest: companionMirrorDigest,
+        notes: notes,
+      ),
+      memory: memory,
+      previousFacts: current.facts,
+      facts: facts,
+    );
+  }
+
+  void applyHermesMemoryImport(BotHermesImportPreview reviewed) {
+    if (!identical(reviewed._owner, this)) {
+      throw StateError('This Hermes preview is no longer valid.');
+    }
+    final bot = _migrationBot(reviewed._bot);
+    final target = reviewed.target;
+    final ledgerPath = target == BotMemoryMirror.self
+        ? _factPath(bot, null)
+        : _memoryDataPath(bot, null);
+    // Check before reading the current store, which may initialize a legacy
+    // ledger if the original ledger has disappeared.
+    if (botMemoryDigest(folders.readFile(ledgerPath, strict: true)) !=
+            reviewed._ledgerDigest ||
+        botMemoryDigest(
+              folders.readFile(_mirrorPath(bot, target), strict: true),
+            ) !=
+            reviewed._mirrorDigest ||
+        (reviewed._companionMirrorDigest != null &&
+            botMemoryDigest(
+                  folders.readFile(
+                    _mirrorPath(bot, BotMemoryMirror.people),
+                    strict: true,
+                  ),
+                ) !=
+                reviewed._companionMirrorDigest)) {
+      throw StateError(
+        'Saved memory or its Markdown mirror changed. Review again.',
+      );
+    }
+    final plan = _hermesImportPlan(bot, target, reviewed._notes);
+    if (plan.preview._ledgerDigest != reviewed._ledgerDigest ||
+        plan.preview._mirrorDigest != reviewed._mirrorDigest ||
+        plan.preview._companionMirrorDigest !=
+            reviewed._companionMirrorDigest ||
+        !listEquals(plan.preview.additions, reviewed.additions) ||
+        plan.preview.skippedDuplicates != reviewed.skippedDuplicates ||
+        !listEquals(plan.preview.blocked, reviewed.blocked) ||
+        plan.preview.outsideBudget != reviewed.outsideBudget ||
+        !setEquals(
+          plan.preview.outsideBudgetIndexes,
+          reviewed.outsideBudgetIndexes,
+        )) {
+      throw StateError(
+        'Saved memory or its Markdown mirror changed. Review again.',
+      );
+    }
+    if (!plan.preview.hasChanges) return;
+    if (plan.facts case final facts?) {
+      _commitFacts(bot, null, plan.previousFacts!, facts);
+    } else {
+      _writeUserMemory(bot, plan.memory);
+      _factsChanged();
+    }
   }
 
   void applyOwnerMemoryMigration(BotMemoryMigrationPreview reviewed) {

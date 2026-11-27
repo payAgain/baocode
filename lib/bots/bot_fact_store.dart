@@ -88,6 +88,13 @@ class BotFactEntry {
           .startsWith('- ');
 }
 
+typedef BotFactImportResult = ({
+  BotFactStore store,
+  List<BotMemoryEntry> added,
+  int skippedDuplicates,
+  List<BotMemoryBlockedImport> blocked,
+});
+
 /// The self and people categories share a single atomic ledger and budget.
 /// A project has its own ledger, addressed by its host identity.
 class BotFactStore {
@@ -211,6 +218,23 @@ class BotFactStore {
       lastKey = fact.personKey;
     }
     return lines.join('\n');
+  }
+
+  BotFactImportResult planImportedSelfNotes(
+    Iterable<String> notes, {
+    required DateTime at,
+  }) {
+    final result = memory.planImportedNotes(
+      notes,
+      key: _key(BotFactKind.self, null, null),
+      at: at,
+    );
+    return (
+      store: _with(result.memory),
+      added: result.added,
+      skippedDuplicates: result.skippedDuplicates,
+      blocked: result.blocked,
+    );
   }
 
   BotFactStore replaceSelf(String markdown, {required DateTime at}) {

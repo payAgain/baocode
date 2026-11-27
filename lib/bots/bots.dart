@@ -2277,7 +2277,13 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     return p.join(runtimeFolder(bot, group: group), BotFiles.memoryData);
   }
 
-  BotMemory userMemory(Bot bot, {bool keepLegacyIds = false, String? group}) {
+  BotMemory userMemory(
+    Bot bot, {
+    bool keepLegacyIds = false,
+    String? group,
+    bool createBackup = true,
+  }) {
+    assert(!keepLegacyIds || createBackup);
     final saved = folders.readFile(_memoryDataPath(bot, group), strict: true);
     if (saved != null) {
       final memory = BotMemory.fromJson(
@@ -2306,7 +2312,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     const source = BotMemoryMirror.memory;
     final legacy = folders.readFile(_mirrorPath(bot, source), strict: true);
     if (legacy == null) return BotMemory.fromMarkdown('');
-    _backupLegacyMirror(bot, source, authorityExists: false);
+    if (createBackup) _backupLegacyMirror(bot, source, authorityExists: false);
     final memory = BotMemory.fromMarkdown(decodeBotMemoryMarkdown(legacy));
     if (keepLegacyIds) _writeUserMemory(bot, memory);
     return memory;
