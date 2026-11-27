@@ -7,10 +7,12 @@ import 'package:bao_link/bao_link.dart'
         LinkPathKind,
         LinkPeer,
         LinkSessionStatus,
-        ProjectInfo;
+        ProjectInfo,
+        isAvatarImage;
 
 import 'package:flutter/material.dart';
 
+import '../bots/desktop_bot_editor_ui.dart';
 import '../bots/desktop_bot_message_row.dart';
 import '../theme/codicons.dart';
 import '../theme/workbench_theme.dart' show themeColors;
@@ -1274,38 +1276,101 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
       onSendWithAttachments: send,
     );
 
+    final isBotOrGroup = chat.kind == 'bot' || chat.kind == 'group';
+    final remoteBot = chat.kind == 'bot' ? _chats.botById(chat.id) : null;
+    final botEmoji =
+        remoteBot?.avatar != null &&
+            remoteBot!.avatar!.isNotEmpty &&
+            !isAvatarImage(remoteBot.avatar)
+        ? remoteBot.avatar
+        : null;
+    final kindLabel = chat.kind == 'group'
+        ? text._zh ? '群聊' : 'Group'
+        : text._zh ? '私聊' : 'Private';
+
     return Column(
       key: ValueKey(chatKey),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         ConversationCardHeader(
-          title: _RemoteTitle(
-            title: chat.title,
-            onRename: chat.kind != 'project' || !_online || _busy || _chatBusy
-                ? null
-                : (value) {
-                    final peer = connection.peer;
-                    if (peer == null ||
-                        peer.remote != host ||
-                        _chats.selected?.id != chat.id ||
-                        _chats.selected?.kind != 'project') {
-                      return;
-                    }
-                    unawaited(
-                      _runChat((_) async {
-                        await peer.call(LinkMethods.rename, {
-                          'session': chat.id,
-                          'title': value,
-                        });
-                      }),
-                    );
-                  },
-          ),
+          title: isBotOrGroup
+              ? Row(
+                  children: [
+                    BotAvatarBadge(
+                      label: chat.title,
+                      emoji: botEmoji,
+                      icon: chat.kind == 'group'
+                          ? Icons.groups_outlined
+                          : Icons.smart_toy_outlined,
+                      accent: chat.kind == 'bot',
+                      size: 24,
+                    ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      flex: 2,
+                      child: HoverScrollText(
+                        chat.title,
+                        style: TextStyle(
+                          color: SettingsColors.textPrimary,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      fit: FlexFit.loose,
+                      child: BotMetaPill(
+                        label: kindLabel,
+                        tone: chat.kind == 'bot'
+                            ? BotEditorTone.accent
+                            : BotEditorTone.neutral,
+                      ),
+                    ),
+                    if (remoteBot != null && remoteBot.signature.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          remoteBot.signature,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: SettingsColors.textTertiary,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                )
+              : _RemoteTitle(
+                  title: chat.title,
+                  onRename:
+                      chat.kind != 'project' || !_online || _busy || _chatBusy
+                      ? null
+                      : (value) {
+                          final peer = connection.peer;
+                          if (peer == null ||
+                              peer.remote != host ||
+                              _chats.selected?.id != chat.id ||
+                              _chats.selected?.kind != 'project') {
+                            return;
+                          }
+                          unawaited(
+                            _runChat((_) async {
+                              await peer.call(LinkMethods.rename, {
+                                'session': chat.id,
+                                'title': value,
+                              });
+                            }),
+                          );
+                        },
+                ),
           trailing: [
             ?activityButton,
-            if ((chat.kind == 'bot' || chat.kind == 'group') && peer != null)
+            if (isBotOrGroup && peer != null) ...[
               IconButton(
-                visualDensity: VisualDensity.compact,
+                style: botToolbarIconButtonStyle(context, size: 28),
                 tooltip: chat.kind == 'bot'
                     ? text.botSettings
                     : text.groupSettings,
@@ -1317,8 +1382,10 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                         editor: (kind: chat.kind, id: chat.id),
                       ),
               ),
+              const SizedBox(width: 4),
+            ],
             IconButton(
-              visualDensity: VisualDensity.compact,
+              style: botToolbarIconButtonStyle(context, size: 28),
               tooltip: wide ? text.closeChat : text.backToChats,
               onPressed: _closeChat,
               icon: Icon(
@@ -1328,15 +1395,29 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
             ),
           ],
         ),
+        if (isBotOrGroup) Container(height: 1, color: SettingsColors.divider),
         Expanded(
           child: bodyColumn(
             Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 if (connectionError != null)
-                  _Notice(connectionError, isError: true),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: BotEditorNotice(
+                      message: connectionError,
+                      tone: BotEditorTone.danger,
+                    ),
+                  ),
                 if (_chatBusy) _Progress(text.working),
-                if (error != null) _Notice(error, isError: true),
+                if (error != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: BotEditorNotice(
+                      message: error,
+                      tone: BotEditorTone.danger,
+                    ),
+                  ),
                 Expanded(
                   child: history != null
                       ? DesktopHostProjectHistory(
@@ -1369,70 +1450,104 @@ class _DesktopHostPageState extends State<DesktopHostPage> {
                                 },
                         )
                       : messages.isEmpty && !hasEarlier
-                      ? Center(
-                          child: !_chatBusy && error == null
-                              ? _Notice(text.emptyChat)
-                              : null,
-                        )
-                      : ListView.builder(
-                          // Keep the newest replies visible when at the bottom, even
-                          // when loading older messages or the host is streaming.
-                          reverse: true,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          itemCount: messages.length + (hasEarlier ? 1 : 0),
-                          itemBuilder: (context, index) {
-                            if (index == messages.length) {
-                              return Center(
-                                child: TextButton(
-                                  onPressed: _busy || _chatBusy
-                                      ? null
-                                      : () => _runChat((c) => c.earlier()),
-                                  child: Text(text.earlier),
-                                ),
-                              );
-                            }
-                            final message =
-                                messages[messages.length - 1 - index];
-                            final reference = message.groupReference;
-                            final replyTarget = message.groupReplyTarget;
-                            return DesktopHostMessageRow(
-                              peer: peer,
-                              chat: chat,
-                              message: message,
-                              isCurrent: isCurrent,
-                              sender: message.mine ? text.you : message.sender,
-                              quote: reference == null
-                                  ? null
-                                  : DesktopGroupQuoteBanner(
-                                      label: text.quotedMessage(
-                                        reference.sequence,
-                                        reference.target,
-                                      ),
-                                      preview: switch (reference.target) {
-                                        final target? => text.quotePreview(
-                                          target,
-                                        ),
-                                        null => '',
-                                      },
+                      ? (!_chatBusy && error == null
+                            ? BotEmptyState(
+                                label: chat.title,
+                                emoji: botEmoji,
+                                icon: chat.kind == 'group'
+                                    ? Icons.groups_outlined
+                                    : Icons.smart_toy_outlined,
+                                title: text.emptyChat,
+                                description: remoteBot != null &&
+                                        remoteBot.signature.isNotEmpty
+                                    ? remoteBot.signature
+                                    : null,
+                              )
+                            : const SizedBox.shrink())
+                      : ScrollEdgeFade(
+                          child: ListView.builder(
+                            // Keep the newest replies visible when at the bottom, even
+                            // when loading older messages or the host is streaming.
+                            reverse: true,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            itemCount: messages.length + (hasEarlier ? 1 : 0),
+                            itemBuilder: (context, index) {
+                              if (index == messages.length) {
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 10),
+                                  child: Center(
+                                    child: TextButton(
+                                      style: botEditorTonalButtonStyle(context),
+                                      onPressed: _busy || _chatBusy
+                                          ? null
+                                          : () => _runChat((c) => c.earlier()),
+                                      child: Text(text.earlier),
                                     ),
-                              replyTooltip: text.replyToMessage,
-                              onReply: canQuote && replyTarget != null
-                                  ? () => selectReply(replyTarget)
-                                  : null,
-                            );
-                          },
+                                  ),
+                                );
+                              }
+                              final messageIndex = messages.length - 1 - index;
+                              final message = messages[messageIndex];
+                              final prev = messageIndex > 0
+                                  ? messages[messageIndex - 1]
+                                  : null;
+                              final grouped = shouldGroupBotMessage(
+                                sameSender:
+                                    prev != null &&
+                                    prev.mine == message.mine &&
+                                    (message.mine ||
+                                        prev.sender == message.sender),
+                                previousAt: prev?.sentAt,
+                                currentAt: message.sentAt,
+                              );
+                              final reference = message.groupReference;
+                              final replyTarget = message.groupReplyTarget;
+                              return DesktopHostMessageRow(
+                                peer: peer,
+                                chat: chat,
+                                message: message,
+                                isCurrent: isCurrent,
+                                grouped: grouped,
+                                botEmoji: botEmoji,
+                                sender:
+                                    message.mine ? text.you : message.sender,
+                                quote: reference == null
+                                    ? null
+                                    : DesktopGroupQuoteBanner(
+                                        label: text.quotedMessage(
+                                          reference.sequence,
+                                          reference.target,
+                                        ),
+                                        preview: switch (reference.target) {
+                                          final target? => text.quotePreview(
+                                            target,
+                                          ),
+                                          null => '',
+                                        },
+                                      ),
+                                replyTooltip: text.replyToMessage,
+                                onReply: canQuote && replyTarget != null
+                                    ? () => selectReply(replyTarget)
+                                    : null,
+                              );
+                            },
+                          ),
                         ),
                 ),
                 if (groupReply != null)
-                  DesktopGroupQuoteBanner(
-                    label: text.replyingTo(groupReply),
-                    preview: text.quotePreview(groupReply),
-                    trailing: IconButton(
-                      tooltip: text.cancelReply,
-                      onPressed: canQuote
-                          ? () => selectReply(groupReply, cancel: true)
-                          : null,
-                      icon: const Icon(Icons.close, size: 16),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: DesktopGroupQuoteBanner(
+                      label: text.replyingTo(groupReply),
+                      preview: text.quotePreview(groupReply),
+                      trailing: IconButton(
+                        style: botToolbarIconButtonStyle(context, size: 24),
+                        tooltip: text.cancelReply,
+                        onPressed: canQuote
+                            ? () => selectReply(groupReply, cancel: true)
+                            : null,
+                        icon: const Icon(Icons.close, size: 15),
+                      ),
                     ),
                   ),
                 composerColumn(

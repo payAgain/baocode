@@ -10,6 +10,7 @@ import 'package:path/path.dart' as p;
 
 import '../chat/chat_models.dart';
 import '../chat/chat_session.dart';
+import '../images/image_tools.dart';
 import '../kernel/agent_kernel.dart';
 import '../kernel/claude_code/claude_sdk_tools.dart';
 import '../kernel/claude_code/managed_transcripts_io.dart';
@@ -18,6 +19,7 @@ import '../kernel/kernel_types.dart' show KernelOption;
 import '../kernel/queued_messages.dart';
 import '../link/chat_codec.dart';
 import '../link/link_platform.dart';
+import '../models/model_providers.dart';
 import '../search/memory_history.dart'
     show
         MemoryHistoryAccess,
@@ -41,7 +43,6 @@ import 'bot_memory_snapshot.dart';
 import 'bot_memory_migration.dart';
 import 'bot_memory_review.dart';
 import 'bot_pacer.dart';
-import 'bot_permissions.dart';
 import 'bot_prompt.dart';
 import 'bot_tools.dart';
 import 'bot_watch.dart';
@@ -133,9 +134,9 @@ typedef _PrivateReceipt = ({String fingerprint, String alias, bool cancelled});
 
 /// The user's bots: agents of their own making that chat as a person does
 /// (see bot.dart), each a conversation in a folder of its own, which the
-/// sidebar does not list. Their tools are theirs ([ClaudeSdkGate]): those
-/// of the abilities the user turned on; and they write first of what
-/// happens to the agents, paced ([BotPacer]).
+/// sidebar does not list. They use BaoCode's tools and tools specific to
+/// their chats ([ClaudeSdkGate]). When the user opts in, they write first
+/// about what happens to the agents, paced ([BotPacer]).
 class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
   Bots({
     required this.workspace,
@@ -190,8 +191,8 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
   static Future<String?> _thisComputer() async =>
       (await LinkPlatform.current()?.device())?.name;
 
-  /// The settings its agent runs with: full access, nothing asked (see
-  /// [BotPermissions]); and works as an agent, not in Plan.
+  /// The settings its agent runs with: full access, nothing asked, and
+  /// works as an agent, not in Plan.
   static const settings = {'mode': 'agent', 'permission': 'bypassPermissions'};
 
   List<Bot> _bots = [];
@@ -436,7 +437,8 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
       }
       if (_same(had, bot)) continue;
       changed = true;
-      if (had.can(BotAbility.agents) && !bot.can(BotAbility.agents)) {
+      if (had.abilities.contains(BotAbility.agents) &&
+          !bot.abilities.contains(BotAbility.agents)) {
         _withdrawProjectMemoryShares(had);
       }
       _restart(bot);
@@ -617,7 +619,7 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
 
   ({Bot bot, String? group})? _runtimeAt(String cwd) {
     final root = folders.root;
-    if (root == null) return null;
+    if (_disposed || root == null) return null;
     final runtime = p.join(root, 'runtime');
     if (!p.isWithin(runtime, cwd)) return null;
     final parts = p.split(p.relative(cwd, from: runtime));
@@ -671,7 +673,8 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
             },
             ownPrompt: true,
             refreshSystemPromptOnCompaction: true,
-            tools: BotPermissions.chatTools,
+            userServers: true,
+            approvesAll: true,
           );
         },
         settings: {...settings, 'model': ?bot.model},
@@ -690,17 +693,21 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
         life: _life(bot),
         computer: computer,
         now: _clock(),
-        imageModel: false,
+        imageModel: ImageTools.imageModels(ModelProviders.current).isNotEmpty,
       );
       return KernelWorkspace(
         folders: const [],
-        sessionPrompt: (id, {required refresh}) =>
-            _sessionPrompt(bot, null, id, render, refresh: refresh),
+        sessionPrompt: (id, {required refresh}) {
+          if (_runtimeAt(runtimeFolder(bot)) == null) {
+            throw StateError('The private worker is no longer active');
+          }
+          return _sessionPrompt(bot, null, id, render, refresh: refresh);
+        },
         // Told only who it is and how it talks: no coding agent's prompt.
         ownPrompt: true,
         refreshSystemPromptOnCompaction: true,
         preferManagedTranscript: true,
-        tools: BotPermissions.chatTools,
+        userServers: true,
         approvesAll: true,
         // What the user writes while it talks, taken up as it does: as a
         // person hears what is said meanwhile; and shown where they wrote
@@ -840,19 +847,12 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
 
   @override
   bool offersTool(String cwd, String tool) {
-    final ability = BotTools.abilityOf(tool);
+    final access = BotTools.accessOf(tool);
     final scope = _runtimeAt(cwd);
-    if (scope?.group != null) {
-      return BotPermissions.groupHostTools.contains(tool);
-    }
-    if (scope == null && isBotPath(cwd)) return false;
-    final bot = scope?.bot;
-    // A project agent's as well, for one looking after the agents.
-    if (SessionTools.names.contains(tool)) {
-      return bot == null || bot.can(BotAbility.agents);
-    }
-    if (bot == null) return ability == null;
-    return ability?.allows(bot) ?? false;
+    if (scope == null) return !isBotPath(cwd) && access == null;
+    // Generic tools retain their own eligibility checks; only bot-specific
+    // tools have additional identity, opt-in, or conversation restrictions.
+    return access?.allows(scope.bot, group: scope.group) ?? true;
   }
 
   // --- The session tools, a bot's ---------------------------------------------
@@ -862,27 +862,39 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
 
   @override
   void handed(String cwd, AgentThread thread) {
-    if (botAt(cwd) case final bot?) watch(bot, thread);
+    // Watch rules send updates to the private worker. A room's project tasks
+    // belong to the room and can be followed there with the session tools.
+    if (_runtimeAt(cwd) case (bot: final bot, group: null)) watch(bot, thread);
   }
 
   @override
-  Set<AgentThread> handedBy(String cwd) => switch (botAt(cwd)) {
-    final bot? => {
+  Set<AgentThread> handedBy(String cwd) => switch (_runtimeAt(cwd)) {
+    (bot: final bot, group: null) => {
       for (final id in watching(bot)) ?SessionTools.threadOf(workspace, id),
+    },
+    (bot: final bot, group: final group?) => switch (threadOf(
+      bot,
+      group: group,
+    )) {
+      final thread? when thread.isOpen => SessionTools.handedFrom(
+        thread.session,
+        workspace,
+      ).toSet(),
+      _ => const {},
     },
     null => const {},
   };
 
   @override
-  String toldOf(String cwd) => switch (botAt(cwd)) {
-    final bot? when bot.can(BotAbility.proactive) && _hasPhone =>
+  String toldOf(String cwd) => switch (_runtimeAt(cwd)) {
+    (bot: final bot, group: null)
+        when bot.can(BotAbility.proactive) && _hasPhone =>
       'You are told when it is done or needs the user, as your rules say '
           '(bot_watch).',
     _ => 'You are not told of it: look (session_read) when the user asks.',
   };
 
-  /// The session tools, a bot's own as its bot_* are: never behind the
-  /// tool search, which one that only chats may not have.
+  /// The session tools are always loaded in a bot conversation.
   @override
   bool loadsTool(String cwd, String tool) =>
       SessionTools.names.contains(tool) && botAt(cwd) != null;
@@ -1782,7 +1794,8 @@ class Bots extends ChangeNotifier implements ClaudeSdkGate, SessionToolsBots {
     if (had.can(BotAbility.proactive) && !bot.can(BotAbility.proactive)) {
       _pacers.remove(bot.id);
     }
-    if (had.can(BotAbility.agents) && !bot.can(BotAbility.agents)) {
+    if (had.abilities.contains(BotAbility.agents) &&
+        !bot.abilities.contains(BotAbility.agents)) {
       _withdrawProjectMemoryShares(bot);
     }
     _writeBot(bot);

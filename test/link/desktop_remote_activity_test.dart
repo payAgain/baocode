@@ -15,6 +15,7 @@ import 'package:baocode/ide/terminal/terminal_view.dart';
 import 'package:baocode/l10n/app_localizations.dart';
 import 'package:baocode/link/desktop_host_chats.dart';
 import 'package:baocode/link/desktop_remote_activity.dart';
+import 'package:baocode/link/desktop_remote_dialog.dart';
 import 'package:baocode/theme/app_theme.dart';
 import 'package:baocode/theme/workbench_theme.dart' as workbench;
 import 'package:baocode/theme/workbench_theme_initial_colors.dart';
@@ -399,13 +400,7 @@ void main() {
       await _tap(tester, find.text('Cancel'));
       expect(host.methods, [LinkMethods.open, LinkMethods.output]);
       await _tap(tester, find.text('Stop task'));
-      await _tap(
-        tester,
-        find.descendant(
-          of: find.byType(AlertDialog),
-          matching: find.widgetWithText(TextButton, 'Stop task'),
-        ),
-      );
+      await _tap(tester, _confirmButton('Stop task'));
       host.expectLast(LinkMethods.stopTask, {
         'session': 'session-a',
         'task': 'running',
@@ -1591,8 +1586,8 @@ Finder _fileReviewAction(String path, String label) => find.descendant(
 );
 
 Finder _confirmButton(String label) => find.descendant(
-  of: find.byType(AlertDialog),
-  matching: find.widgetWithText(TextButton, label),
+  of: find.byType(RemoteActionDialog),
+  matching: find.widgetWithText(FilledButton, label),
 );
 
 LinkTask _task(String id, {String status = 'running'}) => LinkTask(

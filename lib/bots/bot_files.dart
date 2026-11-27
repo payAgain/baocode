@@ -43,7 +43,8 @@ abstract final class BotFiles {
     ('avatar', bot.avatar),
     ('gender', bot.gender),
     ('signature', bot.signature),
-    for (final ability in shownAbilities) (ability.name, '${bot.can(ability)}'),
+    for (final ability in shownAbilities)
+      (ability.name, '${bot.abilities.contains(ability)}'),
     if (bot.chatOnly) ('chat_only', 'true'),
     if (!bot.writesFirst) ('writes_first', 'false'),
     ('model', bot.model),

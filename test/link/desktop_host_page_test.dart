@@ -1290,6 +1290,9 @@ class _Chats extends ChangeNotifier implements DesktopHostChats {
   Null remoteActionSnapshot(LinkPeer? peer, DesktopHostChat chat) => null;
 
   @override
+  Null botById(String id) => null;
+
+  @override
   Null get sessionControls => null;
 
   @override

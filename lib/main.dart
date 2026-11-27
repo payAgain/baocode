@@ -294,7 +294,7 @@ Future<void> main(List<String> arguments) async {
         return local == null ? null : workspace.localProjectId(local);
       },
       canUseProject: (id, project) =>
-          bots.byId(id)?.can(BotAbility.agents) == true &&
+          bots.byId(id)?.abilities.contains(BotAbility.agents) == true &&
           workspace.localProjectById(project) != null,
       evidenceAvailable: (skill) async {
         final scope = BotMemoryScope(botId: skill.botId);
@@ -419,14 +419,15 @@ Future<void> main(List<String> arguments) async {
         SessionTools.memoryReviewFor = (cwd) {
           final bot = bots.botAt(cwd);
           return bot == null ||
-                  !bot.can(BotAbility.agents) ||
+                  !bot.abilities.contains(BotAbility.agents) ||
                   bots.groupOfCwd(cwd) != null
               ? null
               : (scope: BotMemoryScope(botId: bot.id), review: review);
         };
         SessionTools.projectTaskBots = () => [
           for (final bot in bots.bots)
-            if (bot.can(BotAbility.agents)) (id: bot.id, name: bot.name),
+            if (bot.abilities.contains(BotAbility.agents))
+              (id: bot.id, name: bot.name),
         ];
         Set<String> projectIds() => {
           for (final project in workspace.projects)

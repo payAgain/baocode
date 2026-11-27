@@ -162,7 +162,7 @@ extension BotFacts on Bots {
   BotFactAccess? projectFactAccess(String botId, String projectId) {
     final bot = byId(botId);
     if (bot == null ||
-        !bot.can(BotAbility.agents) ||
+        !bot.abilities.contains(BotAbility.agents) ||
         workspace.localProjectById(projectId) == null) {
       return null;
     }
@@ -182,7 +182,7 @@ extension BotFacts on Bots {
         !access.belongsTo(owner) ||
         access.sessionId != null && threadOf(bot)?.id != access.sessionId ||
         projectId != null &&
-            (!bot.can(BotAbility.agents) ||
+            (!bot.abilities.contains(BotAbility.agents) ||
                 workspace.localProjectById(projectId) == null)) {
       throw StateError('The Bot fact scope is unavailable.');
     }

@@ -1,6 +1,7 @@
 import 'package:bao_link/bao_link.dart';
 import 'package:flutter/material.dart';
 
+import '../bots/desktop_bot_editor_ui.dart';
 import '../bots/desktop_bot_message_row.dart';
 import '../chat/widgets/markdown_view.dart';
 import '../l10n/l10n.dart';
@@ -21,6 +22,8 @@ class DesktopHostMessageRow extends StatelessWidget {
     required this.isCurrent,
     this.quote,
     this.onReply,
+    this.grouped = false,
+    this.botEmoji,
   });
 
   final LinkPeer? peer;
@@ -31,49 +34,56 @@ class DesktopHostMessageRow extends StatelessWidget {
   final bool Function() isCurrent;
   final Widget? quote;
   final VoidCallback? onReply;
+  final bool grouped;
+  final String? botEmoji;
 
   @override
-  Widget build(BuildContext context) => SelectionArea(
-    child: DesktopRemoteMessageImages.inRow(
-      peer: peer,
-      chat: chat,
-      images: message.images,
-      isCurrent: isCurrent,
-      mediaBuilder: (media) => DesktopBotMessageRow(
-        mine: message.mine,
-        sender: chat.kind == 'group' ? sender : null,
-        avatar: !message.mine && message.senderEmoji != null
-            ? DesktopBotMessageAvatar(
-                sender: sender,
-                emoji: message.senderEmoji,
-              )
-            : null,
-        sentAt: message.sentAt,
-        quote: quote,
-        reply: message.groupReplyTarget == null
-            ? null
-            : IconButton(
-                visualDensity: VisualDensity.compact,
-                tooltip: replyTooltip,
-                onPressed: onReply,
-                icon: const Icon(Icons.reply, size: 16),
+  Widget build(BuildContext context) {
+    final botName = sender.isNotEmpty ? sender : chat.title;
+    final resolvedSender = chat.kind == 'group'
+        ? sender
+        : (message.mine ? null : botName);
+    final emoji = message.senderEmoji ?? botEmoji;
+    return SelectionArea(
+      child: DesktopRemoteMessageImages.inRow(
+        peer: peer,
+        chat: chat,
+        images: message.images,
+        isCurrent: isCurrent,
+        mediaBuilder: (media) => DesktopBotMessageRow(
+          mine: message.mine,
+          sender: resolvedSender,
+          avatar: !message.mine
+              ? DesktopBotMessageAvatar(sender: botName, emoji: emoji)
+              : null,
+          sentAt: message.sentAt,
+          grouped: grouped,
+          quote: quote,
+          reply: message.groupReplyTarget == null
+              ? null
+              : IconButton(
+                  style: botToolbarIconButtonStyle(context, size: 24),
+                  tooltip: replyTooltip,
+                  onPressed: onReply,
+                  icon: const Icon(Icons.reply, size: 14),
+                ),
+          content: [
+            if (message.text.isNotEmpty)
+              if (message.mine)
+                DesktopBotMessageText(message.text, inlineCode: true)
+              else if (message.literal)
+                DesktopBotMessageText(message.text)
+              else
+                MarkdownView(message.text, textOnly: true),
+            if (message.queued)
+              Text(
+                context.l10n.queuedMessages(1),
+                style: SettingsText.description,
               ),
-        content: [
-          if (message.text.isNotEmpty)
-            if (message.mine)
-              DesktopBotMessageText(message.text, inlineCode: true)
-            else if (message.literal)
-              DesktopBotMessageText(message.text)
-            else
-              MarkdownView(message.text, textOnly: true),
-          if (message.queued)
-            Text(
-              context.l10n.queuedMessages(1),
-              style: SettingsText.description,
-            ),
-        ],
-        media: media,
+          ],
+          media: media,
+        ),
       ),
-    ),
-  );
+    );
+  }
 }

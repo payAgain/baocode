@@ -638,13 +638,24 @@ void main() {
   testWidgets(
     'Bot edit rebases unchanged host fields and keeps its picture token',
     (tester) async {
-      final host = _Host();
+      final host = _Host(legacy: true);
       await host.open();
       await _mount(tester, host.peer);
       await _tap(tester, 'Fixture Bot');
       expect(host.writes(LinkMethods.botAvatar).single, {'bot': 'b1'});
+      expect(find.text('Tool access'), findsOneWidget);
+      expect(find.textContaining('On up-to-date hosts'), findsOneWidget);
+      expect(
+        find.textContaining('Older hosts may still enforce'),
+        findsOneWidget,
+      );
+      expect(find.text('Chat only'), findsNothing);
+      expect(find.text('Manage agents'), findsNothing);
+      expect(find.text('Use browser'), findsNothing);
+
       await _enter(tester, 'Name', 'Renamed Bot');
       host.bots['b1']!['style'] = 'Changed on host while editing';
+      host.bots['b1']!['abilities'] = ['browser', 'agents'];
       await _tap(tester, 'Save');
 
       expect(host.writes(LinkMethods.saveBot).single, {
@@ -653,13 +664,42 @@ void main() {
         'avatar': 'avatar-abc.png',
         'identity': 'Fixture identity',
         'style': 'Changed on host while editing',
-        'abilities': ['browser'],
+        'abilities': ['browser', 'agents'],
         'proactive': {'perDay': 3, 'quietFrom': 55, 'quietTo': 90},
       });
+      expect(host.bots['b1']!['chatOnly'], isTrue);
+      expect(host.bots['b1']!['writesFirst'], isFalse);
       expect(find.text('Renamed Bot'), findsOneWidget);
       await _finish(tester, [host]);
     },
   );
+
+  testWidgets('Bot messaging settings can be changed independently', (
+    tester,
+  ) async {
+    final host = _Host();
+    await host.open();
+    await _mount(tester, host.peer);
+    await _tap(tester, 'Fixture Bot');
+
+    await _tap(tester, 'React to agent activity');
+    expect(find.text('Proactive messages per day'), findsOneWidget);
+    await _tap(tester, 'Save');
+    final first = host.writes(LinkMethods.saveBot).single;
+    expect(first['abilities'], ['browser', 'proactive']);
+    expect(first.containsKey('writesFirst'), isFalse);
+    expect(host.bots['b1']!['writesFirst'], isFalse);
+
+    await _tap(tester, 'Fixture Bot');
+    await _tap(tester, 'May write first');
+    await _tap(tester, 'Save');
+    final second = host.writes(LinkMethods.saveBot).last;
+    expect(second['abilities'], ['browser', 'proactive']);
+    expect(second['writesFirst'], isTrue);
+    expect(second.containsKey('chatOnly'), isFalse);
+    expect(host.bots['b1']!['chatOnly'], isTrue);
+    await _finish(tester, [host]);
+  });
 
   testWidgets('a concurrent change to the edited Bot field blocks the write', (
     tester,
@@ -700,6 +740,8 @@ void main() {
     await host.open();
     await _mount(tester, host.peer);
     await _tap(tester, 'Fixture Group');
+    expect(find.text('Tool access'), findsOneWidget);
+    expect(find.textContaining('private chats and Bot groups'), findsOneWidget);
     expect(find.text('Reply delay (seconds)'), findsNothing);
     expect(find.text('Default lead'), findsNothing);
     await _enter(tester, 'Name', 'Renamed Group');

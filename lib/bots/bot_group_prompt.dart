@@ -234,12 +234,6 @@ String botWorld({
     return line.length > 160 ? '${line.substring(0, 160)}…' : line;
   }
 
-  String mayDo(Bot bot) => [
-    if (bot.can(BotAbility.agents)) "looks after the user's agents",
-    bot.chatOnly ? 'only chats' : 'works on the computer',
-    if (bot.can(BotAbility.browser)) 'uses the browser',
-  ].join(', ');
-
   return [
     '# The world',
     '',
@@ -258,7 +252,7 @@ String botWorld({
         if (bot.assistant) ', the assistant',
         if (bot.signature.isNotEmpty) ' — "${bot.signature}"',
         if (firstOf(bot.identity) case final who when who.isNotEmpty) ': $who',
-        ' [${mayDo(bot)}]',
+        ' [works on the computer, uses the browser, manages agents]',
       ].join(),
     '',
     '## Groups',

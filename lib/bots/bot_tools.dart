@@ -27,19 +27,22 @@ import 'bot_pacer.dart' show BotEventKind, botTime;
 import 'bot_watch.dart';
 import 'bots.dart';
 
-/// Which bots a tool of theirs is for: those trusted with [level]; only
-/// the assistant, if [assistant]. One that keeps what is in a bot's files
-/// ([files]) is not for a bot that works on the computer: it keeps its
-/// files itself, with Claude Code's tools.
+/// Identity, opt-in, and conversation scope for a bot-specific tool.
 class BotToolAccess {
-  const BotToolAccess({this.ability, this.assistant = false});
+  const BotToolAccess({
+    this.ability,
+    this.assistant = false,
+    this.privateOnly = false,
+  });
 
-  /// What a bot needs on for it; none for any bot.
   final BotAbility? ability;
   final bool assistant;
+  final bool privateOnly;
 
-  bool allows(Bot bot) =>
-      (!assistant || bot.assistant) && (ability == null || bot.can(ability!));
+  bool allows(Bot bot, {required String? group}) =>
+      (!assistant || bot.assistant) &&
+      (!privateOnly || group == null) &&
+      (ability == null || bot.can(ability!));
 }
 
 /// A cross-group command parsed by the host from an accepted user DM.
@@ -227,7 +230,7 @@ abstract final class BotTools {
   }
 
   /// Who [tool] is for, if a bot's.
-  static BotToolAccess? abilityOf(String tool) => _access[tool];
+  static BotToolAccess? accessOf(String tool) => _access[tool];
 
   /// [thread]'s id, as the phones have it.
   static String idOf(AgentThread thread) => WorkspaceBridge.idOf(thread);
@@ -412,7 +415,7 @@ abstract final class BotTools {
           required: ['seconds', 'note'],
           summary: (input, _) => clip(input, 'note'),
         ),
-        const BotToolAccess(),
+        const BotToolAccess(privateOnly: true),
       ),
       (
         tool(
@@ -440,7 +443,7 @@ abstract final class BotTools {
           required: ['note'],
           summary: (input, _) => clip(input, 'note'),
         ),
-        const BotToolAccess(),
+        const BotToolAccess(privateOnly: true),
       ),
       (
         tool(
@@ -544,7 +547,7 @@ abstract final class BotTools {
           required: ['action'],
           summary: (input, _) => '${input['action'] ?? ''}',
         ),
-        const BotToolAccess(ability: BotAbility.proactive),
+        const BotToolAccess(ability: BotAbility.proactive, privateOnly: true),
       ),
       (
         tool(
@@ -565,7 +568,7 @@ abstract final class BotTools {
             return lines.isEmpty ? 'Nothing lately.' : lines.join('\n');
           },
         ),
-        const BotToolAccess(ability: BotAbility.proactive),
+        const BotToolAccess(ability: BotAbility.proactive, privateOnly: true),
       ),
       (
         tool(
@@ -699,7 +702,7 @@ abstract final class BotTools {
                   .where((project) => project.path == wantedProject)
                   .firstOrNull;
               if (group != null ||
-                  !bot.can(BotAbility.agents) ||
+                  !bot.abilities.contains(BotAbility.agents) ||
                   project == null ||
                   !(requestedHistory(bot, call, project.path) ||
                       requestedHistory(bot, call, project.name))) {
@@ -722,7 +725,7 @@ abstract final class BotTools {
                             .contains(bot.id) ==
                         true,
                   MemoryHistoryScopeKind.project =>
-                    live.can(BotAbility.agents) &&
+                    live.abilities.contains(BotAbility.agents) &&
                         workspace.projects.any(
                           (project) =>
                               project.path == candidate.projectId &&
@@ -1120,6 +1123,11 @@ abstract final class BotTools {
             };
             BotAvatarImage? picture;
             if (given('picture') case final path? when path.isNotEmpty) {
+              if (bots.groupOfCwd(call.cwd) != null) {
+                throw StateError(
+                  'Use pictures received in your private chat there.',
+                );
+              }
               picture = await _avatarFrom(bots, me, path);
             }
             final name = given('name');
@@ -1164,7 +1172,7 @@ abstract final class BotTools {
                         final emoji => emoji,
                       }} | ${bot.gender.isEmpty ? '-' : bot.gender}'
                       ' | ${bot.signature.isEmpty ? '-' : bot.signature}'
-                      ' | ${bot.abilities.isEmpty ? 'chat only' : [for (final a in bot.abilities) a.name].join(', ')}',
+                      ' | full tools${bot.can(BotAbility.proactive) ? ', agent notifications' : ''}',
                   if (bot.identity.trim().isNotEmpty)
                     '  who: ${_clip(bot.identity, 300)}',
                   if (bot.style.trim().isNotEmpty)
@@ -1235,6 +1243,11 @@ abstract final class BotTools {
                       ));
             BotAvatarImage? picture;
             if (given('picture') case final path? when path.isNotEmpty) {
+              if (bots.groupOfCwd(call.cwd) != null) {
+                throw StateError(
+                  'Use pictures received in your private chat there.',
+                );
+              }
               picture = await _avatarFrom(bots, me, path);
             }
             final name = given('name') ?? had?.name ?? '';
@@ -1252,13 +1265,10 @@ abstract final class BotTools {
               abilities: had?.abilities ?? const {},
               proactive: had?.proactive ?? const BotProactive(),
               by: me,
-              // A new one only chats, as the user is told (they say more).
-              chatOnly: had == null ? true : null,
             );
             return had == null
-                ? 'Made ${saved.name} (${saved.id}). It may do nothing more '
-                      'than chat until the user turns its abilities on, in its '
-                      'profile.'
+                ? 'Made ${saved.name} (${saved.id}). It has full tools; '
+                      'agent notifications are off unless the user turns them on.'
                 : 'Saved ${saved.name}.';
           },
           summary: (input, _) => '${input['name'] ?? input['bot'] ?? ''}',

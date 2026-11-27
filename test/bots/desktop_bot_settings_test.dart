@@ -74,62 +74,76 @@ void main() {
     expect(fixture.read(saved)?.abilities, isEmpty);
   });
 
-  testWidgets('persists edited profile fields and permissions', (tester) async {
-    final fixture = _Fixture();
-    addTearDown(fixture.dispose);
-    final bot = fixture.bots.save(
-      name: 'Finch',
-      identity: 'Notebook keeper.',
-      gender: 'Female',
-      signature: 'Mind the margins.',
-      style: 'Keep it short.',
-      abilities: {BotAbility.agents},
-    );
-    fixture.bots.setModel(bot, 'custom-model');
-    await tester.pumpWidget(fixture.page(bot: fixture.bots.byId(bot.id)));
+  testWidgets(
+    'saves profile and messaging without changing legacy tool flags',
+    (tester) async {
+      final fixture = _Fixture();
+      addTearDown(fixture.dispose);
+      final bot = fixture.bots.save(
+        name: 'Finch',
+        identity: 'Notebook keeper.',
+        gender: 'Female',
+        signature: 'Mind the margins.',
+        style: 'Keep it short.',
+        abilities: {BotAbility.agents},
+      );
+      fixture.bots.setModel(bot, 'custom-model');
+      await tester.pumpWidget(fixture.page(bot: fixture.bots.byId(bot.id)));
 
-    await _enter(tester, 'Signature', 'Tea first.');
-    await _enter(tester, 'Speaking style', 'Use short sentences.');
-    await _enter(tester, 'Identity', 'A friendly librarian.');
-    await _tap(tester, find.text('Chat only'));
-    await _tap(tester, find.text('Can message you first'));
-    await _tap(tester, find.text('Manage agents'));
-    await _tap(tester, find.text('Use the browser'));
+      expect(find.text('Tool access'), findsOneWidget);
+      expect(
+        find.textContaining('Private chats and Bot groups have full access'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('including your configured MCP tools'),
+        findsOneWidget,
+      );
+      expect(find.text('Chat only'), findsNothing);
+      expect(find.text('Manage agents'), findsNothing);
+      expect(find.text('Use the browser'), findsNothing);
 
-    // Simulate the phone saving a different edit while this form is open.
-    final avatarBytes = Uint8List.fromList([1, 2, 3]);
-    const proactive = BotProactive(perDay: 2);
-    final fromPhone = fixture.bots.save(
-      id: bot.id,
-      name: 'Finch II',
-      identity: bot.identity,
-      gender: 'Unspecified',
-      signature: bot.signature,
-      style: bot.style,
-      avatarImage: (bytes: avatarBytes, type: 'image/png'),
-      abilities: {BotAbility.agents, BotAbility.proactive},
-      proactive: proactive,
-    );
-    await tester.pumpWidget(fixture.page(bot: fromPhone));
-    await _tap(tester, find.text('Save'));
+      await _enter(tester, 'Signature', 'Tea first.');
+      await _enter(tester, 'Speaking style', 'Use short sentences.');
+      await _enter(tester, 'Identity', 'A friendly librarian.');
+      await _tap(tester, find.text('Can message you first'));
 
-    expect(fixture.backCount, 1);
-    expect(fixture.bots.bots.single.proactive, proactive);
-    final saved = fixture.read(bot)!;
-    expect(saved.id, bot.id);
-    expect(saved.name, 'Finch II');
-    expect(saved.gender, 'Unspecified');
-    expect(saved.signature, 'Tea first.');
-    expect(saved.identity, 'A friendly librarian.');
-    expect(saved.style, 'Use short sentences.');
-    expect(saved.chatOnly, isTrue);
-    expect(saved.writesFirst, isFalse);
-    expect(saved.abilities, {BotAbility.browser, BotAbility.proactive});
-    expect(saved.model, 'custom-model');
-    expect(saved.created, bot.created);
-    expect(saved.avatar, fromPhone.avatar);
-    expect(fixture.folders.readFile(saved.avatarFile!), avatarBytes);
-  });
+      // Simulate the phone saving a different edit while this form is open.
+      final avatarBytes = Uint8List.fromList([1, 2, 3]);
+      const proactive = BotProactive(perDay: 2);
+      final fromPhone = fixture.bots.save(
+        id: bot.id,
+        name: 'Finch II',
+        identity: bot.identity,
+        gender: 'Unspecified',
+        signature: bot.signature,
+        style: bot.style,
+        avatarImage: (bytes: avatarBytes, type: 'image/png'),
+        abilities: {BotAbility.browser, BotAbility.proactive},
+        proactive: proactive,
+        chatOnly: true,
+      );
+      await tester.pumpWidget(fixture.page(bot: fromPhone));
+      await _tap(tester, find.text('Save'));
+
+      expect(fixture.backCount, 1);
+      expect(fixture.bots.bots.single.proactive, proactive);
+      final saved = fixture.read(bot)!;
+      expect(saved.id, bot.id);
+      expect(saved.name, 'Finch II');
+      expect(saved.gender, 'Unspecified');
+      expect(saved.signature, 'Tea first.');
+      expect(saved.identity, 'A friendly librarian.');
+      expect(saved.style, 'Use short sentences.');
+      expect(saved.chatOnly, isTrue);
+      expect(saved.writesFirst, isFalse);
+      expect(saved.abilities, {BotAbility.browser, BotAbility.proactive});
+      expect(saved.model, 'custom-model');
+      expect(saved.created, bot.created);
+      expect(saved.avatar, fromPhone.avatar);
+      expect(fixture.folders.readFile(saved.avatarFile!), avatarBytes);
+    },
+  );
 
   testWidgets('memory settings edit and pin individual host entries', (
     tester,

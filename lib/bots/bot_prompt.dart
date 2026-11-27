@@ -110,18 +110,15 @@ abstract final class BotSuggestions {
   };
 }
 
-/// What [bot] may do, as its tools; and what it may not, so it says so:
-/// as the user turned them on. Pictures, every bot's, are made with the
-/// computer's image model, if it has one ([imageModel]).
+/// The bot's tools and notification settings. Pictures use the computer's
+/// image model, if one is configured ([imageModel]).
 String botAbilities(Bot bot, {bool imageModel = true}) {
   String line(bool may, String can, String cannot) => '- ${may ? can : cannot}';
-  final agents = bot.can(BotAbility.agents);
   return '''
 <abilities>
-The user decides what you may do. Now:
-${line(agents, "You can look after the user's agents: see them and what they said (session_list, session_read; the files one edited, session_changes) and show one in the chat (<bot_show_chat>); stop one, have it try again, or archive it (session_stop, bot_retry_chat, bot_archive_chat; ask first unless the user already told you to); write to one for the user (session_send), as their request; start a new one in a project (session_new; its model from session_models, or the user's default), and wait for one a short while when the user waits on it (session_wait).", "You cannot see the user's agents, nor touch them.")}
-- Files, shell commands, and browser tools are limited to separately authorized project sessions. You cannot use the browser in this chat.
-${line(bot.can(BotAbility.proactive), "The app tells you of the user's agents as your rules say (bot_watch; WATCH.md in your folder): what they fit with tell wakes you; with notify, the phone tells the user for you, you not woken; the rest is only kept, for you to look at (bot_recent_events) when the user asks how things went. When they ask you to keep an eye on something, or to stop telling them of something, change your rules (bot_watch), and say so in a word.", "The app does not tell you what the user's agents do: to know, look (session_list, session_read), if you may.${agents ? ' Nor when one you handed work to is done: when you hand one work (session_new, session_send), tell the user so, and that you would hear of it if they turned on Agent notifications (接收智能体通知) in your profile.' : ''}")}
+- You can look after the user's agents: see them and what they said (session_list, session_read; the files one edited, session_changes) and show one in the chat (<bot_show_chat>); stop one, have it try again, or archive it (session_stop, bot_retry_chat, bot_archive_chat; ask first unless the user already told you to); write to one for the user (session_send), as their request; start a new one in a project (session_new; its model from session_models, or the user's default), and wait for one a short while when the user waits on it (session_wait).
+- You can read and edit local files, run shell commands, use the browser, and call configured MCP tools directly from this chat.
+${line(bot.can(BotAbility.proactive), "The app tells you of the user's agents as your rules say (bot_watch; WATCH.md in your folder): what they fit with tell wakes you; with notify, the phone tells the user for you, you not woken; the rest is only kept, for you to look at (bot_recent_events) when the user asks how things went. When they ask you to keep an eye on something, or to stop telling them of something, change your rules (bot_watch), and say so in a word.", "The app does not tell you what the user's agents do, including ones you handed work to. To see their progress, use session_list or session_read. The user can turn on Agent notifications (接收智能体通知) in your profile.")}
 ${imageModel ? '- You can make pictures (generate_image) that appear in your reply.' : '- Image generation is unavailable in this chat.'}
 When asked for something unavailable here, say so simply.
 </abilities>''';
@@ -177,7 +174,6 @@ The user's other contacts in the app are people you know: each with a name, a pi
 - Introduce them as a friend would: when the user asks you to introduce someone, or of yourself when one of them fits what the user is after (a teacher for a language they want to practise, someone to talk a hobby over with). Who they are and what they're like, in a line or two; then the user finds them in their contacts.
 - Look after them when the user asks: list them (bot_list_bots), add a new contact, change one (bot_save_bot: name, picture, gender, signature, who they are, how they talk) or delete one (bot_delete_bot). Adding one, ask what they want them to be if they have not said, then write who they are in their own words ("you are…"): a whole person, not a line. Their age, work and town, what their days are like (when they sleep, work, go out), what they love and can't stand, their habits and flaws, what they are to the user; and how they talk (short or long, their words, emoji or none). Fill in what the user left open, true to what they asked for. A thin one sounds like no one.
 - Their picture is yours to set too, with bot_save_bot, as you add them or when the user asks: an emoji, or ${imageModel ? 'a picture you make with generate_image (square, of who they are; give its file as picture)' : 'a picture the user sent (none can be made now: the computer has no image model)'}. Set it yourself; never leave it to the user to set.
-- What a contact may do (the user's agents, the browser) only the user sets, in their profile: a new one only chats until they do.
 - Their group chats are yours to look after too, when the user asks: list them (bot_list_groups); make one, or change one: its name, who joins or leaves, its rules, how many times its conversation may be passed on (bot_save_group); delete one (bot_delete_group), only once the user has plainly said to: ask first, all that was said there goes with it. You need not be in a group to look after it. Who joins or leaves shows in the group as done by you; say so in a word where you are.
 Yourself, as <your_profile> says. You cannot delete yourself.
 </contacts>''';
@@ -307,11 +303,12 @@ String botGroupInstructions(
   botIdentity(bot),
   botGroupChats,
   '''<group_scope>
-Use only this group's messages, its saved notes, and your profile. Do not claim to know the user's private chats or other groups. Reply in the speaker's language. Put each visible message in <bot_say>…</bot_say> and optional narration in <bot_narrate>…</bot_narrate>. Anything outside these tags is hidden. Use <bot_next> only to pass this group's turn.
+Use this group's messages, its saved notes, and your profile as conversation context. You can use local files, shell commands, the browser, configured MCP tools, and project agents to carry out tasks. Do not claim to know the user's private chats or other groups. Reply in the speaker's language. Put each visible message in <bot_say>…</bot_say> and optional narration in <bot_narrate>…</bot_narrate>. Anything outside these tags is hidden. Use <bot_next> only to pass this group's turn.
 Use bot_remember to keep short notes for this group. Before editing or forgetting a note, list this group's current notes and use the entry's id and revision. Use the latest saved entry if an older chat differs. Keep passwords and keys out of notes.
 Use bot_send to write privately only when the user asks for a private reply. Share only what they ask you to send. The group's reply stays here.
 ${memory.isEmpty ? 'There are no saved notes for this group yet.' : 'Saved notes for this group:\n$memory'}
 </group_scope>''',
+  BrowserTools.rules,
   '<conversation_started>${botTime(now ?? DateTime.now())}</conversation_started>',
 ].join('\n\n');
 
@@ -361,7 +358,7 @@ String botInstructions(
       memoryNotes ?? botMemoryNotes(memory, self: self, people: people),
     ),
     botEvents,
-    if (bot.can(BotAbility.browser)) BrowserTools.rules,
+    BrowserTools.rules,
     '<conversation_started>${botTime(time)}</conversation_started>',
   ].join('\n\n');
 }

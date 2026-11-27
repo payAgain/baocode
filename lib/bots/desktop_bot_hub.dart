@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
 
 import '../chat/chat_session.dart';
+import '../l10n/l10n.dart';
 import '../link/chat_codec.dart';
+import '../settings/pages/settings_widgets.dart' show SettingsColors;
 import '../theme/app_theme.dart';
 import '../workspace/workspace.dart';
+import 'bot.dart';
 import 'bot_groups.dart';
 import 'bots.dart';
+import 'desktop_bot_editor_ui.dart';
 import 'desktop_bot_groups.dart';
 import 'desktop_bot_messages.dart';
 import 'desktop_bot_page.dart';
@@ -63,7 +67,7 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
 
   @override
   Widget build(BuildContext context) =>
-      Material(type: MaterialType.transparency, child: _panels());
+      Material(color: AppColors.conversationSurface, child: _panels());
 
   Widget _panels() => ListenableBuilder(
     listenable: Listenable.merge([widget.bots, widget.bots.groups]),
@@ -88,7 +92,7 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
                   ),
                 ),
                 if (_settingsOpen)
-                  const VerticalDivider(width: 1, thickness: 1),
+                  Container(width: 1, color: SettingsColors.divider),
                 if (_settingsOpen)
                   SizedBox(
                     key: const ValueKey('bot-settings-drawer'),
@@ -230,20 +234,82 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
         '${material.formatTimeOfDay(TimeOfDay.fromDateTime(local))}';
   }
 
+  Widget _avatarForConversation(BuildContext context, _Conversation row) {
+    if (row.group) {
+      return const BotAvatarBadge(
+        label: 'G',
+        icon: Icons.groups_outlined,
+        tint: Color(0xFF5E9BFF),
+        size: 38,
+      );
+    }
+    final bot = widget.bots.byId(row.id);
+    final emoji =
+        bot?.avatar != null &&
+            bot!.avatar!.isNotEmpty &&
+            !isAvatarImage(bot.avatar)
+        ? bot.avatar
+        : null;
+    return BotAvatarBadge(
+      label: row.name,
+      emoji: emoji,
+      icon: bot?.assistant == true ? Icons.smart_toy_outlined : null,
+      accent: bot?.assistant == true,
+      size: 38,
+    );
+  }
+
   Widget _row(BuildContext context, _Conversation row, bool zh) {
     final text = row.preview?.text ?? row.fallback;
+    final bot = row.group ? null : widget.bots.byId(row.id);
+    final tagLabel = row.group
+        ? (zh ? '群聊' : 'Group')
+        : (bot?.assistant == true ? (zh ? '助理' : 'Assistant') : null);
     return ListTile(
       key: ValueKey((row.group, row.id)),
-      leading: Icon(
-        row.group ? Icons.groups_outlined : Icons.chat_bubble_outline,
-      ),
-      title: Text(row.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: text.isEmpty
-          ? null
-          : Text(
-              text.replaceAll(RegExp(r'\s+'), ' ').trim(),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+      hoverColor: SettingsColors.hover,
+      leading: _avatarForConversation(context, row),
+      title: Row(
+        children: [
+          Flexible(
+            flex: 3,
+            child: Text(
+              row.name,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: SettingsColors.textPrimary,
+              ),
+            ),
+          ),
+          if (tagLabel != null) ...[
+            const SizedBox(width: 8),
+            Flexible(
+              fit: FlexFit.loose,
+              child: BotMetaPill(
+                label: tagLabel,
+                tone: row.group ? BotEditorTone.neutral : BotEditorTone.accent,
+              ),
+            ),
+          ],
+        ],
+      ),
+      subtitle: text.isEmpty
+          ? null
+          : Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                text.replaceAll(RegExp(r'\s+'), ' ').trim(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  color: SettingsColors.textSecondary,
+                ),
+              ),
             ),
       onTap: () => _show(row.group ? _Panel.groups : _Panel.chat, row.id),
       trailing: Row(
@@ -252,18 +318,24 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
           Column(
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.end,
+            spacing: 4,
             children: [
               if (row.preview case final preview?)
                 Text(
                   _formatTime(context, preview.at),
-                  style: Theme.of(context).textTheme.labelSmall,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    color: SettingsColors.textQuaternary,
+                  ),
                 ),
               if (row.unread > 0) Badge(label: Text('${row.unread}')),
             ],
           ),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 12),
-            child: Icon(Icons.chevron_right),
+          const SizedBox(width: 8),
+          Icon(
+            Icons.chevron_right,
+            size: 17,
+            color: SettingsColors.textQuaternary,
           ),
         ],
       ),
@@ -272,40 +344,239 @@ class _DesktopBotHubState extends State<DesktopBotHub> {
 
   Widget _list(BuildContext context) {
     final zh = Localizations.localeOf(context).languageCode == 'zh';
+    final conversations = _conversations();
+    final groupCount = widget.bots.groups.groups.length;
+    final botCount = widget.bots.bots.length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          child: Row(
-            children: [
-              BackButton(onPressed: widget.onBack),
-              const Expanded(
-                child: Text(
-                  'Bot',
-                  style: TextStyle(fontWeight: FontWeight.w600),
+        SizedBox(
+          height: 48,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              children: [
+                IconButton(
+                  tooltip: context.l10n.chatBack,
+                  style: botToolbarIconButtonStyle(context),
+                  onPressed: widget.onBack,
+                  icon: const BackButtonIcon(),
                 ),
-              ),
-              IconButton(
-                tooltip: zh ? '新建 Bot' : 'Create bot',
-                onPressed: () => _show(_Panel.settings),
-                icon: const Icon(Icons.person_add_alt_outlined),
-              ),
-            ],
+                const SizedBox(width: 8),
+                const BotAvatarBadge(
+                  label: 'Bot',
+                  icon: Icons.smart_toy_outlined,
+                  accent: true,
+                  size: 24,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Bot',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: SettingsColors.textPrimary,
+                    ),
+                  ),
+                ),
+                Tooltip(
+                  message: zh ? '新建 Bot' : 'Create bot',
+                  child: TextButton.icon(
+                    style: botEditorTonalButtonStyle(context),
+                    onPressed: () => _show(_Panel.settings),
+                    icon: const Icon(Icons.add, size: 16),
+                    label: Text(zh ? '新建 Bot' : 'New Bot'),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
-        Divider(height: 1, color: AppColors.partBorder),
+        Container(height: 1, color: SettingsColors.divider),
         Expanded(
           child: ListView(
-            padding: const EdgeInsets.symmetric(vertical: 8),
+            padding: const EdgeInsets.fromLTRB(24, 24, 24, 32),
             children: [
-              ListTile(
-                leading: const Icon(Icons.group_outlined),
-                title: Text(zh ? '群聊' : 'Group chats'),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => _show(_Panel.groups),
+              Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 780),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Wrap(
+                        spacing: 12,
+                        runSpacing: 10,
+                        alignment: WrapAlignment.spaceBetween,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                zh ? '我的 Bot 与群聊' : 'Bots & Group Chats',
+                                style: TextStyle(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w600,
+                                  color: SettingsColors.textPrimary,
+                                ),
+                              ),
+                              const SizedBox(height: 3),
+                              Text(
+                                zh
+                                    ? '管理私人助理、自定义 Bot 与多机器人协作群聊'
+                                    : 'Chat with your personal assistant, custom bots, and multi-bot groups',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: SettingsColors.textSecondary,
+                                ),
+                              ),
+                            ],
+                          ),
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: [
+                              BotMetaPill(
+                                label: zh ? '$botCount 个 Bot' : '$botCount bots',
+                                icon: Icons.smart_toy_outlined,
+                                tone: BotEditorTone.accent,
+                              ),
+                              BotMetaPill(
+                                label: zh
+                                    ? '$groupCount 个群聊'
+                                    : '$groupCount groups',
+                                icon: Icons.groups_outlined,
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+                      Material(
+                        color: SettingsColors.card,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          side: BorderSide(color: SettingsColors.stroke),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: ListTile(
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 6,
+                          ),
+                          hoverColor: SettingsColors.hover,
+                          leading: const BotAvatarBadge(
+                            label: 'G',
+                            icon: Icons.groups_outlined,
+                            tint: Color(0xFF5E9BFF),
+                            size: 38,
+                          ),
+                          title: Text(
+                            zh ? '群聊' : 'Group chats',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: SettingsColors.textPrimary,
+                            ),
+                          ),
+                          subtitle: Text(
+                            groupCount == 0
+                                ? (zh
+                                      ? '创建多机器人协作群聊'
+                                      : 'Create a shared chat with multiple bots')
+                                : (zh
+                                      ? '$groupCount 个活跃群聊'
+                                      : '$groupCount active group chats'),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              color: SettingsColors.textSecondary,
+                            ),
+                          ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (groupCount > 0) ...[
+                                BotMetaPill(label: '$groupCount'),
+                                const SizedBox(width: 8),
+                              ],
+                              Icon(
+                                Icons.chevron_right,
+                                size: 17,
+                                color: SettingsColors.textQuaternary,
+                              ),
+                            ],
+                          ),
+                          onTap: () => _show(_Panel.groups),
+                        ),
+                      ),
+                      const SizedBox(height: 22),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+                        child: Text(
+                          zh ? '最近对话' : 'Recent conversations',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: SettingsColors.textSecondary,
+                          ),
+                        ),
+                      ),
+                      if (conversations.isEmpty)
+                        Material(
+                          color: SettingsColors.card,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            side: BorderSide(color: SettingsColors.stroke),
+                          ),
+                          child: BotEmptyState(
+                            label: 'Bot',
+                            icon: Icons.smart_toy_outlined,
+                            title: zh ? '还没有对话' : 'No conversations yet',
+                            description: zh
+                                ? '创建一个 Bot 或发起群聊开始协作。'
+                                : 'Create a bot or start a group chat to begin.',
+                            action: FilledButton.icon(
+                              style: botEditorButtonStyle(context),
+                              onPressed: () => _show(_Panel.settings),
+                              icon: const Icon(Icons.add, size: 16),
+                              label: Text(zh ? '新建 Bot' : 'New Bot'),
+                            ),
+                          ),
+                        )
+                      else
+                        Material(
+                          color: SettingsColors.card,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            side: BorderSide(color: SettingsColors.stroke),
+                          ),
+                          clipBehavior: Clip.antiAlias,
+                          child: Column(
+                            children: [
+                              for (var i = 0; i < conversations.length; i++) ...[
+                                _row(context, conversations[i], zh),
+                                if (i < conversations.length - 1)
+                                  Container(
+                                    height: 1,
+                                    margin: const EdgeInsetsDirectional.only(
+                                      start: 66,
+                                    ),
+                                    color: SettingsColors.divider,
+                                  ),
+                              ],
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
               ),
-              for (final row in _conversations()) _row(context, row, zh),
             ],
           ),
         ),

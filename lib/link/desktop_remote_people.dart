@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import '../bots/desktop_bot_editor_ui.dart';
 import '../bots/desktop_bot_memory.dart';
 import '../chat/chat_models.dart' show ImageAttachment;
+import '../settings/pages/settings_widgets.dart' show SettingsColors;
 import '../theme/app_theme.dart';
 import '../workspace/window_controls.dart';
 
@@ -616,23 +617,25 @@ class _DesktopRemotePeopleManagerState extends State<_BoundPeopleManager> {
       close: widget.options.onClose == null
           ? null
           : IconButton(
+              style: botToolbarIconButtonStyle(context),
               tooltip: widget.options.compact
                   ? _tr('Back to workspace', '返回工作区')
                   : _tr('Close settings', '关闭设置'),
               onPressed: _close,
               icon: Icon(
                 widget.options.compact ? Icons.arrow_back : Icons.close,
+                size: 18,
               ),
             ),
       status: problem == null && notice == null
           ? null
           : Semantics(
               liveRegion: true,
-              child: Text(
-                problem == null ? notice! : _errorText(problem),
-                style: problem == null
-                    ? null
-                    : TextStyle(color: Theme.of(context).colorScheme.error),
+              child: BotEditorNotice(
+                message: problem == null ? notice! : _errorText(problem),
+                tone: problem == null
+                    ? BotEditorTone.accent
+                    : BotEditorTone.danger,
               ),
             ),
     );
@@ -643,13 +646,48 @@ class _DesktopRemotePeopleManagerState extends State<_BoundPeopleManager> {
     final editor = _PeopleEditors(this);
     if (_peer == null || catalog == null) {
       return _catalogView(switch ((_peer, _busy)) {
-        (null, _) => Text(_errorText(_PeopleProblem.offline)),
-        (_, true) => Text(_tr('Loading host settings…', '正在加载主机设置…')),
-        _ => OutlinedButton(
-          onPressed: () => _run((peer) async {
-            await _readCatalog(peer);
-          }),
-          child: Text(_tr('Refresh', '刷新')),
+        (null, _) => BotEditorNotice(
+          message: _errorText(_PeopleProblem.offline),
+          tone: BotEditorTone.warning,
+        ),
+        (_, true) => BotEditorSection(
+          title: _tr('Status', '连接状态'),
+          children: [
+            Row(
+              children: [
+                const SizedBox.square(
+                  dimension: 15,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    _tr('Loading host settings…', '正在加载主机设置…'),
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: SettingsColors.textSecondary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        _ => BotEditorSection(
+          title: _tr('Status', '连接状态'),
+          children: [
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: OutlinedButton.icon(
+                style: botEditorOutlinedButtonStyle(context),
+                onPressed: () => _run((peer) async {
+                  await _readCatalog(peer);
+                }),
+                icon: const Icon(Icons.refresh, size: 16),
+                label: Text(_tr('Refresh', '刷新')),
+              ),
+            ),
+          ],
         ),
       });
     }
@@ -667,12 +705,19 @@ class _DesktopRemotePeopleManagerState extends State<_BoundPeopleManager> {
               title: review.title,
               danger: true,
               children: [
-                Text(review.detail),
+                Text(
+                  review.detail,
+                  style: TextStyle(
+                    fontSize: 13,
+                    height: 1.5,
+                    color: SettingsColors.textSecondary,
+                  ),
+                ),
                 BotEditorActions(
                   children: [
                     OutlinedButton(
                       autofocus: true,
-                      style: botEditorButtonStyle(context),
+                      style: botEditorOutlinedButtonStyle(context),
                       onPressed: _cancelReview,
                       child: Text(_tr('Cancel', '取消')),
                     ),
@@ -711,9 +756,4 @@ Widget _section(List<Widget> children) => Column(
     for (final widget in children)
       Padding(padding: const EdgeInsets.only(bottom: 10), child: widget),
   ],
-);
-
-Widget _heading(String text) => Builder(
-  builder: (context) =>
-      Text(text, style: Theme.of(context).textTheme.titleSmall),
 );

@@ -264,11 +264,10 @@ class BotMemoryManagement {
       return {
         'private': true,
         'projects': [
-          if (bot.can(BotAbility.agents))
-            for (final project in bots.workspace.sidebarProjects)
-              if (bots.workspace.localProjectId(project) case final id?)
-                if (bots.projectFactAccess(bot.id, id) != null)
-                  {'id': id, 'name': project.name},
+          for (final project in bots.workspace.sidebarProjects)
+            if (bots.workspace.localProjectId(project) case final id?)
+              if (bots.projectFactAccess(bot.id, id) != null)
+                {'id': id, 'name': project.name},
         ],
       };
     }

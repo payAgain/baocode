@@ -21,6 +21,7 @@ import 'package:baocode/chat/chat_session.dart' show ComposerMessage;
 import 'package:baocode/kernel/agent_kernel.dart';
 import 'package:baocode/kernel/claude_code/claude_code_kernel.dart';
 import 'package:baocode/kernel/claude_code/claude_code_transport.dart';
+import 'package:baocode/kernel/claude_code/claude_sdk_tools.dart';
 import 'package:baocode/kernel/claude_code/mock_claude_code_transport.dart';
 import 'package:baocode/workspace/preference_store.dart';
 import 'package:baocode/workspace/workspace.dart';
@@ -776,7 +777,7 @@ void main() {
     expect(note, isNot(contains('x' * 501)));
   });
 
-  test('private and each group have separate workers, prompts, and tools', () {
+  test('private and each group have separate prompts and full tools', () {
     final group = groups.save(name: '江湖', members: [mia.id, leo.id]);
     final other = groups.save(name: '别处', members: [mia.id]);
     bots.setMemory(mia, 'private-only note');
@@ -796,20 +797,88 @@ void main() {
     expect(room.instructions, contains('<group_chats>'));
     expect(room.instructions, isNot(contains('private-only note')));
     expect(room.instructions, isNot(contains('/bots/WORLD.md')));
-    expect(room.tools, isEmpty);
-    expect(room.userServers, isFalse);
-    expect(bots.offersTool(first.project.path, 'session_read'), isFalse);
+    for (final worker in [setup, room]) {
+      expect(worker.tools, isNull);
+      expect(worker.userServers, isTrue);
+      expect(worker.approvesAll, isTrue);
+    }
+    expect(bots.offersTool(first.project.path, 'session_read'), isTrue);
     expect(bots.offersTool(first.project.path, 'bot_history'), isTrue);
     expect(bots.offersTool(mia.folder, 'bot_history'), isFalse);
     // The world they share: everyone, and who is in which group.
     final world = utf8.decode(folders.files['/bots/WORLD.md']!);
     expect(world, contains('- Mia'));
-    expect(world, contains('[only chats]'));
+    expect(
+      world,
+      contains('[works on the computer, uses the browser, manages agents]'),
+    );
     expect(
       world,
       contains('- "江湖": 用户, Mia, Leo. Its chat: ${groups.chatFile(group.id)}'),
     );
   });
+
+  test(
+    'active workers can read a temporary file with a BaoCode tool',
+    () async {
+      final room = groups.save(name: 'Work', members: [mia.id, leo.id]);
+      final worker = bots.threadFor(mia, group: room.id).project.path;
+      final dm = bots.threadFor(mia).project.path;
+      final directory = Directory.systemTemp.createTempSync('bot-tool-read');
+      addTearDown(() => directory.deleteSync(recursive: true));
+      final file = File(p.join(directory.path, 'example.txt'));
+      file.writeAsStringSync('dummy tool fixture');
+      const reader = 'test_read_fixture';
+      ClaudeSdkTools.register(
+        ClaudeSdkTool(
+          name: reader,
+          description: 'Reads the test fixture.',
+          inputSchema: const {'type': 'object'},
+          run: (input, call) => file.readAsString(),
+        ),
+      );
+      addTearDown(() => ClaudeSdkTools.unregister(reader));
+
+      Future<Map> call(
+        String cwd,
+        String tool, [
+        Map<String, Object?> input = const {},
+      ]) async {
+        final reply = await ClaudeSdkTools.handle({
+          'method': 'tools/call',
+          'id': 1,
+          'params': {'name': tool, 'arguments': input},
+        }, ClaudeSdkCall(cwd: cwd));
+        return reply['result'] as Map;
+      }
+
+      for (final cwd in [dm, worker]) {
+        expect((await call(cwd, reader))['content'], [
+          {'type': 'text', 'text': 'dummy tool fixture'},
+        ]);
+        expect((await call(cwd, 'session_list'))['isError'], isNot(isTrue));
+      }
+      for (final (tool, input) in <(String, Map<String, Object?>)>[
+        ('bot_list_bots', {}),
+        ('bot_later', {'seconds': 60, 'note': 'Start a private turn'}),
+        ('bot_remember', {'about': 'self', 'text': 'Private note'}),
+        ('bot_edit_me', {'picture': 'received/image-1.png'}),
+      ]) {
+        expect((await call(worker, tool, input))['isError'], isTrue);
+      }
+      expect(bots.laters(mia), isEmpty);
+
+      final oldSetup = workspace.agentSetup!(worker)!.workspace();
+      groups.save(id: room.id, name: room.name, members: [leo.id]);
+      final inactive = workspace.agentSetup!(worker)!.workspace();
+      expect(inactive.tools, isEmpty);
+      expect(inactive.userServers, isFalse);
+      expect(inactive.approvesAll, isFalse);
+      expect(() => oldSetup.instructions, throwsStateError);
+      expect((await call(worker, reader))['isError'], isTrue);
+      expect((await call(worker, 'session_list'))['isError'], isTrue);
+    },
+  );
 
   for (final inGroup in [false, true]) {
     test(

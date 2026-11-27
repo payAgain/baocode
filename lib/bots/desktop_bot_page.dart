@@ -9,17 +9,20 @@ import '../chat/chat_session.dart';
 import '../chat/composer/composer.dart';
 import '../chat/stop_confirmation.dart';
 import '../chat/widgets/image_thumbnails.dart';
+import '../chat/widgets/scroll_edge_fade.dart';
 import '../chat/widgets/user_message_bubble.dart';
 import '../kernel/kernel_types.dart' show KernelHealthStatus;
 import '../keybindings/chat_keybindings.dart';
 import '../l10n/l10n.dart';
 import '../link/bot_memory_management.dart';
+import '../settings/pages/settings_widgets.dart' show SettingsColors;
 import '../theme/app_theme.dart';
 import '../workspace/editor_launcher.dart' show openExternal;
 import '../workspace/session_tools.dart';
 import '../workspace/workspace.dart';
 import 'bot.dart';
 import 'bots.dart';
+import 'desktop_bot_editor_ui.dart';
 import 'desktop_bot_message_row.dart';
 import 'desktop_bot_messages.dart';
 
@@ -224,86 +227,147 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
         }
       });
     }
+    final zh = Localizations.localeOf(context).languageCode == 'zh';
+    final botEmoji =
+        bot?.avatar != null &&
+            bot!.avatar!.isNotEmpty &&
+            !isAvatarImage(bot.avatar)
+        ? bot.avatar
+        : null;
+    Widget headerAvatar(double size) => BotAvatarBadge(
+      label: bot?.name ?? 'Bot',
+      emoji: botEmoji,
+      icon: bot?.assistant == true ? Icons.smart_toy_outlined : null,
+      accent: bot?.assistant == true,
+      size: size,
+    );
     return Material(
       color: AppColors.conversationSurface,
       child: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(6, 4, 18, 4),
+            padding: const EdgeInsets.fromLTRB(10, 8, 16, 8),
             child: Row(
               children: [
                 IconButton(
                   tooltip: l10n.chatBack,
+                  style: botToolbarIconButtonStyle(context),
                   onPressed: widget.onBack,
                   icon: const BackButtonIcon(),
                 ),
-                const SizedBox(width: 6),
+                const SizedBox(width: 8),
+                if (bot != null) ...[
+                  headerAvatar(32),
+                  const SizedBox(width: 10),
+                ],
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
                         bot?.name ?? l10n.chatConversation,
                         style: TextStyle(
-                          color: AppColors.textPrimary,
+                          fontSize: 14,
+                          color: SettingsColors.textPrimary,
                           fontWeight: FontWeight.w600,
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      if (bot != null)
-                        Text(
-                          [
-                            l10n.desktopBotPrivateChat,
-                            if (bot.signature.isNotEmpty) bot.signature,
-                          ].join(' · '),
-                          style: TextStyle(
-                            color: AppColors.textMuted,
-                            fontSize: 12,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                      if (bot != null) ...[
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            Flexible(
+                              fit: FlexFit.loose,
+                              child: BotMetaPill(
+                                label: l10n.desktopBotPrivateChat,
+                                tone: BotEditorTone.accent,
+                              ),
+                            ),
+                            if (bot.signature.isNotEmpty) ...[
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  bot.signature,
+                                  style: TextStyle(
+                                    color: SettingsColors.textSecondary,
+                                    fontSize: 12,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
+                      ],
                     ],
                   ),
                 ),
-                if (bot != null && archives.isNotEmpty)
+                if (bot != null && archives.isNotEmpty) ...[
                   PopupMenuButton<AgentThread>(
-                    tooltip:
-                        Localizations.localeOf(context).languageCode == 'zh'
+                    tooltip: zh
                         ? '继续归档对话'
                         : 'Resume archived conversation',
-                    icon: const Icon(Icons.history),
+                    icon: const Icon(Icons.history, size: 17),
+                    iconColor: SettingsColors.textSecondary,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 30,
+                      height: 30,
+                    ),
+                    color: AppColors.surfaceRaised,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      side: BorderSide(color: SettingsColors.stroke),
+                    ),
                     onSelected: (thread) =>
                         _activateArchived(bot, session, thread),
                     itemBuilder: (context) => [
                       for (final thread in archives)
                         PopupMenuItem(
                           value: thread,
-                          child: Text(thread.localizedTitle(l10n)),
+                          child: Row(
+                            children: [
+                              Icon(
+                                Icons.history,
+                                size: 15,
+                                color: SettingsColors.textSecondary,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  thread.localizedTitle(l10n),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                     ],
                   ),
+                  const SizedBox(width: 6),
+                ],
                 if (widget.onSettings != null && bot != null)
                   TextButton.icon(
+                    style: botEditorTonalButtonStyle(context),
                     onPressed: widget.onSettings,
-                    icon: const Icon(Icons.tune, size: 18),
-                    label: Text(
-                      Localizations.localeOf(context).languageCode == 'zh'
-                          ? 'Bot 设置'
-                          : 'Bot settings',
-                    ),
+                    icon: const Icon(Icons.tune, size: 15),
+                    label: Text(zh ? 'Bot 设置' : 'Bot settings'),
                   ),
               ],
             ),
           ),
-          Divider(height: 1, color: AppColors.partBorder),
+          Container(height: 1, color: SettingsColors.divider),
           Expanded(
             child: loading
                 ? Center(
                     child: Text(
                       l10n.chatLoadingHistory,
-                      style: TextStyle(color: AppColors.textMuted),
+                      style: TextStyle(color: SettingsColors.textSecondary),
                     ),
                   )
                 : session == null || bot == null
@@ -311,10 +375,25 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
                 : _history(context, bot, session),
           ),
           if (session?.health.status == KernelHealthStatus.failed)
-            TextButton.icon(
-              onPressed: session!.restart,
-              icon: const Icon(Icons.error_outline),
-              label: Text(l10n.healthRetry),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
+              child: _centered(
+                BotEditorNotice(
+                  tone: BotEditorTone.danger,
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: TextButton.icon(
+                      style: botEditorTonalButtonStyle(
+                        context,
+                        destructive: true,
+                      ),
+                      onPressed: session!.restart,
+                      icon: const Icon(Icons.refresh, size: 15),
+                      label: Text(l10n.healthRetry),
+                    ),
+                  ),
+                ),
+              ),
             ),
           if (bot != null && session != null)
             _centered(
@@ -373,63 +452,144 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
       hasEarlier: false,
     );
     final earlier = session.hasEarlierHistory || _loadingArchived;
+    final emoji =
+        bot.avatar != null &&
+            bot.avatar!.isNotEmpty &&
+            !isAvatarImage(bot.avatar)
+        ? bot.avatar
+        : null;
     if (messages.isEmpty && !earlier) {
-      return Center(
-        child: Icon(Icons.chat_bubble_outline, color: AppColors.textFaint),
+      return BotEmptyState(
+        label: bot.name,
+        emoji: emoji,
+        icon: bot.assistant ? Icons.smart_toy_outlined : null,
+        title: bot.name,
+        description: bot.signature.isNotEmpty
+            ? bot.signature
+            : _tr(
+                'Start a private conversation with ${bot.name}.',
+                '开始与 ${bot.name} 私聊。',
+              ),
       );
     }
     return SelectionArea(
-      child: ListView.builder(
-        controller: _scroll,
-        reverse: true,
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        itemCount: messages.length + (earlier ? 1 : 0),
-        itemBuilder: (context, index) => _centered(
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 4),
-            child: index == messages.length
-                ? Center(
-                    child: TextButton(
-                      onPressed: session.loadingEarlier
-                          ? null
-                          : () => unawaited(session.loadEarlier()),
-                      child: Text(
-                        session.loadingEarlier
-                            ? context.l10n.chatLoadingHistory
-                            : context.l10n.chatLoadEarlier,
+      child: ScrollEdgeFade(
+        child: ListView.builder(
+          controller: _scroll,
+          reverse: true,
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          itemCount: messages.length + (earlier ? 1 : 0),
+          itemBuilder: (context, index) => _centered(
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 18),
+              child: index == messages.length
+                  ? Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Center(
+                        child: TextButton(
+                          style: botEditorTonalButtonStyle(context),
+                          onPressed: session.loadingEarlier
+                              ? null
+                              : () => unawaited(session.loadEarlier()),
+                          child: Text(
+                            session.loadingEarlier
+                                ? context.l10n.chatLoadingHistory
+                                : context.l10n.chatLoadEarlier,
+                          ),
+                        ),
                       ),
-                    ),
-                  )
-                : _message(context, messages[messages.length - index - 1]),
+                    )
+                  : _buildMessageAt(context, bot, emoji, messages, index),
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _message(BuildContext context, DesktopBotMessage message) {
+  Widget _buildMessageAt(
+    BuildContext context,
+    Bot bot,
+    String? emoji,
+    List<DesktopBotMessage> messages,
+    int reverseIndex,
+  ) {
+    final i = messages.length - reverseIndex - 1;
+    final message = messages[i];
+    final prev = i > 0 ? messages[i - 1] : null;
+    final isUser = message.kind == DesktopBotMessageKind.user;
+    final prevIsUser = prev?.kind == DesktopBotMessageKind.user;
+    final grouped = shouldGroupBotMessage(
+      sameSender:
+          prev != null &&
+          prev.kind != DesktopBotMessageKind.chat &&
+          message.kind != DesktopBotMessageKind.chat &&
+          isUser == prevIsUser,
+      previousAt: prev?.sentAt,
+      currentAt: message.sentAt,
+    );
+    return _message(
+      context,
+      bot,
+      emoji,
+      message,
+      grouped: grouped,
+    );
+  }
+
+  Widget _message(
+    BuildContext context,
+    Bot bot,
+    String? emoji,
+    DesktopBotMessage message, {
+    bool grouped = false,
+  }) {
     if (message.kind == DesktopBotMessageKind.chat) {
       final thread = _projectChat(message.text);
       if (thread == null) return const SizedBox.shrink();
-      return Align(
-        alignment: AlignmentDirectional.centerStart,
-        child: OutlinedButton.icon(
-          onPressed: () {
-            if (_projectChat(message.text) case final current?) {
-              widget.onOpenChat(SessionTools.idOf(current));
-            }
-          },
-          icon: const Icon(Icons.chat_bubble_outline, size: 16),
-          label: Text(
-            thread.localizedTitle(context.l10n),
-            overflow: TextOverflow.ellipsis,
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: OutlinedButton.icon(
+            style: botEditorOutlinedButtonStyle(context),
+            onPressed: () {
+              if (_projectChat(message.text) case final current?) {
+                widget.onOpenChat(SessionTools.idOf(current));
+              }
+            },
+            icon: const Icon(Icons.chat_bubble_outline, size: 15),
+            label: Text(
+              thread.localizedTitle(context.l10n),
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
         ),
       );
     }
+    final isUser = message.kind == DesktopBotMessageKind.user;
+    final recallStyle = botEditorTonalButtonStyle(context).copyWith(
+      minimumSize: const WidgetStatePropertyAll(Size(0, 28)),
+      padding: const WidgetStatePropertyAll(
+        EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      ),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    );
     return DesktopBotMessageRow(
-      mine: message.kind == DesktopBotMessageKind.user,
+      mine: isUser,
+      sender: isUser ? null : bot.name,
+      avatar: isUser
+          ? null
+          : BotAvatarBadge(
+              label: bot.name,
+              emoji: emoji,
+              icon: bot.assistant ? Icons.smart_toy_outlined : null,
+              accent: bot.assistant,
+              size: 28,
+            ),
       sentAt: message.sentAt,
+      grouped: grouped,
+      bare: message.textWithAttachments != null,
       content: [
         if (message.textWithAttachments case final text?)
           UserMessageBubble(text: text)
@@ -441,9 +601,11 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
         if (message.recallSources case final recall?)
           Wrap(
             spacing: 8,
+            runSpacing: 6,
             children: [
               for (final sequence in recall.sequences)
                 TextButton(
+                  style: recallStyle,
                   onPressed: () =>
                       unawaited(_openRecallSource(recall.delivery, sequence)),
                   child: Text(_tr('Source #$sequence', '原话 #$sequence')),
@@ -453,8 +615,9 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
         if (message.queued)
           Text(
             context.l10n.queuedMessages(1),
-            style: Theme.of(context).textTheme.labelMedium
-                ?.copyWith(color: AppColors.textMuted),
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+              color: SettingsColors.textSecondary,
+            ),
           ),
       ],
       media: message.images.isEmpty && message.imageUrl == null
@@ -466,9 +629,10 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
                   ImageThumbnails(images: message.images),
                 if (message.imageUrl case final url?)
                   TextButton.icon(
+                    style: recallStyle,
                     // External content loads only when the user opens it.
                     onPressed: () => unawaited(openExternal(url.toString())),
-                    icon: const Icon(Icons.image_outlined, size: 16),
+                    icon: const Icon(Icons.image_outlined, size: 15),
                     label: Text(context.l10n.fileLinkOpenInBrowser),
                   ),
               ],
@@ -494,36 +658,85 @@ class _DesktopBotPageState extends State<DesktopBotPage> with ChatKeyTarget {
           final available =
               window != null &&
               bots.canOpenGroupRecallSource(bot, delivery, sequence);
-          return AlertDialog(
-            title: Text(
-              available
-                  ? '${bots.groups.byId(group!)!.name} · #$sequence'
-                  : _tr('Source message unavailable', '原话已不可用'),
-            ),
-            content: available
-                ? SizedBox(
-                    width: 560,
+          return BotModernDialog(
+            width: 560,
+            icon: Icons.format_quote_outlined,
+            title: available
+                ? '${bots.groups.byId(group!)!.name} · #$sequence'
+                : _tr('Source message unavailable', '原话已不可用'),
+            body: available
+                ? Material(
+                    color: SettingsColors.card,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(color: SettingsColors.stroke),
+                    ),
+                    clipBehavior: Clip.antiAlias,
                     child: SelectionArea(
-                      child: ListView(
-                        shrinkWrap: true,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          for (final message in [
-                            ...window.before,
-                            window.anchor,
-                            ...window.after,
-                          ])
-                            ListTile(
-                              selected: identical(message, window.anchor),
-                              title: Text(message.text),
-                              subtitle: Text('#${message.sequence}'),
+                          for (final (i, message)
+                              in [
+                                ...window.before,
+                                window.anchor,
+                                ...window.after,
+                              ].indexed) ...[
+                            if (i > 0)
+                              Container(
+                                height: 1,
+                                color: SettingsColors.divider,
+                              ),
+                            ColoredBox(
+                              color: identical(message, window.anchor)
+                                  ? AppColors.accent.withValues(alpha: 0.12)
+                                  : Colors.transparent,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 10,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  spacing: 4,
+                                  children: [
+                                    BotMetaPill(
+                                      label: '#${message.sequence}',
+                                      tone: identical(message, window.anchor)
+                                          ? BotEditorTone.accent
+                                          : BotEditorTone.neutral,
+                                    ),
+                                    Text(
+                                      message.text,
+                                      style: TextStyle(
+                                        fontSize: 13.5,
+                                        height: 1.5,
+                                        color: SettingsColors.textPrimary,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ),
+                          ],
                         ],
                       ),
                     ),
                   )
-                : null,
+                : Text(
+                    _tr(
+                      'This referenced group message is no longer available.',
+                      '引用的群聊原话已不存在或无法查看。',
+                    ),
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      color: SettingsColors.textSecondary,
+                    ),
+                  ),
             actions: [
               TextButton(
+                style: botEditorTonalButtonStyle(dialog),
                 onPressed: () => Navigator.pop(dialog),
                 child: Text(MaterialLocalizations.of(dialog).closeButtonLabel),
               ),

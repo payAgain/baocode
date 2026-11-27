@@ -116,6 +116,7 @@ class DesktopHostChats extends ChangeNotifier {
   List<DesktopHostChat> _chats = const [];
   Map<String, String?> _botSessions = const {};
   Map<String, LinkBot> _bots = const {};
+  LinkBot? botById(String id) => _bots[id];
   DesktopHostChat? _selected;
   _HostView? _view;
   DesktopHostChat? _unlistedDraft;

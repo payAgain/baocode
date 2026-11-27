@@ -564,9 +564,18 @@ class BotEditorMemberTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => CheckboxListTile(
-    contentPadding: EdgeInsets.zero,
+    dense: true,
+    contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
     controlAffinity: ListTileControlAffinity.leading,
-    title: Text(member.name),
+    title: Text(
+      member.name,
+      style: TextStyle(
+        fontSize: 13.5,
+        fontWeight: FontWeight.w500,
+        color: SettingsColors.textPrimary,
+      ),
+    ),
     value: selected,
     onChanged: onChanged == null
         ? null
@@ -599,6 +608,18 @@ class BotEditorLeadPicker extends StatelessWidget {
       child: DropdownButton<String>(
         key: pickerKey,
         isExpanded: true,
+        isDense: true,
+        dropdownColor: AppColors.surfaceRaised,
+        borderRadius: BorderRadius.circular(10),
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+          fontSize: 13.5,
+          color: SettingsColors.textPrimary,
+        ),
+        icon: Icon(
+          Icons.keyboard_arrow_down_rounded,
+          size: 18,
+          color: SettingsColors.textSecondary,
+        ),
         value: members.any((member) => member.id == lead) ? lead : '',
         items: [
           DropdownMenuItem(value: '', child: Text(defaultLabel)),
@@ -645,10 +666,55 @@ ButtonStyle botEditorButtonStyle(
       fontSize: 13,
       fontWeight: FontWeight.w600,
     ),
-    backgroundColor: destructive ? colors.error : null,
-    foregroundColor: destructive ? colors.onError : null,
+    backgroundColor: destructive
+        ? colors.error
+        : themeColors['button.background'],
+    foregroundColor: destructive
+        ? colors.onError
+        : themeColors['button.foreground'],
   );
 }
+
+/// Bordered hairline secondary action style matching BaoCode's desktop palette.
+ButtonStyle botEditorOutlinedButtonStyle(
+  BuildContext context, {
+  bool destructive = false,
+}) {
+  final theme = Theme.of(context);
+  final colors = theme.colorScheme;
+  return OutlinedButton.styleFrom(
+    minimumSize: const Size(68, 34),
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+    backgroundColor: destructive
+        ? colors.error.withValues(alpha: 0.08)
+        : _surfaceMix(0.045, AppColors.surface),
+    foregroundColor: destructive ? colors.error : SettingsColors.textPrimary,
+    side: BorderSide(
+      color: destructive
+          ? colors.error.withValues(alpha: 0.32)
+          : SettingsColors.stroke,
+    ),
+    textStyle: theme.textTheme.labelLarge?.copyWith(
+      fontSize: 13,
+      fontWeight: FontWeight.w500,
+    ),
+  );
+}
+
+/// Compact hover-tinted toolbar icon button style for Bot/chat headers.
+ButtonStyle botToolbarIconButtonStyle(
+  BuildContext context, {
+  double size = 30,
+}) => IconButton.styleFrom(
+  minimumSize: Size.square(size),
+  fixedSize: Size.square(size),
+  padding: EdgeInsets.zero,
+  foregroundColor: SettingsColors.textSecondary,
+  hoverColor: SettingsColors.hover,
+  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(7)),
+);
 
 /// Borderless soft-tonal secondary action style for desktop panels & footers.
 ButtonStyle botEditorTonalButtonStyle(
@@ -1023,6 +1089,7 @@ class BotEditorNavTile extends StatelessWidget {
     this.onTap,
     this.trailing,
     this.tint,
+    this.leading,
   });
 
   final IconData icon;
@@ -1031,14 +1098,13 @@ class BotEditorNavTile extends StatelessWidget {
   final VoidCallback? onTap;
   final Widget? trailing;
   final Color? tint;
+  final Widget? leading;
 
   @override
   Widget build(BuildContext context) {
     final enabled = onTap != null;
     final color = tint ?? AppColors.accent;
-    final iconColor = enabled
-        ? color
-        : SettingsColors.textQuaternary;
+    final iconColor = enabled ? color : SettingsColors.textQuaternary;
     return Material(
       type: MaterialType.transparency,
       child: InkWell(
@@ -1049,16 +1115,17 @@ class BotEditorNavTile extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 9),
           child: Row(
             children: [
-              DecoratedBox(
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: enabled ? 0.14 : 0.06),
-                  borderRadius: BorderRadius.circular(9),
-                ),
-                child: SizedBox.square(
-                  dimension: 34,
-                  child: Icon(icon, size: 17, color: iconColor),
-                ),
-              ),
+              leading ??
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: enabled ? 0.14 : 0.06),
+                      borderRadius: BorderRadius.circular(9),
+                    ),
+                    child: SizedBox.square(
+                      dimension: 34,
+                      child: Icon(icon, size: 17, color: iconColor),
+                    ),
+                  ),
               const SizedBox(width: 11),
               Expanded(
                 child: Column(
@@ -1480,13 +1547,241 @@ class BotEditorDangerButton extends StatelessWidget {
   Widget build(BuildContext context) => Align(
     alignment: AlignmentDirectional.centerStart,
     child: OutlinedButton.icon(
-      style: OutlinedButton.styleFrom(
-        foregroundColor: Theme.of(context).colorScheme.error,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      ),
+      style: botEditorOutlinedButtonStyle(context, destructive: true),
       onPressed: onPressed,
       icon: Icon(icon, size: 17),
       label: Text(label),
+    ),
+  );
+}
+
+const _botAvatarPalette = [
+  Color(0xFF5E9BFF),
+  Color(0xFF4EC9B0),
+  Color(0xFFC586C0),
+  Color(0xFFE59866),
+  Color(0xFF73C991),
+];
+
+/// Deterministically picks a soft accent tint for a Bot or group identity.
+Color botTintForKey(String key, {bool accent = false}) {
+  final normalized = key.trim();
+  if (accent || normalized.isEmpty) return AppColors.accent;
+  var hash = 0;
+  for (final code in normalized.codeUnits) {
+    hash = (hash * 31 + code) & 0x7FFFFFFF;
+  }
+  final palette = [AppColors.accent, ..._botAvatarPalette];
+  return palette[hash % palette.length];
+}
+
+/// Rounded-square tinted avatar badge displaying a child image, emoji, icon,
+/// or fallback initial letter.
+class BotAvatarBadge extends StatelessWidget {
+  const BotAvatarBadge({
+    super.key,
+    required this.label,
+    this.emoji,
+    this.icon,
+    this.child,
+    this.tint,
+    this.size = 36,
+    this.accent = false,
+  });
+
+  final String label;
+  final String? emoji;
+  final IconData? icon;
+  final Widget? child;
+  final Color? tint;
+  final double size;
+  final bool accent;
+
+  @override
+  Widget build(BuildContext context) {
+    final resolvedTint = tint ?? botTintForKey(label, accent: accent);
+    final radius = (size * 0.28).clamp(6.0, 14.0);
+    final cleanEmoji = emoji?.trim();
+    final initial = label.trim().characters.firstOrNull?.toUpperCase() ?? '?';
+
+    Widget inner;
+    if (child != null) {
+      inner = SizedBox.square(dimension: size, child: child);
+    } else if (cleanEmoji != null && cleanEmoji.isNotEmpty) {
+      inner = Text(
+        cleanEmoji,
+        maxLines: 1,
+        style: TextStyle(fontSize: size * 0.48, height: 1.1),
+      );
+    } else if (icon != null) {
+      inner = Icon(icon, size: size * 0.5, color: resolvedTint);
+    } else {
+      inner = Text(
+        initial,
+        maxLines: 1,
+        style: TextStyle(
+          fontSize: size * 0.42,
+          fontWeight: FontWeight.w600,
+          color: resolvedTint,
+        ),
+      );
+    }
+
+    return ExcludeSemantics(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              resolvedTint.withValues(alpha: 0.2),
+              resolvedTint.withValues(alpha: 0.08),
+            ],
+          ),
+          borderRadius: BorderRadius.circular(radius),
+          border: Border.all(color: resolvedTint.withValues(alpha: 0.28)),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(radius),
+          child: SizedBox.square(
+            dimension: size,
+            child: Center(child: inner),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact pill badge for Bot/Group role, channel type, or live status.
+class BotMetaPill extends StatelessWidget {
+  const BotMetaPill({
+    super.key,
+    required this.label,
+    this.icon,
+    this.dotColor,
+    this.tone = BotEditorTone.neutral,
+  });
+
+  final String label;
+  final IconData? icon;
+  final Color? dotColor;
+  final BotEditorTone tone;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = _tonePalette(context, tone);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: palette.background,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: palette.border),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (dotColor case final color?) ...[
+              SizedBox.square(
+                dimension: 6,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: color,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 5),
+            ] else if (icon case final iconData?) ...[
+              Icon(iconData, size: 12, color: palette.foreground),
+              const SizedBox(width: 4),
+            ],
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                  color: palette.foreground,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Centered desktop empty state card with avatar/icon badge and optional action.
+class BotEmptyState extends StatelessWidget {
+  const BotEmptyState({
+    super.key,
+    required this.label,
+    required this.title,
+    this.emoji,
+    this.icon,
+    this.child,
+    this.tint,
+    this.description,
+    this.action,
+  });
+
+  final String label;
+  final String title;
+  final String? emoji;
+  final IconData? icon;
+  final Widget? child;
+  final Color? tint;
+  final String? description;
+  final Widget? action;
+
+  @override
+  Widget build(BuildContext context) => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(24),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 360),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            BotAvatarBadge(
+              label: label,
+              emoji: emoji,
+              icon: icon,
+              tint: tint,
+              size: 52,
+              child: child,
+            ),
+            const SizedBox(height: 14),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: SettingsColors.textPrimary,
+              ),
+            ),
+            if (description case final text? when text.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                text,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  height: 1.5,
+                  color: SettingsColors.textSecondary,
+                ),
+              ),
+            ],
+            if (action != null) ...[const SizedBox(height: 16), action!],
+          ],
+        ),
+      ),
     ),
   );
 }

@@ -40,8 +40,7 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
   final _style = TextEditingController();
   Bot? _initial;
   BotAvatarImage? _picture;
-  final _abilities = <BotAbility>{};
-  bool _chatOnly = false;
+  bool _monitorsAgentActivity = false;
   bool _writesFirst = true;
   String? _error;
 
@@ -70,10 +69,7 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
     _signature.text = bot?.signature ?? '';
     _identity.text = bot?.identity ?? '';
     _style.text = bot?.style ?? '';
-    _abilities
-      ..clear()
-      ..addAll(bot?.abilities ?? const {});
-    _chatOnly = bot?.chatOnly ?? false;
+    _monitorsAgentActivity = bot?.can(BotAbility.proactive) ?? false;
     _writesFirst = bot?.writesFirst ?? true;
   }
 
@@ -118,6 +114,16 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
     T edited<T>(T draft, T? original, T? latest) =>
         latest != null && draft == original ? latest : draft;
 
+    // Keep the stored tool abilities for compatibility with existing callers.
+    final abilities = {...?current?.abilities}..remove(BotAbility.proactive);
+    if (edited(
+      _monitorsAgentActivity,
+      initial?.can(BotAbility.proactive),
+      current?.can(BotAbility.proactive),
+    )) {
+      abilities.add(BotAbility.proactive);
+    }
+
     bots.save(
       id: current?.id,
       name: edited(_name.text.trim(), initial?.name, current?.name),
@@ -134,17 +140,8 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
         current?.identity,
       ),
       style: edited(_style.text.trim(), initial?.style, current?.style),
-      abilities: {
-        for (final ability in BotAbility.values)
-          if (edited(
-            _abilities.contains(ability),
-            initial?.can(ability),
-            current?.can(ability),
-          ))
-            ability,
-      },
+      abilities: abilities,
       proactive: current?.proactive ?? const BotProactive(),
-      chatOnly: edited(_chatOnly, initial?.chatOnly, current?.chatOnly),
       writesFirst: edited(
         _writesFirst,
         initial?.writesFirst,
@@ -234,15 +231,6 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
       margin: const EdgeInsets.symmetric(horizontal: 6),
       color: SettingsColors.divider,
     );
-
-    Widget ability(BotAbility ability, String title, String subtitle) =>
-        permission(title, subtitle, _abilities.contains(ability), (enabled) {
-          if (enabled) {
-            _abilities.add(ability);
-          } else {
-            _abilities.remove(ability);
-          }
-        });
 
     final bot = widget.bot;
     final avatar = bot?.avatar;
@@ -337,42 +325,32 @@ class _DesktopBotSettingsState extends State<DesktopBotSettings> {
                 ],
               ),
               BotEditorSection(
-                title: label('Permissions', '权限'),
+                title: label('Tool access', '工具权限'),
+                children: [
+                  Text(
+                    label(
+                      'Private chats and Bot groups have full access to files, '
+                          'shell commands, the browser, agent sessions, and other BaoCode tools, '
+                          'including your configured MCP tools. Access is limited by BaoCode’s OS permissions.',
+                      '私聊和 Bot 群聊都可以完整使用文件、终端命令、浏览器、智能体会话及其他 BaoCode 工具，'
+                          '包括你配置的 MCP 工具。访问范围受 BaoCode 的操作系统权限约束。',
+                    ),
+                  ),
+                ],
+              ),
+              BotEditorSection(
+                title: label('Messaging', '消息设置'),
                 children: [
                   Column(
                     children: [
                       permission(
-                        label('Chat only', '仅聊天'),
-                        label(
-                          'Disables file changes and shell commands.',
-                          '禁止修改文件和运行命令。',
-                        ),
-                        _chatOnly,
-                        (enabled) => _chatOnly = enabled,
-                      ),
-                      tileDivider(),
-                      ability(
-                        BotAbility.agents,
-                        label('Manage agents', '管理智能体'),
-                        label(
-                          'Can view and control your agent sessions.',
-                          '可以查看和控制你的智能体会话。',
-                        ),
-                      ),
-                      tileDivider(),
-                      ability(
-                        BotAbility.browser,
-                        label('Use the browser', '使用浏览器'),
-                        label('Can interact with your browser.', '可以操作你的浏览器。'),
-                      ),
-                      tileDivider(),
-                      ability(
-                        BotAbility.proactive,
                         label('Monitor agent activity', '关注智能体动态'),
                         label(
                           'Can receive agent updates and notify your linked phone.',
                           '可以接收智能体动态并通知已连接的手机。',
                         ),
+                        _monitorsAgentActivity,
+                        (enabled) => _monitorsAgentActivity = enabled,
                       ),
                       tileDivider(),
                       permission(

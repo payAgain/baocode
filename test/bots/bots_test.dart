@@ -8,7 +8,6 @@ import 'package:baocode/bots/bot_files.dart';
 import 'package:baocode/bots/bot_folders.dart';
 import 'package:baocode/bots/bot_memory.dart';
 import 'package:baocode/bots/bot_pacer.dart';
-import 'package:baocode/bots/bot_permissions.dart';
 import 'package:baocode/bots/bot_prompt.dart';
 import 'package:baocode/bots/bot_tools.dart';
 import 'package:baocode/bots/bot_watch.dart';
@@ -196,36 +195,27 @@ void main() {
       );
     });
 
-    test('what it may do, and may not', () {
-      final told = botAbilities(bot);
-      expect(told, contains('session_list'));
-      expect(told, contains('session_stop'));
-      expect(
-        told,
-        contains('limited to separately authorized project sessions'),
-      );
-      expect(
-        botAbilities(
-          Bot(
-            id: bot.id,
-            name: bot.name,
-            folder: bot.folder,
-            abilities: bot.abilities,
-            chatOnly: true,
+    test('every bot is told it has full tools', () {
+      for (final profile in [
+        bot,
+        const Bot(id: 'q', name: 'Q', folder: '/bots/q', chatOnly: true),
+      ]) {
+        expect(
+          botAbilities(profile),
+          allOf(
+            contains('session_list'),
+            contains('session_stop'),
+            contains('read and edit local files'),
+            contains('run shell commands'),
+            contains('use the browser'),
+            contains('configured MCP tools'),
+            contains('generate_image'),
           ),
-        ),
-        contains('limited to separately authorized project sessions'),
-      );
-      expect(
-        botAbilities(const Bot(id: 'q', name: 'Q', folder: '/bots/q')),
-        contains("You cannot see the user's agents"),
-      );
-      expect(told, contains('You cannot use the browser in this chat.'));
-      // Pictures, every bot's.
-      expect(told, contains('generate_image'));
+        );
+      }
     });
 
-    test('isolated chat workers have no ambient tools', () {
+    test('legacy chat and proactive DM preferences round trip', () {
       Bot bot(Set<BotAbility> abilities, {bool chatOnly = false}) => Bot(
         id: 'b1',
         name: 'Mia',
@@ -233,7 +223,6 @@ void main() {
         abilities: abilities,
         chatOnly: chatOnly,
       );
-      expect(BotPermissions.chatTools, isEmpty);
       // Kept on its card; not said, all of it.
       final card = BotFiles.cardText(bot({}, chatOnly: true));
       expect(card, contains('chat_only: true'));
@@ -355,7 +344,7 @@ void main() {
 
     /// The assistant, told of every agent: the user turned it on.
     Bot toldOfAll() {
-      final assistant = bots.bots.single;
+      final assistant = bots.bots.singleWhere((bot) => bot.assistant);
       return bots.save(
         id: assistant.id,
         name: assistant.name,
@@ -542,7 +531,12 @@ void main() {
     });
 
     test('its agent is told who it is, with all an agent has', () async {
-      final bot = bots.bots.single;
+      final bot = bots.save(
+        name: 'Mia',
+        identity: '',
+        abilities: {},
+        chatOnly: true,
+      );
       bots.threadFor(bot).session.send(const ComposerMessage(text: '在吗'));
       for (var i = 0; i < 50 && launches.isEmpty; i++) {
         await Future<void>.delayed(const Duration(milliseconds: 20));
@@ -550,7 +544,7 @@ void main() {
       final launch = launches.single;
       expect(launch.cwd, bots.runtimeFolder(bot));
       expect(launch.instructions, contains('<bot_rules>'));
-      expect(launch.instructions, contains('小宝'));
+      expect(launch.instructions, contains('Mia'));
       // Its prompt in place of a coding agent's: none of the chat's notes
       // on citing code either.
       expect(launch.ownPrompt, isTrue);
@@ -574,9 +568,10 @@ void main() {
       expect(launch.sdkServers, [ClaudeSdkTools.server]);
       // An agent's tools, but for what would wait on the user at the
       // computer; the user's MCP servers too, as an agent's.
-      expect(launch.tools, BotPermissions.chatTools);
-      expect(launch.arguments, contains('--tools'));
-      expect(launch.arguments, contains('--strict-mcp-config'));
+      expect(launch.tools, isNull);
+      expect(launch.userServers, isTrue);
+      expect(launch.arguments, isNot(contains('--tools')));
+      expect(launch.arguments, isNot(contains('--strict-mcp-config')));
       // Nothing it is made to ask about.
       expect(
         (launch.settings['permissions'] as Map?)?.containsKey('ask'),
@@ -587,7 +582,7 @@ void main() {
     });
 
     test(
-      'a bot is offered its abilities\' tools; a project\'s agent none',
+      'bots get session tools with scoped identity and proactive tools',
       () async {
         final assistant = bots.bots.single;
         final its = await offered(bots.runtimeFolder(assistant));
@@ -609,43 +604,35 @@ void main() {
         // A project's agent: the session tools alone, none of the bots'.
         expect(await offered(app), everyElement(isNot(startsWith('bot_'))));
 
-        // A new one may do nothing until the user says.
         final mia = bots.save(
           name: 'Mia',
           identity: '',
-          abilities: {BotAbility.agents},
+          abilities: {},
+          chatOnly: true,
         );
         final hers = await offered(bots.runtimeFolder(mia));
         expect(
           hers,
-          containsAll(['session_list', 'session_read', 'session_stop']),
+          containsAll([
+            'session_list',
+            'session_read',
+            'session_stop',
+            'bot_remember',
+          ]),
         );
-        expect(hers, contains('bot_remember'));
-        final none = bots.save(name: 'Quiet', identity: '', abilities: {});
-        expect(await offered(bots.runtimeFolder(none)), [
-          'bot_later',
-          'bot_cancel_later',
-          'bot_send_image',
-          'bot_history',
-          'bot_refine',
-          'bot_remember',
-          'bot_send',
-          'bot_my_picture',
-          'bot_user_picture',
-          'bot_edit_me',
-        ]);
-        // The assistant's alone: its contacts looked after.
+        expect(hers, isNot(contains('bot_watch')));
+        expect(hers, isNot(contains('bot_list_bots')));
         expect(
-          await offered(bots.runtimeFolder(mia)),
-          isNot(contains('bot_list_bots')),
+          await offered(bots.runtimeFolder(toldOfAll())),
+          contains('bot_watch'),
         );
-        // Nor called, though named.
+        // Assistant-only tools cannot be called by another bot, even by name.
         final refused = await ClaudeSdkTools.handle({
           'jsonrpc': '2.0',
           'id': 2,
           'method': 'tools/call',
-          'params': {'name': 'session_list', 'arguments': <String, Object?>{}},
-        }, ClaudeSdkCall(cwd: bots.runtimeFolder(none)));
+          'params': {'name': 'bot_list_bots', 'arguments': <String, Object?>{}},
+        }, ClaudeSdkCall(cwd: bots.runtimeFolder(mia)));
         expect((refused['result'] as Map)['isError'], isTrue);
       },
     );
@@ -757,7 +744,7 @@ void main() {
       expect(bots.avatarImage(emoji), isNull);
     });
 
-    test('private workers cannot load ambient image tools', () async {
+    test('private workers can load registered image tools', () async {
       ClaudeSdkTools.register(
         ClaudeSdkTool(
           name: ImageTools.name,
@@ -770,13 +757,10 @@ void main() {
       final assistant = bots.bots.single;
       expect(
         await offered(bots.runtimeFolder(assistant)),
-        isNot(contains(ImageTools.name)),
+        contains(ImageTools.name),
       );
       final mia = bots.save(name: 'Mia', identity: '', abilities: {});
-      expect(
-        await offered(bots.runtimeFolder(mia)),
-        isNot(contains(ImageTools.name)),
-      );
+      expect(await offered(bots.runtimeFolder(mia)), contains(ImageTools.name));
       // No one at the computer to pick the model for it.
       expect(ClaudeSdkTools.asksUser(bots.runtimeFolder(assistant)), isFalse);
       expect(ClaudeSdkTools.asksUser(app), isTrue);
@@ -1122,7 +1106,7 @@ void main() {
       expect(told, contains('Your name: now "包包".'));
       expect(told, contains('Your picture: a new one'));
       expect(told, contains('今天也要开心'));
-      expect(told, contains('You may no longer: browser.'));
+      expect(told, isNot(contains('You may no longer: browser.')));
       expect(note.images, hasLength(1));
       // Nothing changed: nothing told.
       int notes() =>
@@ -1808,7 +1792,8 @@ void main() {
         read(cardPath).replaceFirst('agents: true', 'agents: false'),
       );
       bots.reload();
-      expect(bots.bots.first.can(BotAbility.agents), isFalse);
+      expect(bots.bots.first.abilities.contains(BotAbility.agents), isFalse);
+      expect(bots.bots.first.can(BotAbility.agents), isTrue);
     });
 
     test('every bot changes its own profile: with bot_edit_me, or in its '

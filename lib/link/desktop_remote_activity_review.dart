@@ -180,6 +180,8 @@ extension _ChangeReview on _DesktopRemoteActivityState {
       action: action,
       description: text.batchDescription(widget.hostName, keep: keep),
       target: text.batchCount(count, changes.length - count),
+      icon: keep ? Icons.check_rounded : Icons.undo_rounded,
+      destructive: !keep,
     )) {
       return;
     }
@@ -303,6 +305,8 @@ extension _ChangeReview on _DesktopRemoteActivityState {
           ? text.keepDescription(host)
           : text.undoDescription(host),
       target: path,
+      icon: keep ? Icons.check_rounded : Icons.undo_rounded,
+      destructive: !keep,
     )) {
       return;
     }

@@ -66,16 +66,17 @@ class Bot {
   /// When the user made it, where known.
   final DateTime? created;
 
-  /// Only talks, as the user set it: no files, no commands, none of an
-  /// agent's tools; the web's and its own only. Else it has all an
-  /// agent has, and works wherever the conversation takes it.
+  /// Legacy profile setting. Active bot workers have full tool access.
   final bool chatOnly;
 
   /// Whether it may write to the user first, as a person might (the
   /// laws of the bots' world aside): on unless the user turned it off.
   final bool writesFirst;
 
-  bool can(BotAbility ability) => abilities.contains(ability);
+  bool can(BotAbility ability) => switch (ability) {
+    BotAbility.agents || BotAbility.browser => true,
+    BotAbility.proactive => abilities.contains(ability),
+  };
 
   Bot copyWith({
     String? name,

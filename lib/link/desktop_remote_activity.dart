@@ -24,6 +24,7 @@ import '../theme/workbench_theme.dart' show themeColors;
 import '../workspace/islands.dart' show IslandTab;
 import '../workspace/window_controls.dart';
 import 'desktop_host_chats.dart';
+import 'desktop_remote_dialog.dart';
 import 'desktop_remote_git_client.dart';
 import 'desktop_remote_git_view.dart';
 import 'desktop_remote_media.dart';
@@ -262,6 +263,8 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     required String action,
     required String description,
     required String target,
+    required IconData icon,
+    required bool destructive,
   }) async {
     if (!_current(session) || _confirmation != null) return false;
     final token = _confirmation = Object();
@@ -269,10 +272,12 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
     try {
       final confirmed = await showDialog<bool>(
         context: context,
-        builder: (context) => AlertDialog(
-          scrollable: true,
-          title: Text(action),
-          content: Column(
+        builder: (context) => RemoteActionDialog(
+          icon: icon,
+          title: action,
+          destructive: destructive,
+          body: Column(
+            mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(description),
@@ -283,10 +288,14 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
           actions: [
             TextButton(
               autofocus: true,
+              style: remoteDialogSecondaryButtonStyle(context),
               onPressed: () => Navigator.pop(context, false),
               child: Text(text.cancel),
             ),
-            TextButton(
+            FilledButton(
+              style: destructive
+                  ? remoteDialogDangerButtonStyle(context)
+                  : remoteDialogPrimaryButtonStyle(context),
               onPressed: () => Navigator.pop(context, true),
               child: Text(action),
             ),
@@ -322,6 +331,8 @@ class _DesktopRemoteActivityState extends State<DesktopRemoteActivity> {
           action: text.stop,
           description: text.stopDescription(widget.hostName),
           target: task.description.isEmpty ? id : task.description,
+          icon: Icons.stop_rounded,
+          destructive: true,
         ) ||
         !canStop()) {
       return;

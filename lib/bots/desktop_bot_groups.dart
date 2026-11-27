@@ -4,9 +4,12 @@ import 'package:flutter/services.dart';
 
 import '../chat/chat_models.dart' show ImageAttachment;
 import '../chat/widgets/image_thumbnails.dart';
+import '../chat/widgets/scroll_edge_fade.dart';
 import '../l10n/l10n.dart';
 import '../link/chat_codec.dart';
+import '../settings/pages/settings_widgets.dart' show SettingsColors;
 import '../theme/app_theme.dart';
+import '../theme/workbench_theme.dart' show themeColors;
 import 'bot_group_prompt.dart';
 import 'bot_groups.dart' show BotGroups;
 import 'bots.dart';
@@ -105,43 +108,113 @@ class _DesktopBotGroupsState extends State<DesktopBotGroups> {
             children: [
               _GroupHeader(
                 title: _labels(context, 'Group chats', '群聊'),
+                avatar: const BotAvatarBadge(
+                  label: 'G',
+                  icon: Icons.groups_outlined,
+                  tint: Color(0xFF5E9BFF),
+                  size: 30,
+                ),
                 onBack: widget.onBack,
                 action: IconButton(
                   tooltip: _labels(context, 'New group', '新建群聊'),
+                  style: botToolbarIconButtonStyle(context),
                   onPressed: bots.bots.isEmpty ? null : () => _editGroup(),
-                  icon: const Icon(Icons.group_add_outlined),
+                  icon: const Icon(Icons.group_add_outlined, size: 18),
                 ),
               ),
               Expanded(
                 child: groups.isEmpty
-                    ? Center(
-                        child: Text(
-                          _labels(context, 'No group chats yet', '还没有群聊'),
+                    ? BotEmptyState(
+                        label: 'G',
+                        icon: Icons.groups_outlined,
+                        tint: const Color(0xFF5E9BFF),
+                        title: _labels(context, 'No group chats yet', '还没有群聊'),
+                        description: _labels(
+                          context,
+                          'Create a group to coordinate multiple bots in one shared room.',
+                          '创建群聊，让多个机器人协同完成同一任务。',
                         ),
-                      )
-                    : ListView.builder(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        itemCount: groups.length,
-                        itemBuilder: (context, index) {
-                          final group = groups[index];
-                          final unread = bots.groups.unread(group.id);
-                          return _centered(
-                            ListTile(
-                              key: ValueKey(group.id),
-                              leading: const Icon(Icons.groups_outlined),
-                              title: Text(
-                                group.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
+                        action: bots.bots.isEmpty
+                            ? null
+                            : FilledButton.icon(
+                                style: botEditorButtonStyle(context),
+                                onPressed: () => _editGroup(),
+                                icon: const Icon(Icons.add, size: 16),
+                                label: Text(_labels(context, 'New group', '新建群聊')),
                               ),
-                              subtitle: _memberLine(bots, group),
-                              trailing: unread > 0
-                                  ? Badge(label: Text('$unread'))
-                                  : const Icon(Icons.chevron_right),
-                              onTap: () => setState(() => _selected = group.id),
+                      )
+                    : ListView(
+                        padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+                        children: [
+                          _centered(
+                            Material(
+                              color: SettingsColors.card,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                side: BorderSide(color: SettingsColors.stroke),
+                              ),
+                              clipBehavior: Clip.antiAlias,
+                              child: Column(
+                                children: [
+                                  for (var i = 0; i < groups.length; i++) ...[
+                                    ListTile(
+                                      key: ValueKey(groups[i].id),
+                                      contentPadding:
+                                          const EdgeInsets.symmetric(
+                                            horizontal: 14,
+                                            vertical: 6,
+                                          ),
+                                      hoverColor: SettingsColors.hover,
+                                      leading: BotAvatarBadge(
+                                        label: groups[i].name,
+                                        icon: Icons.groups_outlined,
+                                        size: 38,
+                                      ),
+                                      title: Text(
+                                        groups[i].name,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w600,
+                                          color: SettingsColors.textPrimary,
+                                        ),
+                                      ),
+                                      subtitle: _memberLine(bots, groups[i]),
+                                      trailing: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          if (bots.groups.unread(groups[i].id)
+                                              case final unread when unread > 0) ...[
+                                            Badge(label: Text('$unread')),
+                                            const SizedBox(width: 8),
+                                          ],
+                                          Icon(
+                                            Icons.chevron_right,
+                                            size: 17,
+                                            color: SettingsColors.textQuaternary,
+                                          ),
+                                        ],
+                                      ),
+                                      onTap: () => setState(
+                                        () => _selected = groups[i].id,
+                                      ),
+                                    ),
+                                    if (i < groups.length - 1)
+                                      Container(
+                                        height: 1,
+                                        margin:
+                                            const EdgeInsetsDirectional.only(
+                                              start: 66,
+                                            ),
+                                        color: SettingsColors.divider,
+                                      ),
+                                  ],
+                                ],
+                              ),
                             ),
-                          );
-                        },
+                          ),
+                        ],
                       ),
               ),
             ],
@@ -172,12 +245,14 @@ class _GroupChat extends StatefulWidget {
 
 class _GroupChatState extends State<_GroupChat> {
   final _input = TextEditingController();
+  final _focus = FocusNode();
   final _scroll = ScrollController();
   bool _seenScheduled = false;
 
   @override
   void dispose() {
     _input.dispose();
+    _focus.dispose();
     _scroll.dispose();
     super.dispose();
   }
@@ -197,28 +272,90 @@ class _GroupChatState extends State<_GroupChat> {
     final group = widget.group;
     final choice = await showDialog<({String? id})>(
       context: context,
-      builder: (context) => SimpleDialog(
-        title: Text(_labels(context, 'Change default lead', '更换默认主理人')),
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
-            child: Text(
-              _labels(
-                context,
-                'An @mention takes priority. The current turn continues.',
-                '@提及优先。当前轮次会继续。',
-              ),
-            ),
+      builder: (context) => BotModernDialog(
+        width: 400,
+        icon: Icons.swap_horiz,
+        title: _labels(context, 'Change default lead', '更换默认主理人'),
+        subtitle: _labels(
+          context,
+          'An @mention takes priority. The current turn continues.',
+          '@提及优先。当前轮次会继续。',
+        ),
+        body: Material(
+          color: SettingsColors.card,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: BorderSide(color: SettingsColors.stroke),
           ),
-          for (final id in <String?>[null, ...group.members])
-            SimpleDialogOption(
-              onPressed: () => Navigator.pop(context, (id: id)),
-              child: Text(
-                id == null
-                    ? _labels(context, 'No default lead', '不设默认主理人')
-                    : _memberName(bots, group, id),
-              ),
-            ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final (i, id)
+                  in <String?>[null, ...group.members].indexed) ...[
+                if (i > 0) Container(height: 1, color: SettingsColors.divider),
+                InkWell(
+                  hoverColor: SettingsColors.hover,
+                  onTap: () => Navigator.pop(context, (id: id)),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
+                    child: Row(
+                      children: [
+                        if (id == null)
+                          const BotAvatarBadge(
+                            label: '*',
+                            icon: Icons.auto_awesome_outlined,
+                            size: 30,
+                          )
+                        else
+                          BotAvatarBadge(
+                            label: _memberName(bots, group, id),
+                            size: 30,
+                          ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            id == null
+                                ? _labels(
+                                    context,
+                                    'No default lead',
+                                    '不设默认主理人',
+                                  )
+                                : _memberName(bots, group, id),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 13.5,
+                              fontWeight: group.lead == id
+                                  ? FontWeight.w600
+                                  : FontWeight.w500,
+                              color: SettingsColors.textPrimary,
+                            ),
+                          ),
+                        ),
+                        if (group.lead == id)
+                          Icon(
+                            Icons.check_rounded,
+                            size: 18,
+                            color: AppColors.accent,
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            style: botEditorTonalButtonStyle(context),
+            onPressed: () => Navigator.pop(context),
+            child: Text(context.l10n.commonCancel),
+          ),
         ],
       ),
     );
@@ -272,64 +409,128 @@ class _GroupChatState extends State<_GroupChat> {
         : relay.waiting
         ? _labels(context, 'Waiting for: $handler', '等待 $handler')
         : _labels(context, 'Handling: $handler', '正在处理：$handler');
+    final statusTone = handler == null
+        ? BotEditorTone.neutral
+        : relay.waiting
+        ? BotEditorTone.warning
+        : BotEditorTone.success;
+    final statusDot = handler == null
+        ? SettingsColors.textQuaternary
+        : relay.waiting
+        ? AppColors.caution
+        : AppColors.added;
+    final buttonBg = themeColors['button.background'];
+    final buttonFg = themeColors['button.foreground'];
     _markRead();
     return Column(
       children: [
         _GroupHeader(
           title: group.name,
-          subtitle: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          avatar: BotAvatarBadge(
+            label: group.name,
+            icon: Icons.groups_outlined,
+            size: 32,
+          ),
+          titleBadge: Semantics(
+            liveRegion: true,
+            child: BotMetaPill(
+              label: status,
+              dotColor: statusDot,
+              tone: statusTone,
+            ),
+          ),
+          subtitle: Wrap(
+            spacing: 6,
+            runSpacing: 2,
+            crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               ?_memberLine(bots, group),
+              if (group.members.isNotEmpty)
+                Text(
+                  '·',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: SettingsColors.textQuaternary,
+                  ),
+                ),
               _headerLine(
                 _labels(context, 'Default lead: $leadName', '默认主理人：$leadName'),
               ),
-              Semantics(liveRegion: true, child: _headerLine(status)),
             ],
           ),
           onBack: widget.onBack,
           action: Row(
             mainAxisSize: MainAxisSize.min,
+            spacing: 4,
             children: [
               IconButton(
                 tooltip: _labels(context, 'Change default lead', '更换默认主理人'),
+                style: botToolbarIconButtonStyle(context),
                 onPressed: group.members.isEmpty ? null : _changeLead,
-                icon: const Icon(Icons.swap_horiz),
+                icon: const Icon(Icons.swap_horiz, size: 17),
               ),
               IconButton(
                 tooltip: _labels(context, 'Edit group', '编辑群聊'),
+                style: botToolbarIconButtonStyle(context),
                 onPressed: widget.onEdit,
-                icon: const Icon(Icons.edit_outlined),
+                icon: const Icon(Icons.edit_outlined, size: 17),
               ),
             ],
           ),
         ),
         Expanded(
           child: messages.isEmpty
-              ? Center(
-                  child: Text(_labels(context, 'No messages yet', '还没有消息')),
+              ? BotEmptyState(
+                  label: group.name,
+                  icon: Icons.groups_outlined,
+                  title: _labels(context, 'No messages yet', '还没有消息'),
+                  description: _labels(
+                    context,
+                    'Mention @bot or send a message to kick off a group turn.',
+                    '发送消息或使用 @提及 指定机器人加入对话。',
+                  ),
                 )
               : SelectionArea(
-                  child: ListView.builder(
-                    controller: _scroll,
-                    reverse: true,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    itemCount: messages.length,
-                    itemBuilder: (context, index) => _centered(
-                      Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 18,
-                          vertical: 4,
-                        ),
-                        child: _GroupMessage(
-                          bots: bots,
-                          group: group,
-                          message: messages[messages.length - index - 1],
-                          lookupQuote: (seq) => messages
-                              .where((item) => item.seq == seq && !item.notice)
-                              .firstOrNull,
-                        ),
-                      ),
+                  child: ScrollEdgeFade(
+                    child: ListView.builder(
+                      controller: _scroll,
+                      reverse: true,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      itemCount: messages.length,
+                      itemBuilder: (context, index) {
+                        final i = messages.length - index - 1;
+                        final message = messages[i];
+                        final prev = i > 0 ? messages[i - 1] : null;
+                        final grouped = shouldGroupBotMessage(
+                          sameSender:
+                              prev != null &&
+                              !prev.notice &&
+                              !message.notice &&
+                              prev.mine == message.mine &&
+                              (message.mine || prev.from == message.from),
+                          previousAt: prev == null ||
+                                  prev.at.millisecondsSinceEpoch == 0
+                              ? null
+                              : prev.at,
+                          currentAt: message.at.millisecondsSinceEpoch == 0
+                              ? null
+                              : message.at,
+                        );
+                        return _centered(
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 18),
+                            child: _GroupMessage(
+                              bots: bots,
+                              group: group,
+                              message: message,
+                              grouped: grouped,
+                              lookupQuote: (seq) => messages
+                                  .where((item) => item.seq == seq && !item.notice)
+                                  .firstOrNull,
+                            ),
+                          ),
+                        );
+                      },
                     ),
                   ),
                 ),
@@ -337,45 +538,86 @@ class _GroupChatState extends State<_GroupChat> {
         _centered(
           Padding(
             padding: const EdgeInsets.fromLTRB(18, 4, 18, 16),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: AppColors.bubbleFill,
-                border: Border.all(color: AppColors.bubbleBorder()),
-                borderRadius: BorderRadius.circular(12),
+            child: ListenableBuilder(
+              listenable: _focus,
+              builder: (context, child) => AnimatedContainer(
+                duration: const Duration(milliseconds: 140),
+                decoration: BoxDecoration(
+                  color: AppColors.bubbleFill,
+                  border: Border.all(
+                    color: _focus.hasFocus
+                        ? AppColors.accent.withValues(alpha: 0.72)
+                        : AppColors.bubbleBorder(),
+                  ),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: child,
               ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Expanded(
-                    child: CallbackShortcuts(
-                      bindings: {
-                        const SingleActivator(LogicalKeyboardKey.enter): () {
-                          if (_input.value.composing.isCollapsed) _send();
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(4, 2, 6, 6),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Expanded(
+                      child: CallbackShortcuts(
+                        bindings: {
+                          const SingleActivator(LogicalKeyboardKey.enter): () {
+                            if (_input.value.composing.isCollapsed) _send();
+                          },
                         },
-                      },
-                      child: TextField(
-                        controller: _input,
-                        minLines: 1,
-                        maxLines: 5,
-                        style: TextStyle(color: AppColors.text),
-                        decoration: InputDecoration(
-                          hintText: context.l10n.editorStartTyping,
-                          border: InputBorder.none,
-                          contentPadding: const EdgeInsets.all(12),
+                        child: TextField(
+                          controller: _input,
+                          focusNode: _focus,
+                          minLines: 1,
+                          maxLines: 5,
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            color: SettingsColors.textPrimary,
+                          ),
+                          decoration: InputDecoration(
+                            hintText: context.l10n.editorStartTyping,
+                            hintStyle: TextStyle(
+                              fontSize: 13.5,
+                              color: SettingsColors.textQuaternary,
+                            ),
+                            border: InputBorder.none,
+                            contentPadding: const EdgeInsets.fromLTRB(
+                              12,
+                              10,
+                              8,
+                              6,
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  ValueListenableBuilder(
-                    valueListenable: _input,
-                    builder: (context, value, _) => IconButton(
-                      tooltip: context.l10n.cmdChatSubmit,
-                      color: AppColors.accent,
-                      onPressed: value.text.trim().isEmpty ? null : _send,
-                      icon: const Icon(Icons.arrow_upward),
+                    ValueListenableBuilder(
+                      valueListenable: _input,
+                      builder: (context, value, _) {
+                        final canSend = value.text.trim().isNotEmpty;
+                        return IconButton(
+                          tooltip: context.l10n.cmdChatSubmit,
+                          style: IconButton.styleFrom(
+                            minimumSize: const Size.square(32),
+                            fixedSize: const Size.square(32),
+                            padding: EdgeInsets.zero,
+                            backgroundColor: canSend
+                                ? buttonBg
+                                : SettingsColors.hover,
+                            foregroundColor: canSend
+                                ? buttonFg
+                                : SettingsColors.textQuaternary,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(9),
+                            ),
+                          ),
+                          onPressed: canSend ? _send : null,
+                          icon: const Icon(Icons.arrow_upward, size: 17),
+                        );
+                      },
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -391,11 +633,13 @@ class _GroupMessage extends StatelessWidget {
     required this.group,
     required this.message,
     required this.lookupQuote,
+    this.grouped = false,
   });
   final Bots bots;
   final BotGroup group;
   final LinkGroupMessage message;
   final LinkGroupMessage? Function(int) lookupQuote;
+  final bool grouped;
 
   String _sender(BuildContext context, LinkGroupMessage item) => item.mine
       ? _labels(context, 'You', '你')
@@ -419,13 +663,28 @@ class _GroupMessage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final message = this.message;
-    final styles = Theme.of(context).textTheme;
     if (message.notice) {
-      return Center(
-        child: Text(
-          message.text,
-          textAlign: TextAlign.center,
-          style: styles.bodySmall?.copyWith(color: AppColors.textMuted),
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Center(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: SettingsColors.card,
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(color: SettingsColors.stroke),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              child: Text(
+                message.text,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: SettingsColors.textSecondary,
+                ),
+              ),
+            ),
+          ),
         ),
       );
     }
@@ -464,6 +723,7 @@ class _GroupMessage extends StatelessWidget {
           ? null
           : DesktopBotMessageAvatar(sender: name, emoji: avatar),
       sentAt: message.at.millisecondsSinceEpoch == 0 ? null : message.at,
+      grouped: grouped,
       quote: parts.isEmpty ? _quote(context, message.ref) : null,
       content: [
         for (final (:tag, :text, :ref) in parts) ...[
@@ -519,65 +779,71 @@ class _GroupEditorState extends State<_GroupEditor> {
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: widget.bots,
-    builder: (context, _) => AlertDialog(
-      title: Text(
-        _editing
-            ? _labels(context, 'Edit group', '编辑群聊')
-            : _labels(context, 'New group', '新建群聊'),
-      ),
-      scrollable: true,
-      content: SizedBox(
-        width: 360,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            TextField(
-              controller: _name,
-              decoration: botEditorInput(_labels(context, 'Group name', '群名称')),
+    builder: (context, _) => BotModernDialog(
+      width: 440,
+      icon: Icons.groups_outlined,
+      title: _editing
+          ? _labels(context, 'Edit group', '编辑群聊')
+          : _labels(context, 'New group', '新建群聊'),
+      body: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        spacing: 12,
+        children: [
+          TextField(
+            controller: _name,
+            style: TextStyle(
+              fontSize: 13.5,
+              color: SettingsColors.textPrimary,
             ),
-            const SizedBox(height: 16),
-            Text(_labels(context, 'Members', '群成员')),
-            for (final bot in widget.bots.bots)
-              BotEditorMemberTile(
-                key: ValueKey(bot.id),
-                member: (id: bot.id, name: bot.name),
-                selected: _members.contains(bot.id),
-                onChanged: (selected) => setState(() {
-                  if (selected == true) {
-                    _members.add(bot.id);
-                  } else {
-                    _members.remove(bot.id);
-                    if (_lead == bot.id) _lead = null;
-                  }
-                }),
+            decoration: botEditorInput(_labels(context, 'Group name', '群名称')),
+          ),
+          BotEditorSection(
+            title: _labels(context, 'Members', '群成员'),
+            children: [
+              for (final bot in widget.bots.bots)
+                BotEditorMemberTile(
+                  key: ValueKey(bot.id),
+                  member: (id: bot.id, name: bot.name),
+                  selected: _members.contains(bot.id),
+                  onChanged: (selected) => setState(() {
+                    if (selected == true) {
+                      _members.add(bot.id);
+                    } else {
+                      _members.remove(bot.id);
+                      if (_lead == bot.id) _lead = null;
+                    }
+                  }),
+                ),
+              const SizedBox(height: 4),
+              BotEditorLeadPicker(
+                pickerKey: const ValueKey('group-lead-picker'),
+                label: _labels(context, 'Default lead', '默认主理人'),
+                defaultLabel: _labels(context, 'No default lead', '不设默认主理人'),
+                members: [
+                  for (final bot in widget.bots.bots)
+                    if (_members.contains(bot.id)) (id: bot.id, name: bot.name),
+                ],
+                lead: _selectedLead,
+                onChanged: _members.any((id) => widget.bots.byId(id) != null)
+                    ? (choice) => setState(() {
+                        _lead = choice;
+                        _clearLead = _lead == null;
+                      })
+                    : null,
               ),
-            const SizedBox(height: 12),
-            BotEditorLeadPicker(
-              pickerKey: const ValueKey('group-lead-picker'),
-              label: _labels(context, 'Default lead', '默认主理人'),
-              defaultLabel: _labels(context, 'No default lead', '不设默认主理人'),
-              members: [
-                for (final bot in widget.bots.bots)
-                  if (_members.contains(bot.id)) (id: bot.id, name: bot.name),
-              ],
-              lead: _selectedLead,
-              onChanged: _members.any((id) => widget.bots.byId(id) != null)
-                  ? (choice) => setState(() {
-                      _lead = choice;
-                      _clearLead = _lead == null;
-                    })
-                  : null,
-            ),
-          ],
-        ),
+            ],
+          ),
+        ],
       ),
       actions: [
         TextButton(
+          style: botEditorTonalButtonStyle(context),
           onPressed: () => Navigator.pop(context),
           child: Text(context.l10n.commonCancel),
         ),
         FilledButton(
+          style: botEditorButtonStyle(context),
           onPressed:
               _editing || _members.any((id) => widget.bots.byId(id) != null)
               ? () => Navigator.pop(context, (
@@ -601,11 +867,15 @@ class _GroupEditorState extends State<_GroupEditor> {
 class _GroupHeader extends StatelessWidget {
   const _GroupHeader({
     required this.title,
+    this.avatar,
+    this.titleBadge,
     this.subtitle,
     required this.onBack,
     this.action,
   });
   final String title;
+  final Widget? avatar;
+  final Widget? titleBadge;
   final Widget? subtitle;
   final VoidCallback onBack;
   final Widget? action;
@@ -614,37 +884,58 @@ class _GroupHeader extends StatelessWidget {
   Widget build(BuildContext context) => Column(
     children: [
       Padding(
-        padding: const EdgeInsets.fromLTRB(6, 4, 18, 4),
+        padding: const EdgeInsets.fromLTRB(10, 8, 16, 8),
         child: Row(
           children: [
             IconButton(
               tooltip: context.l10n.chatBack,
+              style: botToolbarIconButtonStyle(context),
               onPressed: onBack,
               icon: const BackButtonIcon(),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 8),
+            if (avatar case final badge?) ...[badge, const SizedBox(width: 10)],
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: AppColors.textPrimary,
-                      fontWeight: FontWeight.w600,
-                    ),
+                  Row(
+                    children: [
+                      Flexible(
+                        flex: 2,
+                        child: Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: SettingsColors.textPrimary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      if (titleBadge case final pill?) ...[
+                        const SizedBox(width: 8),
+                        Flexible(fit: FlexFit.loose, child: pill),
+                      ],
+                    ],
                   ),
-                  ?subtitle,
+                  if (subtitle case final sub?) ...[
+                    const SizedBox(height: 2),
+                    sub,
+                  ],
                 ],
               ),
             ),
-            ?action,
+            if (action case final trailing?) ...[
+              const SizedBox(width: 8),
+              trailing,
+            ],
           ],
         ),
       ),
-      Divider(height: 1, color: AppColors.partBorder),
+      Container(height: 1, color: SettingsColors.divider),
     ],
   );
 }
@@ -663,7 +954,7 @@ Widget _headerLine(String text) => Text(
   text,
   maxLines: 1,
   overflow: TextOverflow.ellipsis,
-  style: TextStyle(fontSize: 12, color: AppColors.textMuted),
+  style: TextStyle(fontSize: 12, color: SettingsColors.textSecondary),
 );
 
 Widget _centered(Widget child) => Align(
